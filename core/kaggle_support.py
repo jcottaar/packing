@@ -185,3 +185,93 @@ def clear_gpu():
     cache.clear()
     cp.get_default_memory_pool().free_all_blocks()
     
+'''
+The trees!
+'''
+
+from decimal import Decimal, getcontext
+from matplotlib.patches import Rectangle
+from shapely import affinity, touches
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+from shapely.strtree import STRtree
+
+scale_factor = 1
+def create_tree(center_x, center_y, angle):
+    """Initializes the Christmas tree with a specific position and rotation."""
+    trunk_w = Decimal('0.15')
+    trunk_h = Decimal('0.2')
+    base_w = Decimal('0.7')
+    mid_w = Decimal('0.4')
+    top_w = Decimal('0.25')
+    tip_y = Decimal('0.8')
+    tier_1_y = Decimal('0.5')
+    tier_2_y = Decimal('0.25')
+    base_y = Decimal('0.0')
+    trunk_bottom_y = -trunk_h
+
+    initial_polygon = Polygon(
+        [
+            # Start at Tip
+            (Decimal('0.0') * scale_factor, tip_y * scale_factor),
+            # Right side - Top Tier
+            (top_w / Decimal('2') * scale_factor, tier_1_y * scale_factor),
+            (top_w / Decimal('4') * scale_factor, tier_1_y * scale_factor),
+            # Right side - Middle Tier
+            (mid_w / Decimal('2') * scale_factor, tier_2_y * scale_factor),
+            (mid_w / Decimal('4') * scale_factor, tier_2_y * scale_factor),
+            # Right side - Bottom Tier
+            (base_w / Decimal('2') * scale_factor, base_y * scale_factor),
+            # Right Trunk
+            (trunk_w / Decimal('2') * scale_factor, base_y * scale_factor),
+            (trunk_w / Decimal('2') * scale_factor, trunk_bottom_y * scale_factor),
+            # Left Trunk
+            (-(trunk_w / Decimal('2')) * scale_factor, trunk_bottom_y * scale_factor),
+            (-(trunk_w / Decimal('2')) * scale_factor, base_y * scale_factor),
+            # Left side - Bottom Tier
+            (-(base_w / Decimal('2')) * scale_factor, base_y * scale_factor),
+            # Left side - Middle Tier
+            (-(mid_w / Decimal('4')) * scale_factor, tier_2_y * scale_factor),
+            (-(mid_w / Decimal('2')) * scale_factor, tier_2_y * scale_factor),
+            # Left side - Top Tier
+            (-(top_w / Decimal('4')) * scale_factor, tier_1_y * scale_factor),
+            (-(top_w / Decimal('2')) * scale_factor, tier_1_y * scale_factor),
+        ]
+    )
+    rotated = affinity.rotate(initial_polygon, angle, origin=(0, 0))
+    polygon = affinity.translate(rotated,
+                                      xoff=(center_x * scale_factor),
+                                      yoff=(center_y * scale_factor))
+    return polygon
+
+@dataclass
+class TreeList(BaseClass):
+    x: np.ndarray = field(default=None)
+    y: np.ndarray = field(default=None)
+    theta: np.ndarray = field(default=None)
+
+    # dynamic dependent property N (updates automatically)
+    @property
+    def N(self) -> int:
+        return 0 if self.x is None else len(self.x)
+
+    def _check_constraints(self):
+
+        # If x is None, require y and theta to be None as well
+        if self.x is None:
+            if (self.y is not None) or (self.theta is not None):
+                raise Exception('TreeList: inconsistent lengths (x is None but y/theta not None)')
+            return
+
+        # x is not None -> enforce lengths match N
+        N = self.N
+        if not (len(self.y) == N and len(self.theta) == N):
+            raise Exception('TreeList: inconsistent lengths')
+    
+    def get_trees(self):
+        ''' Returns list of shapely Polygons for each tree '''
+        trees = []
+        for i in range(self.N):
+            tree = create_tree(self.x[i], self.y[i], self.theta[i]*360/(2*np.pi))
+            trees.append(tree)
+        return trees
