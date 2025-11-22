@@ -20,7 +20,7 @@ def test_costs():
 
     tree_list = pack_basics.place_random(10, 2.5)
     #tree_list = pack_basics.place_random(3, 0.1)
-    #tree_list.xyt = [[1.,1.,1.],[1.,2.,2.],[1.,2,3.]]
+    #tree_list.xyt = [[5.,5.,5.],[1.,2,3.],[1.,2.,3.01]]
     pack_vis.visualize_tree_list(tree_list)
 
     for c in costs_to_test:

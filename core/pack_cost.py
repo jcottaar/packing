@@ -8,6 +8,7 @@ from typeguard import typechecked
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 import shapely
+import pack_cuda
 
 @dataclass    
 class CollisionCost(kgs.BaseClass):
@@ -38,9 +39,12 @@ class CollisionCost(kgs.BaseClass):
         else:
             return self.scaling * total_cost, None
         
+    @kgs.profile_each_line
     def compute_cost(self, xyt:cp.ndarray, include_gradients:bool):
         # Subclass can implement faster version
-        return self.compute_cost_ref(xyt, include_gradients)
+        cost,grad =  self.compute_cost_ref(xyt, include_gradients)
+        cost = pack_cuda.overlap_list_total(xyt)
+        return cost,grad
         
 class CollisionCostDummy(CollisionCost):
     # Dummy: always zero cost
@@ -95,6 +99,7 @@ class PackingCost(kgs.BaseClass):
         else:
             return total_cost, None
         
+    
     def compute_total_cost(self, xyt:cp.ndarray, include_gradients:bool=False):
         cost_collision, grad_collision = self.collision_cost.compute_cost(xyt, include_gradients)
         #cost_edge, grad_edge = self.edge_cost.compute_cost_ref(xyt, include_gradients=include_gradients)

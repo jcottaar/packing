@@ -243,6 +243,104 @@ __device__ double overlap_two_trees(
     return total;
 }
 
+// Compute sum of overlap areas between a reference tree `ref` and a list
+// of other trees provided as a flattened 3xN array (row-major: row0=x, row1=y, row2=theta).
+// This runs entirely on a single thread and is suitable for device-side
+// aggregation when N is small or when you explicitly want one thread to
+// compute the sum.
+__device__ double overlap_ref_with_list(
+    const double3 ref,
+    const double* __restrict__ xyt_3xN, // flattened row-major: 3 rows, N cols
+    const int n,
+    const double* __restrict__ piece_xy,
+    const int* __restrict__ piece_nverts,
+    const int num_pieces)
+{
+    double sum = 0.0;
+
+    const double* row_x = xyt_3xN + 0 * n;
+    const double* row_y = xyt_3xN + 1 * n;
+    const double* row_t = xyt_3xN + 2 * n;
+
+    for (int i = 0; i < n; ++i) {
+        double3 other;
+        other.x = row_x[i];
+        other.y = row_y[i];
+        other.z = row_t[i];
+
+        if (!(other.x == ref.x && other.y == ref.y && other.z == ref.z)) {
+            sum += overlap_two_trees(ref, other, piece_xy, piece_nverts, num_pieces);
+        }
+    }
+
+    return sum;
+}
+
+// Sum overlaps for each tree in the provided list against the entire list.
+// This does NOT exploit symmetry; each unordered pair will be counted twice
+// (ref vs other, and other vs ref).
+__device__ void overlap_list_total(
+    const double* __restrict__ xyt_3xN,
+    const int n,
+    const double* __restrict__ piece_xy,
+    const int* __restrict__ piece_nverts,
+    const int num_pieces,
+    double* __restrict__ out_total)
+{
+    // Single-block version: assume gridDim.x == 1 and no cross-block striding.
+    // Each thread computes at most one reference index (its threadIdx.x) and
+    // we reduce across the block into shared memory, then thread 0 writes the
+    // final total to out_total[0]. This avoids atomics.
+    int tid = threadIdx.x;
+    const double* row_x = xyt_3xN + 0 * n;
+    const double* row_y = xyt_3xN + 1 * n;
+    const double* row_t = xyt_3xN + 2 * n;
+
+    double local_sum = 0.0;
+
+    if (tid < n) {
+        double3 ref;
+        ref.x = row_x[tid];
+        ref.y = row_y[tid];
+        ref.z = row_t[tid];
+
+        local_sum = overlap_ref_with_list(ref, xyt_3xN, n, piece_xy, piece_nverts, num_pieces);
+    }
+
+    // Shared-memory reduction (assumes blockDim.x <= 1024)
+    __shared__ double sdata[1024];
+    sdata[tid] = local_sum;
+    __syncthreads();
+
+    // Reduce only the first n elements (not blockDim.x)
+    for (int stride = 1; stride < n; stride *= 2) {
+        int index = 2 * stride * tid;
+        if (index + stride < n) {
+            sdata[index] += sdata[index + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        out_total[0] = sdata[0]/2; // each pair counted twice
+    }
+    
+}
+
+// Kernel: one thread per reference element computes sum(ref vs all others)
+__global__ void overlap_list_total_kernel(
+    const double* __restrict__ xyt_3xN, // flattened row-major: 3 rows, N cols
+    const int n,
+    const double* __restrict__ piece_xy,
+    const int* __restrict__ piece_nverts,
+    const int num_pieces,
+    double* __restrict__ out_total)
+{
+    // Delegate to the threaded device helper which atomically accumulates
+    // per-thread partial sums into out_total[0].
+    overlap_list_total(xyt_3xN, n, piece_xy, piece_nverts, num_pieces, out_total);
+}
+
 __global__ void overlap_two_trees_kernel(
     const double tx1, const double ty1, const double th1,
     const double tx2, const double ty2, const double th2,
@@ -276,6 +374,7 @@ _num_pieces: int = 0
 # Compiled CUDA module and kernel
 _raw_module: cp.RawModule | None = None
 _overlap_two_trees_kernel: cp.RawKernel | None = None
+_overlap_list_total_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
@@ -358,7 +457,7 @@ def _ensure_initialized() -> None:
     of public API functions.
     """
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module, _overlap_two_trees_kernel
+    global _num_pieces, _raw_module, _overlap_two_trees_kernel, _overlap_list_total_kernel
 
     if _initialized:
         return
@@ -372,6 +471,7 @@ def _ensure_initialized() -> None:
 
     _raw_module = cp.RawModule(code=_CUDA_SRC, options=("--std=c++11",))
     _overlap_two_trees_kernel = _raw_module.get_function("overlap_two_trees_kernel")
+    _overlap_list_total_kernel = _raw_module.get_function("overlap_list_total_kernel")
 
     _initialized = True
 
@@ -421,4 +521,55 @@ def overlap_two_trees(xyt1, xyt2) -> cp.ndarray:
     )
 
     return areas_arr[0]
+
+
+def overlap_list_total(xyt) -> float:
+    """Compute total (non-symmetric) overlap sum for a list of poses.
+
+    Parameters
+    ----------
+    xyt : array-like, shape (N,3)
+        List of poses (x, y, theta).
+
+    Returns
+    -------
+    total : float
+        Sum over all reference elements of sum(overlap(ref, other)). Each
+        unordered pair is counted twice (ref vs other, and other vs ref).
+    """
+    _ensure_initialized()
+
+    xyt_arr = cp.asarray(xyt, dtype=cp.float64)
+    if xyt_arr.ndim != 2 or xyt_arr.shape[1] != 3:
+        raise ValueError("xyt must be shape (N,3)")
+
+    n = int(xyt_arr.shape[0])
+
+    # Flatten to 3xN row-major so rows are x,y,theta
+    xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
+
+    # Allocate a single-element output to hold the accumulated total
+    out_total = cp.zeros(1, dtype=cp.float64)
+
+    threads_per_block = n
+    blocks = 1
+
+    _overlap_list_total_kernel(
+        (blocks,),
+        (threads_per_block,),
+        (
+            xyt_3xN,
+            np.int32(n),
+            _piece_xy_d,
+            _piece_nverts_d,
+            np.int32(_num_pieces),
+            out_total,
+        ),
+    )
+
+    # Ensure kernel finished and results are visible
+    cp.cuda.Stream.null.synchronize()
+
+    # Return accumulated total
+    return float(out_total[0])
 
