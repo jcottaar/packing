@@ -189,59 +189,66 @@ def clear_gpu():
 The trees!
 '''
 
-from decimal import Decimal, getcontext
 from matplotlib.patches import Rectangle
 from shapely import affinity, touches
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
+from typeguard import typechecked
 
-scale_factor = 1
-def create_tree(center_x, center_y, angle):
+scale_factor = 1.
+
+@typechecked
+def create_tree(center_x:float, center_y:float, angle:float):
     """Initializes the Christmas tree with a specific position and rotation."""
-    trunk_w = Decimal('0.15')
-    trunk_h = Decimal('0.2')
-    base_w = Decimal('0.7')
-    mid_w = Decimal('0.4')
-    top_w = Decimal('0.25')
-    tip_y = Decimal('0.8')
-    tier_1_y = Decimal('0.5')
-    tier_2_y = Decimal('0.25')
-    base_y = Decimal('0.0')
+    center_x = float(center_x)
+    center_y = float(center_y)
+    angle = float(angle)
+    
+    trunk_w = 0.15
+    trunk_h = 0.2
+    base_w = 0.7
+    mid_w = 0.4
+    top_w = 0.25
+    tip_y = 0.8
+    tier_1_y = 0.5
+    tier_2_y = 0.25
+    base_y = 0.0
     trunk_bottom_y = -trunk_h
 
+    sf = scale_factor
     initial_polygon = Polygon(
         [
             # Start at Tip
-            (Decimal('0.0') * scale_factor, tip_y * scale_factor),
+            (0.0 * sf, tip_y * sf),
             # Right side - Top Tier
-            (top_w / Decimal('2') * scale_factor, tier_1_y * scale_factor),
-            (top_w / Decimal('4') * scale_factor, tier_1_y * scale_factor),
+            (top_w / 2 * sf, tier_1_y * sf),
+            (top_w / 4 * sf, tier_1_y * sf),
             # Right side - Middle Tier
-            (mid_w / Decimal('2') * scale_factor, tier_2_y * scale_factor),
-            (mid_w / Decimal('4') * scale_factor, tier_2_y * scale_factor),
+            (mid_w / 2 * sf, tier_2_y * sf),
+            (mid_w / 4 * sf, tier_2_y * sf),
             # Right side - Bottom Tier
-            (base_w / Decimal('2') * scale_factor, base_y * scale_factor),
+            (base_w / 2 * sf, base_y * sf),
             # Right Trunk
-            (trunk_w / Decimal('2') * scale_factor, base_y * scale_factor),
-            (trunk_w / Decimal('2') * scale_factor, trunk_bottom_y * scale_factor),
+            (trunk_w / 2 * sf, base_y * sf),
+            (trunk_w / 2 * sf, trunk_bottom_y * sf),
             # Left Trunk
-            (-(trunk_w / Decimal('2')) * scale_factor, trunk_bottom_y * scale_factor),
-            (-(trunk_w / Decimal('2')) * scale_factor, base_y * scale_factor),
+            (-(trunk_w / 2) * sf, trunk_bottom_y * sf),
+            (-(trunk_w / 2) * sf, base_y * sf),
             # Left side - Bottom Tier
-            (-(base_w / Decimal('2')) * scale_factor, base_y * scale_factor),
+            (-(base_w / 2) * sf, base_y * sf),
             # Left side - Middle Tier
-            (-(mid_w / Decimal('4')) * scale_factor, tier_2_y * scale_factor),
-            (-(mid_w / Decimal('2')) * scale_factor, tier_2_y * scale_factor),
+            (-(mid_w / 4) * sf, tier_2_y * sf),
+            (-(mid_w / 2) * sf, tier_2_y * sf),
             # Left side - Top Tier
-            (-(top_w / Decimal('4')) * scale_factor, tier_1_y * scale_factor),
-            (-(top_w / Decimal('2')) * scale_factor, tier_1_y * scale_factor),
+            (-(top_w / 4) * sf, tier_1_y * sf),
+            (-(top_w / 2) * sf, tier_1_y * sf),
         ]
     )
     rotated = affinity.rotate(initial_polygon, angle, origin=(0, 0))
     polygon = affinity.translate(rotated,
-                                      xoff=(center_x * scale_factor),
-                                      yoff=(center_y * scale_factor))
+                                 xoff=center_x * sf,
+                                 yoff=center_y * sf)
     return polygon
 
 @dataclass
@@ -254,6 +261,23 @@ class TreeList(BaseClass):
     @property
     def N(self) -> int:
         return 0 if self.x is None else len(self.x)
+
+    @property
+    def xyt(self) -> np.ndarray:
+        """Return an (N,3) array with columns [x, y, theta]. Assumes x,y,theta are not None."""
+        return np.column_stack((np.asarray(self.x).ravel(),
+                                np.asarray(self.y).ravel(),
+                                np.asarray(self.theta).ravel()))
+
+    @xyt.setter
+    def xyt(self, value: typing.Union[np.ndarray, list]):
+        """Accept an (N,3) array-like and set x, y, theta accordingly. Assumes no None."""
+        arr = np.asarray(value)
+        if arr.ndim != 2 or arr.shape[1] != 3:
+            raise ValueError("xyt must be an array with shape (N, 3)")
+        self.x = arr[:, 0].astype(float)
+        self.y = arr[:, 1].astype(float)
+        self.theta = arr[:, 2].astype(float)
 
     def _check_constraints(self):
 
@@ -275,3 +299,6 @@ class TreeList(BaseClass):
             tree = create_tree(self.x[i], self.y[i], self.theta[i]*360/(2*np.pi))
             trees.append(tree)
         return trees
+    
+'''Metric'''
+
