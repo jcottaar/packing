@@ -10,6 +10,8 @@ def visualize_tree_list(tree_list, ax=None):
     
 
 import matplotlib.pyplot as plt
+# Allow large embedded animation output (2 GB) for notebooks
+plt.rcParams['animation.embed_limit'] = 2 * 1024 * 1024 * 1024
 from matplotlib.patches import Polygon as MplPolygon
 from shapely.geometry import Polygon, MultiPolygon
 import colorsys
