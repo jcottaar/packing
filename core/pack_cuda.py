@@ -58,9 +58,10 @@ MAX_PIECES = 4
 MAX_VERTS_PER_PIECE = 4           # each convex piece: up to 4 vertices
 MAX_INTERSECTION_VERTS = 8        # ≤ n1 + n2 (4 + 4)
 
+#include <stdio.h>
+
 _CUDA_SRC = r"""
 extern "C" {
-
 #define MAX_PIECES 4
 #define MAX_VERTS_PER_PIECE 4
 #define MAX_INTERSECTION_VERTS 8
@@ -185,19 +186,19 @@ __device__ double convex_intersection_area(
 }
 
 __device__ double overlap_two_trees(
-    double dx1, double dy1, double dtheta1,
-    double dx2, double dy2, double dtheta2,
+    const double3 a,
+    const double3 b,
     const double* __restrict__ piece_xy,
     const int* __restrict__ piece_nverts,
-    int num_pieces)
+    const int num_pieces)
 {
     // Compute overlap area between two trees given their absolute transforms.
-    // Tree 1: (dx1, dy1, dtheta1)
-    // Tree 2: (dx2, dy2, dtheta2)
-    double c1 = cos(dtheta1);
-    double s1 = sin(dtheta1);
-    double c2 = cos(dtheta2);
-    double s2 = sin(dtheta2);
+    // Tree 1: (a.x, a.y, a.z)
+    // Tree 2: (b.x, b.y, b.z)
+    double c1 = cos(a.z);
+    double s1 = sin(a.z);
+    double c2 = cos(b.z);
+    double s2 = sin(b.z);
     double total = 0.0;
 
     // Loop over convex pieces of tree 1
@@ -213,8 +214,8 @@ __device__ double overlap_two_trees(
             double y = piece_xy[base + 1];
             
             // Apply tree 1 transform
-            double x1 = c1 * x - s1 * y + dx1;
-            double y1 = s1 * x + c1 * y + dy1;
+            double x1 = c1 * x - s1 * y + a.x;
+            double y1 = s1 * x + c1 * y + a.y;
             poly1[v] = make_d2(x1, y1);
         }
 
@@ -230,8 +231,8 @@ __device__ double overlap_two_trees(
                 double y = piece_xy[base + 1];
 
                 // Apply tree 2 transform
-                double x2 = c2 * x - s2 * y + dx2;
-                double y2 = s2 * x + c2 * y + dy2;
+                double x2 = c2 * x - s2 * y + b.x;
+                double y2 = s2 * x + c2 * y + b.y;
                 poly2[v] = make_d2(x2, y2);
             }
 
@@ -243,33 +244,18 @@ __device__ double overlap_two_trees(
 }
 
 __global__ void overlap_two_trees_kernel(
-    const double* __restrict__ dx1,
-    const double* __restrict__ dy1,
-    const double* __restrict__ dtheta1,
-    const double* __restrict__ dx2,
-    const double* __restrict__ dy2,
-    const double* __restrict__ dtheta2,
+    const double tx1, const double ty1, const double th1,
+    const double tx2, const double ty2, const double th2,
     const double* __restrict__ piece_xy,      // length num_pieces * MAX_VERTS_PER_PIECE * 2
     const int*    __restrict__ piece_nverts,  // length num_pieces
-    int num_pieces,
-    int n_samples,
+    const int num_pieces,
     double* __restrict__ out_area)
 {
-    // Each thread handles one sample (one pair of tree transforms).
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n_samples) return;
+    // Accept scalar inputs from the host, but construct double3 PODs
+    double3 a; a.x = tx1; a.y = ty1; a.z = th1;
+    double3 b; b.x = tx2; b.y = ty2; b.z = th2;
 
-    double tx1 = dx1[tid];
-    double ty1 = dy1[tid];
-    double th1 = dtheta1[tid];
-    double tx2 = dx2[tid];
-    double ty2 = dy2[tid];
-    double th2 = dtheta2[tid];
-
-    out_area[tid] = overlap_two_trees(
-        tx1, ty1, th1,
-        tx2, ty2, th2,
-        piece_xy, piece_nverts, num_pieces);
+    out_area[0] = overlap_two_trees(a, b, piece_xy, piece_nverts, num_pieces);
 }
 
 
@@ -387,8 +373,6 @@ def _ensure_initialized() -> None:
     _raw_module = cp.RawModule(code=_CUDA_SRC, options=("--std=c++11",))
     _overlap_two_trees_kernel = _raw_module.get_function("overlap_two_trees_kernel")
 
-    print(_overlap_two_trees_kernel)
-
     _initialized = True
 
 
@@ -396,55 +380,28 @@ def _ensure_initialized() -> None:
 # 4. Public API
 # ---------------------------------------------------------------------------
 
-def overlap_two_trees(
-    x1: float,
-    y1: float,
-    theta1: float,
-    x2: float,
-    y2: float,
-    theta2: float,
-) -> cp.ndarray:
+def overlap_two_trees(xyt1, xyt2) -> cp.ndarray:
     """Compute overlap area between two poses of the SAME polygon on the GPU.
-
-    The base polygon is defined implicitly by CONVEX_PIECES (4 convex pieces).
-
-    Pose 1: (x1, y1, theta1)
-    Pose 2: (x2, y2, theta2)
-
-    Because the polygons are identical, the overlap depends only on the
-    relative transform, so internally we use:
-        dx     = x2 - x1
-        dy     = y2 - y1
-        dtheta = theta2 - theta1
 
     Parameters
     ----------
-    x1, y1, theta1, x2, y2, theta2 : float
-        Scalar poses of the two polygon copies (Python floats or NumPy scalars).
+    xyt1, xyt2 : array-like (length 3)
+        Each is a sequence of (x, y, theta) for a single pose. Matrices/batches
+        are not supported by this function; pass single 3-element sequences.
 
     Returns
     -------
-    area : cp.ndarray
-        A 0-d CuPy array (cp.float64) containing the overlap area.
+    area : cp.float64
+        A scalar CuPy float containing the computed overlap area.
     """
     _ensure_initialized()
 
-    # Compute relative transform as Python floats, then wrap into small
-    # 1-element CuPy arrays to satisfy the kernel's pointer-based interface.
-    # Rotate the position difference by -theta1 to get relative position in pose1's frame
-    # dx_world = float(x2) - float(x1)
-    # dy_world = float(y2) - float(y1)
-    # cos_theta1 = np.cos(float(theta1))
-    # sin_theta1 = np.sin(float(theta1))
-    # dx_val = cos_theta1 * dx_world + sin_theta1 * dy_world
-    # dy_val = -sin_theta1 * dx_world + cos_theta1 * dy_world
-    # dtheta_val = float(theta2) - float(theta1)
+    # Convert to sequences and validate length
+    a = list(xyt1)
+    b = list(xyt2)
+    if len(a) != 3 or len(b) != 3:
+        raise ValueError("xyt1 and xyt2 must be length-3 sequences: (x, y, theta)")
 
-    # dx_arr = cp.asarray([dx_val], dtype=cp.float64)
-    # dy_arr = cp.asarray([dy_val], dtype=cp.float64)
-    # dtheta_arr = cp.asarray([dtheta_val], dtype=cp.float64)
-
-    n_samples = 1
     areas_arr = cp.empty(1, dtype=cp.float64)
 
     threads_per_block = 1
@@ -454,16 +411,14 @@ def overlap_two_trees(
         (blocks,),
         (threads_per_block,),
         (
-            x1,y1,theta1,
-            x2,y2,theta2,
+            float(a[0]), float(a[1]), float(a[2]),
+            float(b[0]), float(b[1]), float(b[2]),
             _piece_xy_d,
             _piece_nverts_d,
             np.int32(_num_pieces),
-            np.int32(n_samples),
             areas_arr,
         ),
     )
 
-    # Return as a 0-d CuPy array for easy use in CuPy/NumPy code.
     return areas_arr[0]
 
