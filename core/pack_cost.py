@@ -64,24 +64,25 @@ class CollisionCostDummy(CollisionCost):
 class CollisionCostOverlappingArea(CollisionCost):
     # Collision cost based on overlapping area of two trees
     def _compute_cost_one_pair_ref(self, xyt:np.ndarray, include_gradients:bool):
-        tree1 = kgs.create_tree(0.0, 0.0, 0.0)
+        tree1 = kgs.center_tree
         tree2 = kgs.create_tree(xyt[0,0], xyt[0,1], xyt[0,2]*360/(2*np.pi))
         intersection = tree1.intersection(tree2)
         area = intersection.area
         if include_gradients:
             # Gradient computation is complex; use finite differences as a placeholder
             grad = np.zeros_like(xyt)
-            eps = 1e-6
-            for dim in range(3):
-                xyt_pos = xyt.copy()
-                xyt_neg = xyt.copy()
-                xyt_pos[0, dim] += eps
-                xyt_neg[0, dim] -= eps
-                tree2_pos = kgs.create_tree(xyt_pos[0,0], xyt_pos[0,1], xyt_pos[0,2]*360/(2*np.pi))
-                tree2_neg = kgs.create_tree(xyt_neg[0,0], xyt_neg[0,1], xyt_neg[0,2]*360/(2*np.pi))
-                area_pos = tree1.intersection(tree2_pos).area
-                area_neg = tree1.intersection(tree2_neg).area
-                grad[0, dim] = (area_pos - area_neg) / (2 * eps)
+            if area>0:
+                eps = 1e-6
+                for dim in range(3):
+                    xyt_pos = xyt.copy()
+                    xyt_neg = xyt.copy()
+                    xyt_pos[0, dim] += eps
+                    xyt_neg[0, dim] -= eps
+                    tree2_pos = kgs.create_tree(xyt_pos[0,0], xyt_pos[0,1], xyt_pos[0,2]*360/(2*np.pi))
+                    tree2_neg = kgs.create_tree(xyt_neg[0,0], xyt_neg[0,1], xyt_neg[0,2]*360/(2*np.pi))
+                    area_pos = tree1.intersection(tree2_pos).area
+                    area_neg = tree1.intersection(tree2_neg).area
+                    grad[0, dim] = (area_pos - area_neg) / (2 * eps)
             return area, grad
         else:
             return area, None

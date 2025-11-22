@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, fields
 from typeguard import typechecked
 import pack_cost
 import pack_basics
+import pack_vis
 
 def run_all_tests():
     test_costs()
@@ -17,7 +18,9 @@ def test_costs():
     cost.collision_cost = pack_cost.CollisionCostOverlappingArea()
     costs_to_test = [cost]
 
-    tree_list = pack_basics.place_random(2, 1)
+    tree_list = pack_basics.place_random(10, 2.5)
+    pack_vis.visualize_tree_list(tree_list)
+
     for c in costs_to_test:
         # First, check that compute_cost and compute_cost_ref agree
         cost_ref, grad_ref = c.compute_total_cost_ref(tree_list.xyt, include_gradients=True)

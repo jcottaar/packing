@@ -194,17 +194,12 @@ from shapely import affinity, touches
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
+from shapely.prepared import prep
 from typeguard import typechecked
 
 scale_factor = 1.
-
-@typechecked
-def create_tree(center_x:float, center_y:float, angle:float):
-    """Initializes the Christmas tree with a specific position and rotation."""
-    center_x = float(center_x)
-    center_y = float(center_y)
-    angle = float(angle)
-    
+def create_center_tree():
+    """Initializes the Christmas tree"""    
     trunk_w = 0.15
     trunk_h = 0.2
     base_w = 0.7
@@ -245,10 +240,17 @@ def create_tree(center_x:float, center_y:float, angle:float):
             (-(top_w / 2) * sf, tier_1_y * sf),
         ]
     )
-    rotated = affinity.rotate(initial_polygon, angle, origin=(0, 0))
+    return initial_polygon
+center_tree = create_center_tree()
+center_tree_prepped = prep(center_tree)
+
+@typechecked
+def create_tree(center_x:float, center_y:float, angle:float):
+    """Initializes the Christmas tree with a specific position and rotation."""
+    rotated = affinity.rotate(center_tree, angle, origin=(0, 0))
     polygon = affinity.translate(rotated,
-                                 xoff=center_x * sf,
-                                 yoff=center_y * sf)
+                                 xoff=center_x * scale_factor,
+                                 yoff=center_y * scale_factor)
     return polygon
 
 @dataclass

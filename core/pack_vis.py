@@ -4,9 +4,9 @@ import scipy as sp
 import cupy as cp
 import kaggle_support as kgs
 
-def visualize_tree_list(tree_list):
+def visualize_tree_list(tree_list, ax=None):
     trees = tree_list.get_trees()
-    plot_polygons(trees)
+    return plot_polygons(trees, ax=ax)
     
 
 import matplotlib.pyplot as plt
@@ -90,7 +90,6 @@ def plot_polygons(polygons, ax=None):
             inter = flat_polys[i].intersection(flat_polys[j])
             if not inter.is_empty and getattr(inter, "area", 0) > eps_area:
                 intersections.append(inter)
-    print(intersections)
 
     if intersections:
         merged = unary_union(intersections)
