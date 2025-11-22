@@ -185,33 +185,40 @@ __device__ double convex_intersection_area(
 }
 
 __device__ double overlap_two_trees(
-    double dx, double dy, double dtheta,
+    double dx1, double dy1, double dtheta1,
+    double dx2, double dy2, double dtheta2,
     const double* __restrict__ piece_xy,
     const int* __restrict__ piece_nverts,
     int num_pieces)
 {
-    // Compute overlap area between two identical trees given the relative
-    // transform (dx, dy, dtheta) between them. This is the core per-sample
-    // routine used by the kernel. All work happens with scalar inputs.
-    double c = cos(dtheta);
-    double s = sin(dtheta);
+    // Compute overlap area between two trees given their absolute transforms.
+    // Tree 1: (dx1, dy1, dtheta1)
+    // Tree 2: (dx2, dy2, dtheta2)
+    double c1 = cos(dtheta1);
+    double s1 = sin(dtheta1);
+    double c2 = cos(dtheta2);
+    double s2 = sin(dtheta2);
     double total = 0.0;
 
-    // Loop over convex pieces of base polygon (pose 1 = identity)
+    // Loop over convex pieces of tree 1
     for (int i = 0; i < num_pieces; ++i) {
         int n1 = piece_nverts[i];
         d2 poly1[MAX_VERTS_PER_PIECE];
 
-        // Load base piece in world coords (identity transform)
+        // Load and transform piece with tree 1's pose
         for (int v = 0; v < n1; ++v) {
             int idx = i * MAX_VERTS_PER_PIECE + v;
             int base = 2 * idx;
             double x = piece_xy[base + 0];
             double y = piece_xy[base + 1];
-            poly1[v] = make_d2(x, y);
+            
+            // Apply tree 1 transform
+            double x1 = c1 * x - s1 * y + dx1;
+            double y1 = s1 * x + c1 * y + dy1;
+            poly1[v] = make_d2(x1, y1);
         }
 
-        // Loop over convex pieces of moved polygon (pose 2 = relative dx,dy,theta)
+        // Loop over convex pieces of tree 2
         for (int j = 0; j < num_pieces; ++j) {
             int n2 = piece_nverts[j];
             d2 poly2[MAX_VERTS_PER_PIECE];
@@ -222,10 +229,10 @@ __device__ double overlap_two_trees(
                 double x = piece_xy[base + 0];
                 double y = piece_xy[base + 1];
 
-                // Rotate + translate by relative transform
-                double xr = c * x - s * y + dx;
-                double yr = s * x + c * y + dy;
-                poly2[v] = make_d2(xr, yr);
+                // Apply tree 2 transform
+                double x2 = c2 * x - s2 * y + dx2;
+                double y2 = s2 * x + c2 * y + dy2;
+                poly2[v] = make_d2(x2, y2);
             }
 
             total += convex_intersection_area(poly1, n1, poly2, n2);
@@ -235,26 +242,33 @@ __device__ double overlap_two_trees(
     return total;
 }
 
-__global__ void overlap_kernel(
-    const double* __restrict__ dx,
-    const double* __restrict__ dy,
-    const double* __restrict__ dtheta,
+__global__ void overlap_two_trees_kernel(
+    const double* __restrict__ dx1,
+    const double* __restrict__ dy1,
+    const double* __restrict__ dtheta1,
+    const double* __restrict__ dx2,
+    const double* __restrict__ dy2,
+    const double* __restrict__ dtheta2,
     const double* __restrict__ piece_xy,      // length num_pieces * MAX_VERTS_PER_PIECE * 2
     const int*    __restrict__ piece_nverts,  // length num_pieces
     int num_pieces,
     int n_samples,
     double* __restrict__ out_area)
 {
-    // Each thread handles one sample (one relative transform between trees).
+    // Each thread handles one sample (one pair of tree transforms).
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_samples) return;
 
-    double tx = dx[tid];
-    double ty = dy[tid];
-    double th = dtheta[tid];
+    double tx1 = dx1[tid];
+    double ty1 = dy1[tid];
+    double th1 = dtheta1[tid];
+    double tx2 = dx2[tid];
+    double ty2 = dy2[tid];
+    double th2 = dtheta2[tid];
 
     out_area[tid] = overlap_two_trees(
-        tx, ty, th,
+        tx1, ty1, th1,
+        tx2, ty2, th2,
         piece_xy, piece_nverts, num_pieces);
 }
 
@@ -275,7 +289,7 @@ _num_pieces: int = 0
 
 # Compiled CUDA module and kernel
 _raw_module: cp.RawModule | None = None
-_overlap_kernel: cp.RawKernel | None = None
+_overlap_two_trees_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
@@ -358,7 +372,7 @@ def _ensure_initialized() -> None:
     of public API functions.
     """
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module, _overlap_kernel
+    global _num_pieces, _raw_module, _overlap_two_trees_kernel
 
     if _initialized:
         return
@@ -371,7 +385,9 @@ def _ensure_initialized() -> None:
     _piece_nverts_d = cp.asarray(piece_nverts, dtype=cp.int32)
 
     _raw_module = cp.RawModule(code=_CUDA_SRC, options=("--std=c++11",))
-    _overlap_kernel = _raw_module.get_function("overlap_kernel")
+    _overlap_two_trees_kernel = _raw_module.get_function("overlap_two_trees_kernel")
+
+    print(_overlap_two_trees_kernel)
 
     _initialized = True
 
@@ -380,7 +396,7 @@ def _ensure_initialized() -> None:
 # 4. Public API
 # ---------------------------------------------------------------------------
 
-def compute_overlap_area_gpu(
+def overlap_two_trees(
     x1: float,
     y1: float,
     theta1: float,
@@ -416,17 +432,17 @@ def compute_overlap_area_gpu(
     # Compute relative transform as Python floats, then wrap into small
     # 1-element CuPy arrays to satisfy the kernel's pointer-based interface.
     # Rotate the position difference by -theta1 to get relative position in pose1's frame
-    dx_world = float(x2) - float(x1)
-    dy_world = float(y2) - float(y1)
-    cos_theta1 = np.cos(float(theta1))
-    sin_theta1 = np.sin(float(theta1))
-    dx_val = cos_theta1 * dx_world + sin_theta1 * dy_world
-    dy_val = -sin_theta1 * dx_world + cos_theta1 * dy_world
-    dtheta_val = float(theta2) - float(theta1)
+    # dx_world = float(x2) - float(x1)
+    # dy_world = float(y2) - float(y1)
+    # cos_theta1 = np.cos(float(theta1))
+    # sin_theta1 = np.sin(float(theta1))
+    # dx_val = cos_theta1 * dx_world + sin_theta1 * dy_world
+    # dy_val = -sin_theta1 * dx_world + cos_theta1 * dy_world
+    # dtheta_val = float(theta2) - float(theta1)
 
-    dx_arr = cp.asarray([dx_val], dtype=cp.float64)
-    dy_arr = cp.asarray([dy_val], dtype=cp.float64)
-    dtheta_arr = cp.asarray([dtheta_val], dtype=cp.float64)
+    # dx_arr = cp.asarray([dx_val], dtype=cp.float64)
+    # dy_arr = cp.asarray([dy_val], dtype=cp.float64)
+    # dtheta_arr = cp.asarray([dtheta_val], dtype=cp.float64)
 
     n_samples = 1
     areas_arr = cp.empty(1, dtype=cp.float64)
@@ -434,13 +450,12 @@ def compute_overlap_area_gpu(
     threads_per_block = 1
     blocks = 1
 
-    _overlap_kernel(
+    _overlap_two_trees_kernel(
         (blocks,),
         (threads_per_block,),
         (
-            dx_arr,
-            dy_arr,
-            dtheta_arr,
+            x1,y1,theta1,
+            x2,y2,theta2,
             _piece_xy_d,
             _piece_nverts_d,
             np.int32(_num_pieces),

@@ -278,7 +278,7 @@ class TreeList(BaseClass):
     @xyt.setter
     def xyt(self, value: typing.Union[np.ndarray, list]):
         """Accept an (N,3) array-like and set x, y, theta accordingly. Assumes no None."""
-        arr = np.asarray(value)
+        arr = np.asarray(to_cpu(value))
         if arr.ndim != 2 or arr.shape[1] != 3:
             raise ValueError("xyt must be an array with shape (N, 3)")
         self.x = arr[:, 0].astype(float)
