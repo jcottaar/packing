@@ -415,8 +415,13 @@ def compute_overlap_area_gpu(
 
     # Compute relative transform as Python floats, then wrap into small
     # 1-element CuPy arrays to satisfy the kernel's pointer-based interface.
-    dx_val = float(x2) - float(x1)
-    dy_val = float(y2) - float(y1)
+    # Rotate the position difference by -theta1 to get relative position in pose1's frame
+    dx_world = float(x2) - float(x1)
+    dy_world = float(y2) - float(y1)
+    cos_theta1 = np.cos(float(theta1))
+    sin_theta1 = np.sin(float(theta1))
+    dx_val = cos_theta1 * dx_world + sin_theta1 * dy_world
+    dy_val = -sin_theta1 * dx_world + cos_theta1 * dy_world
     dtheta_val = float(theta2) - float(theta1)
 
     dx_arr = cp.asarray([dx_val], dtype=cp.float64)
