@@ -191,7 +191,7 @@ The trees!
 
 from matplotlib.patches import Rectangle
 from shapely import affinity, touches
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, Point
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 from shapely.prepared import prep
@@ -200,17 +200,19 @@ from typeguard import typechecked
 scale_factor = 1.
 def create_center_tree():
     """Initializes the Christmas tree"""    
+    shift = -0.5
+
     trunk_w = 0.15
     trunk_h = 0.2
     base_w = 0.7
     mid_w = 0.4
     top_w = 0.25
-    tip_y = 0.8
-    tier_1_y = 0.5
-    tier_2_y = 0.25
-    base_y = 0.0
-    trunk_bottom_y = -trunk_h
-
+    tip_y = 0.8 + shift
+    tier_1_y = 0.5 + shift
+    tier_2_y = 0.25 + shift
+    base_y = 0.0 + shift
+    trunk_bottom_y = -trunk_h + shift
+    
     sf = scale_factor
     initial_polygon = Polygon(
         [
@@ -244,9 +246,20 @@ def create_center_tree():
                         Polygon([(top_w / 4 * sf, tier_1_y * sf), (mid_w / 2 * sf, tier_2_y * sf), (-mid_w / 2 * sf, tier_2_y * sf), (-top_w / 4 * sf, tier_1_y * sf)]),
                         Polygon([(mid_w / 4 * sf, tier_2_y * sf), (base_w / 2 * sf, base_y * sf), (-base_w / 2 * sf, base_y * sf), (-mid_w / 4 * sf, tier_2_y * sf)]),
                         Polygon([(trunk_w / 2 * sf, base_y * sf), (trunk_w / 2 * sf, trunk_bottom_y * sf), (-trunk_w / 2 * sf, trunk_bottom_y * sf), (-trunk_w / 2 * sf, base_y * sf)])  ]
-    return initial_polygon, convex_breakdown
-center_tree, convex_breakdown = create_center_tree()
+
+
+    # Get centroid
+    centroid = Point((0,0))
+
+    # Find maximum distance from centroid to any vertex
+    max_radius = 0.0
+    for x, y in initial_polygon.exterior.coords[:-1]:  # skip closing vertex
+        dist = Point(x, y).distance(centroid)
+        max_radius = max(max_radius, dist)
+    return initial_polygon, convex_breakdown, max_radius
+center_tree, convex_breakdown, tree_max_radius = create_center_tree()
 center_tree_prepped = prep(center_tree)
+
 
 @typechecked
 def create_tree(center_x:float, center_y:float, angle:float):

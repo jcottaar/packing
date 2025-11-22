@@ -18,7 +18,7 @@ def test_costs():
     cost.collision_cost = pack_cost.CollisionCostOverlappingArea()
     costs_to_test = [cost]
 
-    tree_list = pack_basics.place_random(10, 2.5)
+    tree_list = pack_basics.place_random(10, 1.5)
     #tree_list = pack_basics.place_random(3, 0.1)
     #tree_list.xyt = [[5.,5.,5.],[1.,2,3.],[1.,2.,3.01]]
     pack_vis.visualize_tree_list(tree_list)

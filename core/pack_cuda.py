@@ -46,6 +46,7 @@ import kaggle_support as kgs
 # All polygons will be re-oriented to CCW automatically.
 
 CONVEX_PIECES: list[Polygon] = kgs.convex_breakdown
+MAX_RADIUS = kgs.tree_max_radius
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +66,7 @@ extern "C" {
 #define MAX_PIECES 4
 #define MAX_VERTS_PER_PIECE 4
 #define MAX_INTERSECTION_VERTS 8
+#define MAX_RADIUS """ + str(MAX_RADIUS) + r"""
 
 typedef struct {
     double x;
@@ -195,6 +197,17 @@ __device__ double overlap_two_trees(
     // Compute overlap area between two trees given their absolute transforms.
     // Tree 1: (a.x, a.y, a.z)
     // Tree 2: (b.x, b.y, b.z)
+    
+    // Early exit: check if tree centers are too far apart
+    double dx = b.x - a.x;
+    double dy = b.y - a.y;
+    double dist_sq = dx*dx + dy*dy;
+    double max_overlap_dist = 2.0 * MAX_RADIUS;
+    
+    if (dist_sq > max_overlap_dist * max_overlap_dist) {
+        return 0.0;  // Trees too far apart to overlap
+    }
+    
     double c1 = cos(a.z);
     double s1 = sin(a.z);
     double c2 = cos(b.z);
@@ -205,8 +218,10 @@ __device__ double overlap_two_trees(
     for (int i = 0; i < num_pieces; ++i) {
         int n1 = piece_nverts[i];
         d2 poly1[MAX_VERTS_PER_PIECE];
+        double min1_x = 1e30, max1_x = -1e30;
+        double min1_y = 1e30, max1_y = -1e30;
 
-        // Load and transform piece with tree 1's pose
+        // Load and transform piece with tree 1's pose, compute AABB
         for (int v = 0; v < n1; ++v) {
             int idx = i * MAX_VERTS_PER_PIECE + v;
             int base = 2 * idx;
@@ -217,12 +232,20 @@ __device__ double overlap_two_trees(
             double x1 = c1 * x - s1 * y + a.x;
             double y1 = s1 * x + c1 * y + a.y;
             poly1[v] = make_d2(x1, y1);
+            
+            // Update AABB
+            min1_x = fmin(min1_x, x1);
+            max1_x = fmax(max1_x, x1);
+            min1_y = fmin(min1_y, y1);
+            max1_y = fmax(max1_y, y1);
         }
 
         // Loop over convex pieces of tree 2
         for (int j = 0; j < num_pieces; ++j) {
             int n2 = piece_nverts[j];
             d2 poly2[MAX_VERTS_PER_PIECE];
+            double min2_x = 1e30, max2_x = -1e30;
+            double min2_y = 1e30, max2_y = -1e30;
 
             for (int v = 0; v < n2; ++v) {
                 int idx = j * MAX_VERTS_PER_PIECE + v;
@@ -234,6 +257,18 @@ __device__ double overlap_two_trees(
                 double x2 = c2 * x - s2 * y + b.x;
                 double y2 = s2 * x + c2 * y + b.y;
                 poly2[v] = make_d2(x2, y2);
+                
+                // Update AABB
+                min2_x = fmin(min2_x, x2);
+                max2_x = fmax(max2_x, x2);
+                min2_y = fmin(min2_y, y2);
+                max2_y = fmax(max2_y, y2);
+            }
+
+            // AABB overlap test - early exit if no overlap
+            if (max1_x < min2_x || max2_x < min1_x ||
+                max1_y < min2_y || max2_y < min1_y) {
+                continue;  // No AABB overlap, skip expensive intersection
             }
 
             total += convex_intersection_area(poly1, n1, poly2, n2);
