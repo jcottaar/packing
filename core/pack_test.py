@@ -19,6 +19,8 @@ def test_costs():
     costs_to_test = [cost]
 
     tree_list = pack_basics.place_random(10, 2.5)
+    #tree_list = pack_basics.place_random(3, 0.1)
+    #tree_list.xyt = [[1.,1.,1.],[1.,2.,2.],[1.,2,3.]]
     pack_vis.visualize_tree_list(tree_list)
 
     for c in costs_to_test:
@@ -52,4 +54,5 @@ def test_costs():
 
         grad_fast_flat = np.asarray(grad_fast).ravel()
         max_diff = np.max(np.abs(grad_num - grad_fast_flat))
+        #print(grad_num, grad_fast_flat)
         assert np.allclose(grad_num, grad_fast_flat, rtol=1e-4, atol=1e-6), f"Finite-diff gradient mismatch (max diff {max_diff})"

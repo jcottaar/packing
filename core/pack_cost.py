@@ -5,6 +5,9 @@ import cupy as cp
 import kaggle_support as kgs
 from dataclasses import dataclass, field, fields
 from typeguard import typechecked
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+import shapely
 
 @dataclass    
 class CollisionCost(kgs.BaseClass):
@@ -15,35 +18,21 @@ class CollisionCost(kgs.BaseClass):
         # Compute collision cost for all pairs of trees
         assert(xyt.shape[1]==3)  # x, y, theta
         n_trees = xyt.shape[0]
+        tree_list = kgs.TreeList()
+        tree_list.xyt = xyt
+        trees = tree_list.get_trees()
         total_cost = 0.0
         if include_gradients:
             total_grad = np.zeros_like(xyt)
         for i in range(n_trees):
-            for j in range(i+1, n_trees):
-                # Compute relative position in tree i's frame
-                theta_i = xyt[i, 2]
-                cos_theta = np.cos(theta_i)
-                sin_theta = np.sin(theta_i)
-                dx = xyt[j, 0] - xyt[i, 0]
-                dy = xyt[j, 1] - xyt[i, 1]
-                xyt2 = np.array([[
-                    cos_theta * dx + sin_theta * dy,
-                    -sin_theta * dx + cos_theta * dy,
-                    xyt[j, 2] - xyt[i, 2]
-                ]])
-                cost_ij, grad_ij = self._compute_cost_one_pair_ref(xyt2, include_gradients=include_gradients)
-                total_cost += cost_ij
-                if include_gradients:
-                    # Gradient w.r.t. xyt2 needs to be transformed back
-                    grad_x2, grad_y2, grad_theta2 = grad_ij[0, :]
-                    # Gradient w.r.t. tree j position and rotation
-                    total_grad[j, 0] += cos_theta * grad_x2 - sin_theta * grad_y2
-                    total_grad[j, 1] += sin_theta * grad_x2 + cos_theta * grad_y2
-                    total_grad[j, 2] += grad_theta2
-                    # Gradient w.r.t. tree i position and rotation
-                    total_grad[i, 0] -= cos_theta * grad_x2 - sin_theta * grad_y2
-                    total_grad[i, 1] -= sin_theta * grad_x2 + cos_theta * grad_y2
-                    total_grad[i, 2] += (-sin_theta * dx + cos_theta * dy) * grad_x2 + (-cos_theta * dx - sin_theta * dy) * grad_y2 - grad_theta2
+            this_xyt = xyt[i]            
+            other_xyt = np.delete(xyt, i, axis=0)
+            this_tree = trees[i]
+            other_trees = [t for t in trees if t is not this_tree]
+            this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees, include_gradients)        
+            total_cost += this_cost/2
+            if include_gradients:
+                total_grad[i] += this_grads
         if include_gradients:
             return self.scaling * total_cost, self.scaling * total_grad
         else:
@@ -55,34 +44,35 @@ class CollisionCost(kgs.BaseClass):
         
 class CollisionCostDummy(CollisionCost):
     # Dummy: always zero cost
-    def _compute_cost_one_pair_ref(self, xyt:np.ndarray, include_gradients:bool):
+    def _compute_cost_one_tree_ref(self, xyt1:np.ndarray, xyt2:np.ndarray, tree1:Polygon, tree2:list, include_gradients:bool):
+        # xyt1: (,3)
+        # xyt2: (N,3)
         if include_gradients:
-            return 0.0, np.zeros_like(xyt)
+            return 0.0, np.zeros_like(xyt1)
         else:
             return 0.0, None
     
 class CollisionCostOverlappingArea(CollisionCost):
     # Collision cost based on overlapping area of two trees
-    def _compute_cost_one_pair_ref(self, xyt:np.ndarray, include_gradients:bool):
-        tree1 = kgs.center_tree
-        tree2 = kgs.create_tree(xyt[0,0], xyt[0,1], xyt[0,2]*360/(2*np.pi))
-        intersection = tree1.intersection(tree2)
-        area = intersection.area
+    def _compute_cost_one_tree_ref(self, xyt1:np.ndarray, xyt2:np.ndarray, tree1:Polygon, tree2:list, include_gradients:bool):
+        # Compute overlapping area between tree1 and the union of tree2 geometries.
+        # tree2 is a list of shapely geometries; create a union before intersecting.
+        area = np.sum(shapely.area(tree1.intersection(tree2)))
         if include_gradients:
             # Gradient computation is complex; use finite differences as a placeholder
-            grad = np.zeros_like(xyt)
+            grad = np.zeros_like(xyt1)
             if area>0:
-                eps = 1e-6
-                for dim in range(3):
-                    xyt_pos = xyt.copy()
-                    xyt_neg = xyt.copy()
-                    xyt_pos[0, dim] += eps
-                    xyt_neg[0, dim] -= eps
-                    tree2_pos = kgs.create_tree(xyt_pos[0,0], xyt_pos[0,1], xyt_pos[0,2]*360/(2*np.pi))
-                    tree2_neg = kgs.create_tree(xyt_neg[0,0], xyt_neg[0,1], xyt_neg[0,2]*360/(2*np.pi))
-                    area_pos = tree1.intersection(tree2_pos).area
-                    area_neg = tree1.intersection(tree2_neg).area
-                    grad[0, dim] = (area_pos - area_neg) / (2 * eps)
+                epsilon = 1e-6
+                for j in range(3):  # x, y, theta
+                    xyt1_plus = xyt1.copy()
+                    xyt1_minus = xyt1.copy()
+                    xyt1_plus[j] += epsilon
+                    xyt1_minus[j] -= epsilon
+                    tree1_plus = kgs.create_tree(xyt1_plus[0], xyt1_plus[1], xyt1_plus[2]*360/2/np.pi)
+                    area_plus = np.sum(shapely.area(tree1_plus.intersection(tree2)))
+                    tree1_minus = kgs.create_tree(xyt1_minus[0], xyt1_minus[1], xyt1_minus[2]*360/2/np.pi)
+                    area_minus = np.sum(shapely.area(tree1_minus.intersection(tree2)))
+                    grad[j] = (area_plus - area_minus) / (2 * epsilon)
             return area, grad
         else:
             return area, None
