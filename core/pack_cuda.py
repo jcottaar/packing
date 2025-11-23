@@ -900,6 +900,52 @@ __global__ void overlap_list_total_kernel(
     overlap_list_total(xyt1_3xN, n1, xyt2_3xN, n2, out_total, out_grads);
 }
 
+// Multi-ensemble kernel: one block per ensemble
+// Each block processes one ensemble by calling overlap_list_total
+// 
+// Parameters:
+//   xyt1_list: array of pointers to xyt1 data for each ensemble
+//   n1_list: array of n1 values (number of trees) for each ensemble
+//   xyt2_list: array of pointers to xyt2 data for each ensemble  
+//   n2_list: array of n2 values for each ensemble
+//   out_totals: array of output totals, one per ensemble
+//   out_grads_list: array of pointers to gradient outputs, one per ensemble (can be NULL)
+//   num_ensembles: number of ensembles to process
+__global__ void multi_ensemble_kernel(
+    const double** __restrict__ xyt1_list,  // [num_ensembles] pointers
+    const int* __restrict__ n1_list,        // [num_ensembles]
+    const double** __restrict__ xyt2_list,  // [num_ensembles] pointers
+    const int* __restrict__ n2_list,        // [num_ensembles]
+    double* __restrict__ out_totals,        // [num_ensembles]
+    double** __restrict__ out_grads_list,   // [num_ensembles] pointers (NULL entries allowed)
+    const int num_ensembles)
+{
+    int ensemble_id = blockIdx.x;
+    
+    if (ensemble_id >= num_ensembles) {
+        return;  // Extra blocks beyond num_ensembles
+    }
+    
+    // Load parameters for this ensemble
+    const double* xyt1 = xyt1_list[ensemble_id];
+    int n1 = n1_list[ensemble_id];
+    const double* xyt2 = xyt2_list[ensemble_id];
+    int n2 = n2_list[ensemble_id];
+    double* out_total = &out_totals[ensemble_id];
+    double* out_grads = (out_grads_list != NULL) ? out_grads_list[ensemble_id] : NULL;
+    
+    // Initialize output
+    if (threadIdx.x == 0) {
+        *out_total = 0.0;
+    }
+    __syncthreads();
+    
+    // Call the existing overlap_list_total device function
+    // This function is designed to be called by ALL threads in the block
+    // It internally uses threadIdx.x to determine which tree each thread processes
+    overlap_list_total(xyt1, n1, xyt2, n2, out_total, out_grads);
+}
+
 } // extern "C"
 """
 
@@ -918,6 +964,7 @@ _num_pieces: int = 0
 # Compiled CUDA module and kernel
 _raw_module: cp.RawModule | None = None
 _overlap_list_total_kernel: cp.RawKernel | None = None
+_multi_ensemble_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
@@ -1000,7 +1047,7 @@ def _ensure_initialized() -> None:
     of public API functions.
     """
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module,  _overlap_list_total_kernel
+    global _num_pieces, _raw_module,  _overlap_list_total_kernel, _multi_ensemble_kernel
 
     if _initialized:
         return
@@ -1048,10 +1095,9 @@ def _ensure_initialized() -> None:
 
     # Load compiled PTX into a CuPy RawModule
     _raw_module = cp.RawModule(path=ptx_path)
-    print('hi')
-    print(USE_FLOAT32)
     #_raw_module = cp.RawModule(code=_CUDA_SRC, backend='nvcc', options=())
     _overlap_list_total_kernel = _raw_module.get_function("overlap_list_total_kernel")
+    _multi_ensemble_kernel = _raw_module.get_function("multi_ensemble_kernel")
 
     # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
     # Convert to appropriate dtype if using float32
@@ -1151,5 +1197,117 @@ def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
         return out_total, grads
     else:
         return out_total, None
+
+
+def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):
+    """Compute total overlap sum for multiple ensembles in parallel.
+    
+    This launches one GPU block per ensemble, allowing many ensembles to run
+    concurrently and utilize more of the GPU's streaming multiprocessors.
+    
+    Parameters
+    ----------
+    xyt1_list : list of array-like
+        List of ensemble pose arrays, each shape (N1_i, 3) for ensemble i.
+    xyt2_list : list of array-like
+        List of ensemble pose arrays, each shape (N2_i, 3) for ensemble i.
+    compute_grad : bool, optional
+        If True, compute and return gradients. Default is True.
+    
+    Returns
+    -------
+    totals : cp.ndarray, shape (num_ensembles,)
+        Total overlap for each ensemble.
+    grads_list : list of cp.ndarray, optional
+        List of gradient arrays (N1_i, 3) for each ensemble.
+        Only returned if compute_grad=True.
+    """
+    _ensure_initialized()
+    
+    if len(xyt1_list) != len(xyt2_list):
+        raise ValueError("xyt1_list and xyt2_list must have same length")
+    
+    num_ensembles = len(xyt1_list)
+    if num_ensembles == 0:
+        return cp.array([]), [] if compute_grad else None
+    
+    # Determine dtype based on USE_FLOAT32 setting
+    dtype = cp.float32 if USE_FLOAT32 else cp.float64
+    
+    # Process and validate all input arrays
+    xyt1_arrays = []
+    xyt2_arrays = []
+    n1_list = []
+    n2_list = []
+    max_n1 = 0
+    
+    for i, (xyt1, xyt2) in enumerate(zip(xyt1_list, xyt2_list)):
+        xyt1_arr = cp.asarray(xyt1, dtype=dtype)
+        if xyt1_arr.ndim != 2 or xyt1_arr.shape[1] != 3:
+            raise ValueError(f"xyt1_list[{i}] must be shape (N,3)")
+        
+        xyt2_arr = cp.asarray(xyt2, dtype=dtype)
+        if xyt2_arr.ndim != 2 or xyt2_arr.shape[1] != 3:
+            raise ValueError(f"xyt2_list[{i}] must be shape (N,3)")
+        
+        n1 = int(xyt1_arr.shape[0])
+        n2 = int(xyt2_arr.shape[0])
+        
+        # Flatten to 3xN row-major
+        xyt1_3xN = cp.ascontiguousarray(xyt1_arr.T).ravel()
+        xyt2_3xN = cp.ascontiguousarray(xyt2_arr.T).ravel()
+        
+        xyt1_arrays.append(xyt1_3xN)
+        xyt2_arrays.append(xyt2_3xN)
+        n1_list.append(n1)
+        n2_list.append(n2)
+        max_n1 = max(max_n1, n1)
+    
+    # Create arrays of pointers (device addresses)
+    # CuPy doesn't have a direct way to create pointer arrays, so we use data.ptr
+    xyt1_ptrs = cp.array([arr.data.ptr for arr in xyt1_arrays], dtype=cp.uint64)
+    xyt2_ptrs = cp.array([arr.data.ptr for arr in xyt2_arrays], dtype=cp.uint64)
+    
+    n1_array = cp.array(n1_list, dtype=cp.int32)
+    n2_array = cp.array(n2_list, dtype=cp.int32)
+    
+    # Allocate outputs
+    out_totals = cp.zeros(num_ensembles, dtype=dtype)
+    
+    # Allocate gradients if requested
+    grads_arrays = []
+    grads_ptrs = None
+    if compute_grad:
+        for n1 in n1_list:
+            grads_arrays.append(cp.zeros(n1 * 3, dtype=dtype))
+        grads_ptrs = cp.array([arr.data.ptr for arr in grads_arrays], dtype=cp.uint64)
+    
+    # Launch kernel: one block per ensemble, max_n1 threads per block
+    blocks = num_ensembles
+    threads_per_block = max_n1
+    
+    # Cast pointer arrays to proper type for kernel
+    null_ptr = cp.array([0], dtype=cp.uint64)
+    
+    _multi_ensemble_kernel(
+        (blocks,),
+        (threads_per_block,),
+        (
+            xyt1_ptrs,
+            n1_array,
+            xyt2_ptrs,
+            n2_array,
+            out_totals,
+            grads_ptrs if grads_ptrs is not None else null_ptr,
+            np.int32(num_ensembles),
+        ),
+    )
+    
+    if compute_grad:
+        # Reshape gradient arrays back to (N1_i, 3)
+        grads_list = [grads_arrays[i].reshape(n1_list[i], 3) for i in range(num_ensembles)]
+        return out_totals, grads_list
+    else:
+        return out_totals, None
 
 
