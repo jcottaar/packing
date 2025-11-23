@@ -161,6 +161,51 @@ __device__ __forceinline__ double polygon_area(const d2* v, int n) {
     return a >= 0.0 ? a : -a;
 }
 
+__device__ __forceinline__ void compute_tree_polys_and_aabbs(
+    double3 pose,
+    d2 out_polys[MAX_PIECES][MAX_VERTS_PER_PIECE],
+    double out_aabb_min_x[MAX_PIECES],
+    double out_aabb_max_x[MAX_PIECES],
+    double out_aabb_min_y[MAX_PIECES],
+    double out_aabb_max_y[MAX_PIECES])
+{
+    // Precompute transform for this pose
+    double c = 0.0;
+    double s = 0.0;
+    sincos(pose.z, &s, &c);
+    
+    // Transform each convex piece and compute its AABB
+    for (int pi = 0; pi < MAX_PIECES; ++pi) {
+        int n = const_piece_nverts[pi];
+        double min_x = 1e30, max_x = -1e30;
+        double min_y = 1e30, max_y = -1e30;
+
+        // Load and transform piece with this pose, compute AABB
+        for (int v = 0; v < n; ++v) {
+            int idx = pi * MAX_VERTS_PER_PIECE + v;
+            int base = 2 * idx;
+            double x = const_piece_xy[base + 0];
+            double y = const_piece_xy[base + 1];
+            
+            // Apply pose transform
+            double x_t = c * x - s * y + pose.x;
+            double y_t = s * x + c * y + pose.y;
+            out_polys[pi][v] = make_d2(x_t, y_t);
+            
+            // Update AABB
+            min_x = fmin(min_x, x_t);
+            max_x = fmax(max_x, x_t);
+            min_y = fmin(min_y, y_t);
+            max_y = fmax(max_y, y_t);
+        }
+        
+        out_aabb_min_x[pi] = min_x;
+        out_aabb_max_x[pi] = max_x;
+        out_aabb_min_y[pi] = min_y;
+        out_aabb_max_y[pi] = max_y;
+    }
+}
+
 __device__ double convex_intersection_area(
     const d2* subj, int n_subj,
     const d2* clip, int n_clip)
@@ -210,11 +255,6 @@ __device__ double overlap_ref_with_list(
     const double* row_y = xyt_3xN + 1 * n;
     const double* row_t = xyt_3xN + 2 * n;
     
-    // Precompute ref tree transform ONCE (outside the loop over trees)
-    double c1 = 0.0;
-    double s1 = 0.0;
-    sincos(ref.z, &s1, &c1);
-    
     // Precompute and cache transformed polygons for ref tree ONCE
     d2 ref_polys[MAX_PIECES][MAX_VERTS_PER_PIECE];
     double ref_aabb_min_x[MAX_PIECES];
@@ -222,35 +262,8 @@ __device__ double overlap_ref_with_list(
     double ref_aabb_min_y[MAX_PIECES];
     double ref_aabb_max_y[MAX_PIECES];
     
-    for (int pi = 0; pi < MAX_PIECES; ++pi) {
-        int n1 = const_piece_nverts[pi];
-        double min1_x = 1e30, max1_x = -1e30;
-        double min1_y = 1e30, max1_y = -1e30;
-
-        // Load and transform piece with ref tree's pose, compute AABB
-        for (int v = 0; v < n1; ++v) {
-            int idx = pi * MAX_VERTS_PER_PIECE + v;
-            int base = 2 * idx;
-            double x = const_piece_xy[base + 0];
-            double y = const_piece_xy[base + 1];
-            
-            // Apply ref tree transform
-            double x1 = c1 * x - s1 * y + ref.x;
-            double y1 = s1 * x + c1 * y + ref.y;
-            ref_polys[pi][v] = make_d2(x1, y1);
-            
-            // Update AABB
-            min1_x = fmin(min1_x, x1);
-            max1_x = fmax(max1_x, x1);
-            min1_y = fmin(min1_y, y1);
-            max1_y = fmax(max1_y, y1);
-        }
-        
-        ref_aabb_min_x[pi] = min1_x;
-        ref_aabb_max_x[pi] = max1_x;
-        ref_aabb_min_y[pi] = min1_y;
-        ref_aabb_max_y[pi] = max1_y;
-    }
+    compute_tree_polys_and_aabbs(ref, ref_polys, ref_aabb_min_x, ref_aabb_max_x,
+                                  ref_aabb_min_y, ref_aabb_max_y);
     
     // Loop over all trees in the list
     for (int i = 0; i < n; ++i) {
@@ -274,10 +287,16 @@ __device__ double overlap_ref_with_list(
             continue;  // Trees too far apart to overlap
         }
         
-        // Precompute other tree transform
-        double c2 = 0.0;
-        double s2 = 0.0;
-        sincos(other.z, &s2, &c2);
+        // Precompute and cache transformed polygons for other tree
+        d2 other_polys[MAX_PIECES][MAX_VERTS_PER_PIECE];
+        double other_aabb_min_x[MAX_PIECES];
+        double other_aabb_max_x[MAX_PIECES];
+        double other_aabb_min_y[MAX_PIECES];
+        double other_aabb_max_y[MAX_PIECES];
+        
+        compute_tree_polys_and_aabbs(other, other_polys, other_aabb_min_x, other_aabb_max_x,
+                                      other_aabb_min_y, other_aabb_max_y);
+        
         double total = 0.0;
 
         // Loop over convex pieces of ref tree (now use cached transforms)
@@ -287,35 +306,14 @@ __device__ double overlap_ref_with_list(
             // Loop over convex pieces of other tree
             for (int pj = 0; pj < MAX_PIECES; ++pj) {
                 int n2 = const_piece_nverts[pj];
-                d2 poly2[MAX_VERTS_PER_PIECE];
-                double min2_x = 1e30, max2_x = -1e30;
-                double min2_y = 1e30, max2_y = -1e30;
-
-                for (int v = 0; v < n2; ++v) {
-                    int idx = pj * MAX_VERTS_PER_PIECE + v;
-                    int base = 2 * idx;
-                    double x = const_piece_xy[base + 0];
-                    double y = const_piece_xy[base + 1];
-
-                    // Apply other tree transform
-                    double x2 = c2 * x - s2 * y + other.x;
-                    double y2 = s2 * x + c2 * y + other.y;
-                    poly2[v] = make_d2(x2, y2);
-                    
-                    // Update AABB
-                    min2_x = fmin(min2_x, x2);
-                    max2_x = fmax(max2_x, x2);
-                    min2_y = fmin(min2_y, y2);
-                    max2_y = fmax(max2_y, y2);
-                }
 
                 // AABB overlap test - early exit if no overlap
-                if (ref_aabb_max_x[pi] < min2_x || max2_x < ref_aabb_min_x[pi] ||
-                    ref_aabb_max_y[pi] < min2_y || max2_y < ref_aabb_min_y[pi]) {
+                if (ref_aabb_max_x[pi] < other_aabb_min_x[pj] || other_aabb_max_x[pj] < ref_aabb_min_x[pi] ||
+                    ref_aabb_max_y[pi] < other_aabb_min_y[pj] || other_aabb_max_y[pj] < ref_aabb_min_y[pi]) {
                     continue;  // No AABB overlap, skip expensive intersection
                 }
 
-                total += convex_intersection_area(ref_polys[pi], n1, poly2, n2);
+                total += convex_intersection_area(ref_polys[pi], n1, other_polys[pj], n2);
             }
         }
         
