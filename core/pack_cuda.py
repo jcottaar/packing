@@ -364,51 +364,31 @@ __device__ void overlap_list_total(
         if (out_grads != NULL) {
             const double eps = 1e-6;
 
-            // Zero local gradient
-            local_grad[0] = 0.0;
-            local_grad[1] = 0.0;
-            local_grad[2] = 0.0;
-
-            for (int i = 0; i < n2; ++i) {
-                double3 other;
-                other.x = row_x2[i];
-                other.y = row_y2[i];
-                other.z = row_t2[i];
-
-                // Skip identical poses
-                if (other.x == ref.x && other.y == ref.y && other.z == ref.z) {
-                    continue;
-                }
-
-                // Build single-element flattened 3x1 array [x, y, theta]
-                double other_xyt[3];
-                other_xyt[0] = other.x;
-                other_xyt[1] = other.y;
-                other_xyt[2] = other.z;
-
-                double overlap = overlap_ref_with_list(ref, other_xyt, 1);
-                if (overlap <= 0.0) continue;
-
-                // x
+            // Compute gradients with central finite differences over the
+            // entire other-list at once (fewer calls than per-other loop).
+            double total_overlap = overlap_ref_with_list(ref, xyt2_3xN, n2);
+            if (total_overlap <= 0.0) {
+                local_grad[0] = 0.0;
+                local_grad[1] = 0.0;
+                local_grad[2] = 0.0;
+            } else {
                 double3 ref_px = ref; ref_px.x += eps;
                 double3 ref_mx = ref; ref_mx.x -= eps;
-                double f_px = overlap_ref_with_list(ref_px, other_xyt, 1);
-                double f_mx = overlap_ref_with_list(ref_mx, other_xyt, 1);
-                local_grad[0] += (f_px - f_mx) / (2.0 * eps);
-
-                // y
                 double3 ref_py = ref; ref_py.y += eps;
                 double3 ref_my = ref; ref_my.y -= eps;
-                double f_py = overlap_ref_with_list(ref_py, other_xyt, 1);
-                double f_my = overlap_ref_with_list(ref_my, other_xyt, 1);
-                local_grad[1] += (f_py - f_my) / (2.0 * eps);
-
-                // theta
                 double3 ref_pz = ref; ref_pz.z += eps;
                 double3 ref_mz = ref; ref_mz.z -= eps;
-                double f_pz = overlap_ref_with_list(ref_pz, other_xyt, 1);
-                double f_mz = overlap_ref_with_list(ref_mz, other_xyt, 1);
-                local_grad[2] += (f_pz - f_mz) / (2.0 * eps);
+
+                double f_px = overlap_ref_with_list(ref_px, xyt2_3xN, n2);
+                double f_mx = overlap_ref_with_list(ref_mx, xyt2_3xN, n2);
+                double f_py = overlap_ref_with_list(ref_py, xyt2_3xN, n2);
+                double f_my = overlap_ref_with_list(ref_my, xyt2_3xN, n2);
+                double f_pz = overlap_ref_with_list(ref_pz, xyt2_3xN, n2);
+                double f_mz = overlap_ref_with_list(ref_mz, xyt2_3xN, n2);
+
+                local_grad[0] = (f_px - f_mx) / (2.0 * eps);
+                local_grad[1] = (f_py - f_my) / (2.0 * eps);
+                local_grad[2] = (f_pz - f_mz) / (2.0 * eps);
             }
 
             // Write per-tree gradient to output
