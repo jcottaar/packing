@@ -51,6 +51,11 @@ import shutil
 CONVEX_PIECES: list[Polygon] = kgs.convex_breakdown
 MAX_RADIUS = kgs.tree_max_radius
 
+# Global variable to control floating point precision
+# Set this to 'float32' or 'float64' BEFORE calling any functions
+# Default is 'float64' for maximum precision
+USE_FLOAT32 = False  # Set to True to use float32 instead of float64
+
 
 # ---------------------------------------------------------------------------
 # 2. Internal constants and CUDA code
@@ -1013,10 +1018,18 @@ def _ensure_initialized() -> None:
     persist_dir = os.fspath(kgs.temp_dir)
     persist_path = os.path.join(persist_dir, 'pack_cuda_saved.cu')
 
+    # Perform search-replace to switch between float32 and float64
+    cuda_src = _CUDA_SRC
+    if USE_FLOAT32:
+        # Replace double with float throughout the CUDA code
+        cuda_src = cuda_src.replace('double', 'float')
+        # Fix double3 -> float3
+        cuda_src = cuda_src.replace('float3', 'float3')
+
     # Overwrite the file each time to ensure it matches the compiled source.
     # Let any IO errors propagate so callers see a clear failure.
     with open(persist_path, 'w', encoding='utf-8') as _f:
-        _f.write(_CUDA_SRC)
+        _f.write(cuda_src)
 
     # Compile CUDA module from the in-memory source string. This keeps
     # behavior compatible across CuPy versions that may not accept
@@ -1036,14 +1049,21 @@ def _ensure_initialized() -> None:
     # Load compiled PTX into a CuPy RawModule
     _raw_module = cp.RawModule(path=ptx_path)
     print('hi')
+    print(USE_FLOAT32)
     #_raw_module = cp.RawModule(code=_CUDA_SRC, backend='nvcc', options=())
     _overlap_list_total_kernel = _raw_module.get_function("overlap_list_total_kernel")
 
     # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
+    # Convert to appropriate dtype if using float32
+    if USE_FLOAT32:
+        piece_xy_flat_device = piece_xy_flat.astype(np.float32)
+    else:
+        piece_xy_flat_device = piece_xy_flat
+    
     const_piece_xy_ptr = _raw_module.get_global('const_piece_xy')
     const_piece_nverts_ptr = _raw_module.get_global('const_piece_nverts')
     # Use memcpyHtoD to copy to device constant memory
-    cp.cuda.runtime.memcpy(const_piece_xy_ptr.ptr, piece_xy_flat.ctypes.data, piece_xy_flat.nbytes, cp.cuda.runtime.memcpyHostToDevice)
+    cp.cuda.runtime.memcpy(const_piece_xy_ptr.ptr, piece_xy_flat_device.ctypes.data, piece_xy_flat_device.nbytes, cp.cuda.runtime.memcpyHostToDevice)
     cp.cuda.runtime.memcpy(const_piece_nverts_ptr.ptr, piece_nverts.ctypes.data, piece_nverts.nbytes, cp.cuda.runtime.memcpyHostToDevice)
 
     _initialized = True
@@ -1077,11 +1097,14 @@ def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
     """
     _ensure_initialized()
 
-    xyt1_arr = cp.asarray(xyt1, dtype=cp.float64)
+    # Determine dtype based on USE_FLOAT32 setting
+    dtype = cp.float32 if USE_FLOAT32 else cp.float64
+
+    xyt1_arr = cp.asarray(xyt1, dtype=dtype)
     if xyt1_arr.ndim != 2 or xyt1_arr.shape[1] != 3:
         raise ValueError("xyt1 must be shape (N,3)")
 
-    xyt2_arr = cp.asarray(xyt2, dtype=cp.float64)
+    xyt2_arr = cp.asarray(xyt2, dtype=dtype)
     if xyt2_arr.ndim != 2 or xyt2_arr.shape[1] != 3:
         raise ValueError("xyt2 must be shape (N,3)")
 
@@ -1093,10 +1116,10 @@ def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
     xyt2_3xN = cp.ascontiguousarray(xyt2_arr.T).ravel()
 
     # Allocate a single-element output to hold the accumulated total
-    out_total = cp.zeros(1, dtype=cp.float64)
+    out_total = cp.zeros(1, dtype=dtype)
     
     # Allocate gradient output if requested (gradients are w.r.t. xyt1)
-    out_grads = cp.zeros(n1 * 3, dtype=cp.float64) if compute_grad else None
+    out_grads = cp.zeros(n1 * 3, dtype=dtype) if compute_grad else None
 
     threads_per_block = n1
     blocks = 1
@@ -1104,7 +1127,7 @@ def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
     # Dummy empty array to use when gradient output is not requested.
     # Passing an empty CuPy array is safer than constructing an unowned
     # memory pointer (some CuPy versions reject a zero-sized UnownedMemory).
-    null_ptr = cp.asarray([], dtype=cp.float64)
+    null_ptr = cp.asarray([], dtype=dtype)
 
     _overlap_list_total_kernel(
         (blocks,),

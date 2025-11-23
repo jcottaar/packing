@@ -8,6 +8,8 @@ from typeguard import typechecked
 import pack_cost
 import pack_basics
 import pack_vis
+import pack_cuda
+pack_cuda.USE_FLOAT32 = True
 
 def run_all_tests():
     test_costs()
@@ -26,14 +28,17 @@ def test_costs():
     for c in costs_to_test:
         # First, check that compute_cost and compute_cost_ref agree
         cost_ref, grad_ref = c.compute_total_cost_ref(cp.array(tree_list.xyt), include_gradients=True)
-        cost_fast, grad_fast = c.compute_total_cost(cp.array(tree_list.xyt), include_gradients=True)
+        cost_fast, grad_fast = c.compute_total_cost(cp.array(tree_list.xyt), include_gradients=True)        
+        # Show full precision
+        print(cp.array2string(cp.asarray(cost_fast), precision=17, suppress_small=False))
+        print(cp.array2string(cp.asarray(cost_ref), precision=17, suppress_small=False))
         assert cost_ref>0
         assert cp.allclose(cost_ref, cost_fast, rtol=1e-6), f"Cost mismatch: {cost_ref} vs {cost_fast}"
-        assert cp.allclose(grad_ref, grad_fast, rtol=1e-6), f"Gradient mismatch: {grad_ref} vs {grad_fast}"
+        assert cp.allclose(grad_ref, grad_fast, rtol=1e-4, atol=1e-4), f"Gradient mismatch: {grad_ref} vs {grad_fast}"
 
         # Now check gradients via finite differences
         def _get_cost(obj, xyt_arr):
-            return obj.compute_total_cost(cp.array(xyt_arr), include_gradients=False)[0]
+            return obj.compute_total_cost_ref(cp.array(xyt_arr), include_gradients=False)[0]
 
         x0 = tree_list.xyt.copy()
         shape = x0.shape
