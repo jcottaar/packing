@@ -281,6 +281,7 @@ __device__ double overlap_two_trees(
 // Compute sum of overlap areas between a reference tree `ref` and a list
 // of other trees provided as a flattened 3xN array (row-major: row0=x, row1=y, row2=theta).
 // Optionally computes gradient via double-sided finite differences.
+// Always skips comparing ref with identical pose in the other list.
 __device__ double overlap_ref_with_list(
     const double3 ref,
     const double* __restrict__ xyt_3xN, // flattened row-major: 3 rows, N cols
@@ -310,71 +311,78 @@ __device__ double overlap_ref_with_list(
         other.y = row_y[i];
         other.z = row_t[i];
 
-        if (!(other.x == ref.x && other.y == ref.y && other.z == ref.z)) {
-            double overlap = overlap_two_trees(ref, other, piece_xy, piece_nverts, num_pieces);
-            sum += overlap;
+        // Skip if poses are identical (self-collision)
+        if (other.x == ref.x && other.y == ref.y && other.z == ref.z) {
+            continue;
+        }
 
-            // Compute gradient if requested
-            if (grad_out != NULL && overlap > 0.0) {
-                // Gradient w.r.t. ref.x
-                double3 ref_px = ref; ref_px.x += eps;
-                double3 ref_mx = ref; ref_mx.x -= eps;
-                double f_px = overlap_two_trees(ref_px, other, piece_xy, piece_nverts, num_pieces);
-                double f_mx = overlap_two_trees(ref_mx, other, piece_xy, piece_nverts, num_pieces);
-                grad_out[0] += (f_px - f_mx) / (2.0 * eps);
+        double overlap = overlap_two_trees(ref, other, piece_xy, piece_nverts, num_pieces);
+        sum += overlap;
 
-                // Gradient w.r.t. ref.y
-                double3 ref_py = ref; ref_py.y += eps;
-                double3 ref_my = ref; ref_my.y -= eps;
-                double f_py = overlap_two_trees(ref_py, other, piece_xy, piece_nverts, num_pieces);
-                double f_my = overlap_two_trees(ref_my, other, piece_xy, piece_nverts, num_pieces);
-                grad_out[1] += (f_py - f_my) / (2.0 * eps);
+        // Compute gradient if requested
+        if (grad_out != NULL && overlap > 0.0) {
+            // Gradient w.r.t. ref.x
+            double3 ref_px = ref; ref_px.x += eps;
+            double3 ref_mx = ref; ref_mx.x -= eps;
+            double f_px = overlap_two_trees(ref_px, other, piece_xy, piece_nverts, num_pieces);
+            double f_mx = overlap_two_trees(ref_mx, other, piece_xy, piece_nverts, num_pieces);
+            grad_out[0] += (f_px - f_mx) / (2.0 * eps);
 
-                // Gradient w.r.t. ref.z (theta)
-                double3 ref_pz = ref; ref_pz.z += eps;
-                double3 ref_mz = ref; ref_mz.z -= eps;
-                double f_pz = overlap_two_trees(ref_pz, other, piece_xy, piece_nverts, num_pieces);
-                double f_mz = overlap_two_trees(ref_mz, other, piece_xy, piece_nverts, num_pieces);
-                grad_out[2] += (f_pz - f_mz) / (2.0 * eps);
-            }
+            // Gradient w.r.t. ref.y
+            double3 ref_py = ref; ref_py.y += eps;
+            double3 ref_my = ref; ref_my.y -= eps;
+            double f_py = overlap_two_trees(ref_py, other, piece_xy, piece_nverts, num_pieces);
+            double f_my = overlap_two_trees(ref_my, other, piece_xy, piece_nverts, num_pieces);
+            grad_out[1] += (f_py - f_my) / (2.0 * eps);
+
+            // Gradient w.r.t. ref.z (theta)
+            double3 ref_pz = ref; ref_pz.z += eps;
+            double3 ref_mz = ref; ref_mz.z -= eps;
+            double f_pz = overlap_two_trees(ref_pz, other, piece_xy, piece_nverts, num_pieces);
+            double f_mz = overlap_two_trees(ref_mz, other, piece_xy, piece_nverts, num_pieces);
+            grad_out[2] += (f_pz - f_mz) / (2.0 * eps);
         }
     }
 
     return sum;
 }
 
-// Sum overlaps for each tree in the provided list against the entire list.
-// This does NOT exploit symmetry; each unordered pair will be counted twice
-// (ref vs other, and other vs ref).
-// Computes gradients for all trees if out_grads is non-NULL.
+// Sum overlaps between trees in xyt1 and trees in xyt2.
+// Each tree in xyt1 is compared against all trees in xyt2.
+// Identical poses are automatically skipped.
+// Result is divided by 2 since each pair is counted twice.
+// Computes gradients for all trees in xyt1 if out_grads is non-NULL.
 __device__ void overlap_list_total(
-    const double* __restrict__ xyt_3xN,
-    const int n,
+    const double* __restrict__ xyt1_3xN,
+    const int n1,
+    const double* __restrict__ xyt2_3xN,
+    const int n2,
     const double* __restrict__ piece_xy,
     const int* __restrict__ piece_nverts,
     const int num_pieces,
     double* __restrict__ out_total,
-    double* __restrict__ out_grads) // if non-NULL, write gradients to out_grads[n*3]
+    double* __restrict__ out_grads) // if non-NULL, write gradients to out_grads[n1*3]
 {
     // Single-block version: assume gridDim.x == 1 and no cross-block striding.
-    // Each thread computes at most one reference index (its threadIdx.x) and
+    // Each thread computes at most one reference index (its threadIdx.x from xyt1) and
     // we reduce across the block into shared memory, then thread 0 writes the
     // final total to out_total[0]. This avoids atomics.
     int tid = threadIdx.x;
-    const double* row_x = xyt_3xN + 0 * n;
-    const double* row_y = xyt_3xN + 1 * n;
-    const double* row_t = xyt_3xN + 2 * n;
+
+    const double* row_x = xyt1_3xN + 0 * n1;
+    const double* row_y = xyt1_3xN + 1 * n1;
+    const double* row_t = xyt1_3xN + 2 * n1;
 
     double local_sum = 0.0;
     double local_grad[3] = {0.0, 0.0, 0.0};
 
-    if (tid < n) {
+    if (tid < n1) {
         double3 ref;
         ref.x = row_x[tid];
         ref.y = row_y[tid];
         ref.z = row_t[tid];
 
-        local_sum = overlap_ref_with_list(ref, xyt_3xN, n, piece_xy, piece_nverts, num_pieces, 
+        local_sum = overlap_ref_with_list(ref, xyt2_3xN, n2, piece_xy, piece_nverts, num_pieces, 
                                           out_grads != NULL ? local_grad : NULL);
         
         // Write per-tree gradient to output
@@ -390,34 +398,37 @@ __device__ void overlap_list_total(
     sdata[tid] = local_sum;
     __syncthreads();
 
-    // Reduce only the first n elements (not blockDim.x)
-    for (int stride = 1; stride < n; stride *= 2) {
+    // Reduce only the first n1 elements (not blockDim.x)
+    for (int stride = 1; stride < n1; stride *= 2) {
         int index = 2 * stride * tid;
-        if (index + stride < n) {
+        if (index + stride < n1) {
             sdata[index] += sdata[index + stride];
         }
         __syncthreads();
     }
 
     if (tid == 0) {
-        out_total[0] = sdata[0]/2; // each pair counted twice
+        // Divide by 2 since each pair is counted twice
+        out_total[0] = sdata[0] / 2.0;
     }
     
 }
 
-// Kernel: one thread per reference element computes sum(ref vs all others)
+// Kernel: one thread per reference element in xyt1 computes sum(ref vs all in xyt2)
 __global__ void overlap_list_total_kernel(
-    const double* __restrict__ xyt_3xN, // flattened row-major: 3 rows, N cols
-    const int n,
+    const double* __restrict__ xyt1_3xN, // flattened row-major: 3 rows, N1 cols
+    const int n1,
+    const double* __restrict__ xyt2_3xN, // flattened row-major: 3 rows, N2 cols
+    const int n2,
     const double* __restrict__ piece_xy,
     const int* __restrict__ piece_nverts,
     const int num_pieces,
     double* __restrict__ out_total,
-    double* __restrict__ out_grads) // if non-NULL, write gradients
+    double* __restrict__ out_grads) // if non-NULL, write gradients for xyt1
 {
     // Delegate to the threaded device helper which accumulates
     // per-thread partial sums into out_total[0] and computes gradients.
-    overlap_list_total(xyt_3xN, n, piece_xy, piece_nverts, num_pieces, out_total, out_grads);
+    overlap_list_total(xyt1_3xN, n1, xyt2_3xN, n2, piece_xy, piece_nverts, num_pieces, out_total, out_grads);
 }
 
 __global__ void overlap_two_trees_kernel(
@@ -602,68 +613,81 @@ def overlap_two_trees(xyt1, xyt2) -> cp.ndarray:
     return areas_arr[0]
 
 
-def overlap_list_total(xyt, compute_grad: bool = True):
-    """Compute total (non-symmetric) overlap sum for a list of poses.
+def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
+    """Compute total overlap sum between poses in xyt1 and xyt2.
 
     Parameters
     ----------
-    xyt : array-like, shape (N,3)
-        List of poses (x, y, theta).
+    xyt1 : array-like, shape (N1,3)
+        First list of poses (x, y, theta).
+    xyt2 : array-like, shape (N2,3)
+        Second list of poses (x, y, theta).
     compute_grad : bool, optional
         If True, compute and return gradients. Default is True.
 
     Returns
     -------
     total : float
-        Sum over all reference elements of sum(overlap(ref, other)). Each
-        unordered pair is counted twice (ref vs other, and other vs ref).
-    grads : cp.ndarray, shape (N,3), optional
-        Gradients with respect to each input pose (x, y, theta).
+        Sum of overlap areas between each tree in xyt1 and each tree in xyt2,
+        divided by 2 (since each pair is counted twice).
+    grads : cp.ndarray, shape (N1,3), optional
+        Gradients with respect to each pose in xyt1 (x, y, theta).
         Only returned if compute_grad=True.
     """
     _ensure_initialized()
 
-    xyt_arr = cp.asarray(xyt, dtype=cp.float64)
-    if xyt_arr.ndim != 2 or xyt_arr.shape[1] != 3:
-        raise ValueError("xyt must be shape (N,3)")
+    xyt1_arr = cp.asarray(xyt1, dtype=cp.float64)
+    if xyt1_arr.ndim != 2 or xyt1_arr.shape[1] != 3:
+        raise ValueError("xyt1 must be shape (N,3)")
 
-    n = int(xyt_arr.shape[0])
+    xyt2_arr = cp.asarray(xyt2, dtype=cp.float64)
+    if xyt2_arr.ndim != 2 or xyt2_arr.shape[1] != 3:
+        raise ValueError("xyt2 must be shape (N,3)")
+
+    n1 = int(xyt1_arr.shape[0])
+    n2 = int(xyt2_arr.shape[0])
 
     # Flatten to 3xN row-major so rows are x,y,theta
-    xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
+    xyt1_3xN = cp.ascontiguousarray(xyt1_arr.T).ravel()
+    xyt2_3xN = cp.ascontiguousarray(xyt2_arr.T).ravel()
 
     # Allocate a single-element output to hold the accumulated total
     out_total = cp.zeros(1, dtype=cp.float64)
     
-    # Allocate gradient output if requested
-    out_grads = cp.zeros(n * 3, dtype=cp.float64) if compute_grad else None
+    # Allocate gradient output if requested (gradients are w.r.t. xyt1)
+    out_grads = cp.zeros(n1 * 3, dtype=cp.float64) if compute_grad else None
 
-    threads_per_block = n
+    threads_per_block = n1
     blocks = 1
+
+    # Dummy empty array to use when gradient output is not requested.
+    # Passing an empty CuPy array is safer than constructing an unowned
+    # memory pointer (some CuPy versions reject a zero-sized UnownedMemory).
+    null_ptr = cp.asarray([], dtype=cp.float64)
 
     _overlap_list_total_kernel(
         (blocks,),
         (threads_per_block,),
         (
-            xyt_3xN,
-            np.int32(n),
+            xyt1_3xN,
+            np.int32(n1),
+            xyt2_3xN,
+            np.int32(n2),
             _piece_xy_d,
             _piece_nverts_d,
             np.int32(_num_pieces),
             out_total,
-            out_grads if out_grads is not None else cp.cuda.memory.MemoryPointer(cp.cuda.UnownedMemory(0, 0, None), 0),
+            out_grads if out_grads is not None else null_ptr,
         ),
     )
 
     # Ensure kernel finished and results are visible
-    cp.cuda.Stream.null.synchronize()
-
-    total = float(out_total[0])
+    # cp.cuda.Stream.null.synchronize()
     
     if compute_grad:
-        # Reshape gradients back to (N, 3)
-        grads = out_grads.reshape(n, 3)
-        return total, grads
+        # Reshape gradients back to (N1, 3)
+        grads = out_grads.reshape(n1, 3)
+        return out_total, grads
     else:
-        return total
+        return out_total
 

@@ -43,7 +43,7 @@ class CollisionCost(kgs.BaseClass):
     def compute_cost(self, xyt:cp.ndarray, include_gradients:bool):
         # Subclass can implement faster version
         #cost,grad =  self.compute_cost_ref(xyt, include_gradients)
-        cost,grad = pack_cuda.overlap_list_total(xyt)
+        cost,grad = pack_cuda.overlap_list_total(xyt, xyt)
         return cost,grad
         
 class CollisionCostDummy(CollisionCost):
