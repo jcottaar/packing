@@ -1,5 +1,4 @@
 
-
 # tools/kernel_concurrency_test.py
 # Usage: python3 tools/kernel_concurrency_test.py
 # Make sure you run this in the Python environment that has CuPy and your repo available.
@@ -28,6 +27,8 @@ def run_trial(num_streams, iters_per_stream, xyt1_np, xyt2_np):
     # Flatten 3xN row-major as kernel expects
     xyt1_3xN = cp.ascontiguousarray(cp.asarray(xyt1_np).T).ravel()
     xyt2_3xN = cp.ascontiguousarray(cp.asarray(xyt2_np).T).ravel()
+    # dynamic shared memory size (3 rows * n2 cols * 8 bytes/double)
+    shared_mem = 3 * n2 * 8
 
     # Grab raw kernel and device arrays from pack_cuda (uses private names)
     kernel = pack_cuda._overlap_list_total_kernel
@@ -44,8 +45,9 @@ def run_trial(num_streams, iters_per_stream, xyt1_np, xyt2_np):
         with stream:
             kernel(
                 (1,), (n1,),
-                (xyt1_3xN, np.int32(n1), xyt2_3xN, np.int32(n2), piece_xy, piece_nverts, num_pieces, out_totals[s_idx], cp.zeros(1)),
-                stream=stream
+                (xyt1_3xN, np.int32(n1), xyt2_3xN, np.int32(n2), out_totals[s_idx], cp.zeros(1)),
+                stream=stream,
+                shared_mem=shared_mem
             )
     # Ensure warmup finished
     for s in streams:
@@ -58,8 +60,9 @@ def run_trial(num_streams, iters_per_stream, xyt1_np, xyt2_np):
             with stream:
                 kernel(
                     (1,), (n1,),
-                    (xyt1_3xN, np.int32(n1), xyt2_3xN, np.int32(n2), piece_xy, piece_nverts, num_pieces, out_totals[s_idx], cp.zeros(1)),
-                    stream=stream
+                    (xyt1_3xN, np.int32(n1), xyt2_3xN, np.int32(n2), out_totals[s_idx], cp.zeros(1)),
+                    stream=stream,
+                    shared_mem=shared_mem
                 )
     # Wait for all streams to finish
     for s in streams:
@@ -71,12 +74,14 @@ def run_trial(num_streams, iters_per_stream, xyt1_np, xyt2_np):
     kernels_per_sec = total_kernels / elapsed
     return kernels_per_sec, elapsed
 
-
-# Parameters to tune
-N = 1024                       # number of trees (threads per block)
-iters = 1                    # iterations per stream
-xyt = make_input(N)
-
 if __name__ == "__main__":
-    kps, t = run_trial(1, iters, xyt[:512], xyt[:100])
-    print(f"streams=16\t{int(kps)}\t\t{t:.3f}")
+    # Parameters to tune
+    N = 1024                       # number of trees (threads per block)
+    iters = 1                    # iterations per stream
+    xyt = make_input(N)
+    pack_cuda._ensure_initialized()
+    packs = [1]  # number of concurrent streams to test
+    print("Streams\tKernels/sec\tElapsed(s)")
+    for s in packs:
+        kps, t = run_trial(s, iters, xyt[:200], xyt[:200])
+        print(f"{s}\t{int(kps)}\t\t{t:.3f}")
