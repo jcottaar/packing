@@ -575,6 +575,7 @@ def _ensure_initialized() -> None:
 
     ptx_path = os.path.join(persist_dir, 'pack_cuda_saved.ptx')
     cmd = [nvcc_path, "-lineinfo", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
+    cmd = [nvcc_path, "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
 
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
@@ -582,7 +583,8 @@ def _ensure_initialized() -> None:
 
     # Load compiled PTX into a CuPy RawModule
     _raw_module = cp.RawModule(path=ptx_path)
-    #_raw_module = cp.RawModule(path='/mnt/d/packing/temp/pack_cuda_saved.ptx', backend='nvcc', options=('-lineinfo',))
+    print('hi')
+    #_raw_module = cp.RawModule(code=_CUDA_SRC, backend='nvcc', options=())
     _overlap_list_total_kernel = _raw_module.get_function("overlap_list_total_kernel")
 
     # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
