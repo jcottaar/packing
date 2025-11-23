@@ -57,12 +57,12 @@ os.makedirs(data_dir, exist_ok=True)
 os.makedirs(temp_dir, exist_ok=True)
 
 
-if not env=='kaggle':
-    import git 
-    repo = git.Repo(search_parent_directories=True)
-    git_commit_id = repo.head.object.hexsha
-else:
-    git_commit_id = 'kaggle'
+# if not env=='kaggle':
+#     import git 
+#     repo = git.Repo(search_parent_directories=True)
+#     git_commit_id = repo.head.object.hexsha
+# else:
+#     git_commit_id = 'kaggle'
 
 
 '''

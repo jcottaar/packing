@@ -24,6 +24,9 @@ from shapely.geometry import Polygon
 from shapely.geometry.polygon import orient
 
 import kaggle_support as kgs
+import os
+import subprocess
+import shutil
 
 # ---------------------------------------------------------------------------
 # 1. User section: insert your convex decomposition here
@@ -60,6 +63,7 @@ MAX_VERTS_PER_PIECE = 4           # each convex piece: up to 4 vertices
 MAX_INTERSECTION_VERTS = 8        # ≤ n1 + n2 (4 + 4)
 
 #include <stdio.h>
+#include <math.h>
 
 _CUDA_SRC = r"""
 extern "C" {
@@ -67,6 +71,10 @@ extern "C" {
 #define MAX_VERTS_PER_PIECE 4
 #define MAX_INTERSECTION_VERTS 8
 #define MAX_RADIUS """ + str(MAX_RADIUS) + r"""
+
+// Constant memory for polygon vertices - cached on-chip, broadcast to all threads
+__constant__ double const_piece_xy[MAX_PIECES * MAX_VERTS_PER_PIECE * 2];
+__constant__ int const_piece_nverts[MAX_PIECES];
 
 typedef struct {
     double x;
@@ -187,109 +195,13 @@ __device__ double convex_intersection_area(
     return polygon_area(polyA, nA);
 }
 
-__device__ double overlap_two_trees(
-    const double3 a,
-    const double3 b,
-    const double* __restrict__ piece_xy,
-    const int* __restrict__ piece_nverts,
-    const int num_pieces)
-{
-    // Compute overlap area between two trees given their absolute transforms.
-    // Tree 1: (a.x, a.y, a.z)
-    // Tree 2: (b.x, b.y, b.z)
-    
-    // Early exit: check if tree centers are too far apart
-    double dx = b.x - a.x;
-    double dy = b.y - a.y;
-    double dist_sq = dx*dx + dy*dy;
-    double max_overlap_dist = 2.0 * MAX_RADIUS;
-    
-    if (dist_sq > max_overlap_dist * max_overlap_dist) {
-        return 0.0;  // Trees too far apart to overlap
-    }
-    
-    double c1 = cos(a.z);
-    double s1 = sin(a.z);
-    double c2 = cos(b.z);
-    double s2 = sin(b.z);
-    double total = 0.0;
-
-    // Loop over convex pieces of tree 1
-    for (int i = 0; i < num_pieces; ++i) {
-        int n1 = piece_nverts[i];
-        d2 poly1[MAX_VERTS_PER_PIECE];
-        double min1_x = 1e30, max1_x = -1e30;
-        double min1_y = 1e30, max1_y = -1e30;
-
-        // Load and transform piece with tree 1's pose, compute AABB
-        for (int v = 0; v < n1; ++v) {
-            int idx = i * MAX_VERTS_PER_PIECE + v;
-            int base = 2 * idx;
-            double x = piece_xy[base + 0];
-            double y = piece_xy[base + 1];
-            
-            // Apply tree 1 transform
-            double x1 = c1 * x - s1 * y + a.x;
-            double y1 = s1 * x + c1 * y + a.y;
-            poly1[v] = make_d2(x1, y1);
-            
-            // Update AABB
-            min1_x = fmin(min1_x, x1);
-            max1_x = fmax(max1_x, x1);
-            min1_y = fmin(min1_y, y1);
-            max1_y = fmax(max1_y, y1);
-        }
-
-        // Loop over convex pieces of tree 2
-        for (int j = 0; j < num_pieces; ++j) {
-            int n2 = piece_nverts[j];
-            d2 poly2[MAX_VERTS_PER_PIECE];
-            double min2_x = 1e30, max2_x = -1e30;
-            double min2_y = 1e30, max2_y = -1e30;
-
-            for (int v = 0; v < n2; ++v) {
-                int idx = j * MAX_VERTS_PER_PIECE + v;
-                int base = 2 * idx;
-                double x = piece_xy[base + 0];
-                double y = piece_xy[base + 1];
-
-                // Apply tree 2 transform
-                double x2 = c2 * x - s2 * y + b.x;
-                double y2 = s2 * x + c2 * y + b.y;
-                poly2[v] = make_d2(x2, y2);
-                
-                // Update AABB
-                min2_x = fmin(min2_x, x2);
-                max2_x = fmax(max2_x, x2);
-                min2_y = fmin(min2_y, y2);
-                max2_y = fmax(max2_y, y2);
-            }
-
-            // AABB overlap test - early exit if no overlap
-            if (max1_x < min2_x || max2_x < min1_x ||
-                max1_y < min2_y || max2_y < min1_y) {
-                continue;  // No AABB overlap, skip expensive intersection
-            }
-
-            total += convex_intersection_area(poly1, n1, poly2, n2);
-        }
-    }
-
-    return total;
-}
-
 // Compute sum of overlap areas between a reference tree `ref` and a list
 // of other trees provided as a flattened 3xN array (row-major: row0=x, row1=y, row2=theta).
-// Optionally computes gradient via double-sided finite differences.
 // Always skips comparing ref with identical pose in the other list.
 __device__ double overlap_ref_with_list(
     const double3 ref,
     const double* __restrict__ xyt_3xN, // flattened row-major: 3 rows, N cols
-    const int n,
-    const double* __restrict__ piece_xy,
-    const int* __restrict__ piece_nverts,
-    const int num_pieces,
-    double* __restrict__ grad_out) // if non-NULL, write gradient to grad_out[3]: [dx, dy, dtheta]
+    const int n)
 {
     const double eps = 1e-6;
     double sum = 0.0;
@@ -297,14 +209,50 @@ __device__ double overlap_ref_with_list(
     const double* row_x = xyt_3xN + 0 * n;
     const double* row_y = xyt_3xN + 1 * n;
     const double* row_t = xyt_3xN + 2 * n;
+    
+    // Precompute ref tree transform ONCE (outside the loop over trees)
+    double c1 = 0.0;
+    double s1 = 0.0;
+    sincos(ref.z, &s1, &c1);
+    
+    // Precompute and cache transformed polygons for ref tree ONCE
+    d2 ref_polys[MAX_PIECES][MAX_VERTS_PER_PIECE];
+    double ref_aabb_min_x[MAX_PIECES];
+    double ref_aabb_max_x[MAX_PIECES];
+    double ref_aabb_min_y[MAX_PIECES];
+    double ref_aabb_max_y[MAX_PIECES];
+    
+    for (int pi = 0; pi < MAX_PIECES; ++pi) {
+        int n1 = const_piece_nverts[pi];
+        double min1_x = 1e30, max1_x = -1e30;
+        double min1_y = 1e30, max1_y = -1e30;
 
-    // Initialize gradients if requested
-    if (grad_out != NULL) {
-        grad_out[0] = 0.0;
-        grad_out[1] = 0.0;
-        grad_out[2] = 0.0;
+        // Load and transform piece with ref tree's pose, compute AABB
+        for (int v = 0; v < n1; ++v) {
+            int idx = pi * MAX_VERTS_PER_PIECE + v;
+            int base = 2 * idx;
+            double x = const_piece_xy[base + 0];
+            double y = const_piece_xy[base + 1];
+            
+            // Apply ref tree transform
+            double x1 = c1 * x - s1 * y + ref.x;
+            double y1 = s1 * x + c1 * y + ref.y;
+            ref_polys[pi][v] = make_d2(x1, y1);
+            
+            // Update AABB
+            min1_x = fmin(min1_x, x1);
+            max1_x = fmax(max1_x, x1);
+            min1_y = fmin(min1_y, y1);
+            max1_y = fmax(max1_y, y1);
+        }
+        
+        ref_aabb_min_x[pi] = min1_x;
+        ref_aabb_max_x[pi] = max1_x;
+        ref_aabb_min_y[pi] = min1_y;
+        ref_aabb_max_y[pi] = max1_y;
     }
-
+    
+    // Loop over all trees in the list
     for (int i = 0; i < n; ++i) {
         double3 other;
         other.x = row_x[i];
@@ -316,32 +264,62 @@ __device__ double overlap_ref_with_list(
             continue;
         }
 
-        double overlap = overlap_two_trees(ref, other, piece_xy, piece_nverts, num_pieces);
-        sum += overlap;
-
-        // Compute gradient if requested
-        if (grad_out != NULL && overlap > 0.0) {
-            // Gradient w.r.t. ref.x
-            double3 ref_px = ref; ref_px.x += eps;
-            double3 ref_mx = ref; ref_mx.x -= eps;
-            double f_px = overlap_two_trees(ref_px, other, piece_xy, piece_nverts, num_pieces);
-            double f_mx = overlap_two_trees(ref_mx, other, piece_xy, piece_nverts, num_pieces);
-            grad_out[0] += (f_px - f_mx) / (2.0 * eps);
-
-            // Gradient w.r.t. ref.y
-            double3 ref_py = ref; ref_py.y += eps;
-            double3 ref_my = ref; ref_my.y -= eps;
-            double f_py = overlap_two_trees(ref_py, other, piece_xy, piece_nverts, num_pieces);
-            double f_my = overlap_two_trees(ref_my, other, piece_xy, piece_nverts, num_pieces);
-            grad_out[1] += (f_py - f_my) / (2.0 * eps);
-
-            // Gradient w.r.t. ref.z (theta)
-            double3 ref_pz = ref; ref_pz.z += eps;
-            double3 ref_mz = ref; ref_mz.z -= eps;
-            double f_pz = overlap_two_trees(ref_pz, other, piece_xy, piece_nverts, num_pieces);
-            double f_mz = overlap_two_trees(ref_mz, other, piece_xy, piece_nverts, num_pieces);
-            grad_out[2] += (f_pz - f_mz) / (2.0 * eps);
+        // Early exit: check if tree centers are too far apart
+        double dx = other.x - ref.x;
+        double dy = other.y - ref.y;
+        double dist_sq = dx*dx + dy*dy;
+        double max_overlap_dist = 2.0 * MAX_RADIUS;
+        
+        if (dist_sq > max_overlap_dist * max_overlap_dist) {
+            continue;  // Trees too far apart to overlap
         }
+        
+        // Precompute other tree transform
+        double c2 = 0.0;
+        double s2 = 0.0;
+        sincos(other.z, &s2, &c2);
+        double total = 0.0;
+
+        // Loop over convex pieces of ref tree (now use cached transforms)
+        for (int pi = 0; pi < MAX_PIECES; ++pi) {
+            int n1 = const_piece_nverts[pi];
+
+            // Loop over convex pieces of other tree
+            for (int pj = 0; pj < MAX_PIECES; ++pj) {
+                int n2 = const_piece_nverts[pj];
+                d2 poly2[MAX_VERTS_PER_PIECE];
+                double min2_x = 1e30, max2_x = -1e30;
+                double min2_y = 1e30, max2_y = -1e30;
+
+                for (int v = 0; v < n2; ++v) {
+                    int idx = pj * MAX_VERTS_PER_PIECE + v;
+                    int base = 2 * idx;
+                    double x = const_piece_xy[base + 0];
+                    double y = const_piece_xy[base + 1];
+
+                    // Apply other tree transform
+                    double x2 = c2 * x - s2 * y + other.x;
+                    double y2 = s2 * x + c2 * y + other.y;
+                    poly2[v] = make_d2(x2, y2);
+                    
+                    // Update AABB
+                    min2_x = fmin(min2_x, x2);
+                    max2_x = fmax(max2_x, x2);
+                    min2_y = fmin(min2_y, y2);
+                    max2_y = fmax(max2_y, y2);
+                }
+
+                // AABB overlap test - early exit if no overlap
+                if (ref_aabb_max_x[pi] < min2_x || max2_x < ref_aabb_min_x[pi] ||
+                    ref_aabb_max_y[pi] < min2_y || max2_y < ref_aabb_min_y[pi]) {
+                    continue;  // No AABB overlap, skip expensive intersection
+                }
+
+                total += convex_intersection_area(ref_polys[pi], n1, poly2, n2);
+            }
+        }
+        
+        sum += total;
     }
 
     return sum;
@@ -357,9 +335,6 @@ __device__ void overlap_list_total(
     const int n1,
     const double* __restrict__ xyt2_3xN,
     const int n2,
-    const double* __restrict__ piece_xy,
-    const int* __restrict__ piece_nverts,
-    const int num_pieces,
     double* __restrict__ out_total,
     double* __restrict__ out_grads) // if non-NULL, write gradients to out_grads[n1*3]
 {
@@ -372,6 +347,9 @@ __device__ void overlap_list_total(
     const double* row_x = xyt1_3xN + 0 * n1;
     const double* row_y = xyt1_3xN + 1 * n1;
     const double* row_t = xyt1_3xN + 2 * n1;
+    const double* row_x2 = xyt2_3xN + 0 * n2;
+    const double* row_y2 = xyt2_3xN + 1 * n2;
+    const double* row_t2 = xyt2_3xN + 2 * n2;
 
     double local_sum = 0.0;
     double local_grad[3] = {0.0, 0.0, 0.0};
@@ -382,34 +360,69 @@ __device__ void overlap_list_total(
         ref.y = row_y[tid];
         ref.z = row_t[tid];
 
-        local_sum = overlap_ref_with_list(ref, xyt2_3xN, n2, piece_xy, piece_nverts, num_pieces, 
-                                          out_grads != NULL ? local_grad : NULL);
-        
-        // Write per-tree gradient to output
+        // Compute overlap sum; gradients computed below if requested.
+        local_sum = overlap_ref_with_list(ref, xyt2_3xN, n2);
+
         if (out_grads != NULL) {
+            const double eps = 1e-6;
+
+            // Zero local gradient
+            local_grad[0] = 0.0;
+            local_grad[1] = 0.0;
+            local_grad[2] = 0.0;
+
+            for (int i = 0; i < n2; ++i) {
+                double3 other;
+                other.x = row_x2[i];
+                other.y = row_y2[i];
+                other.z = row_t2[i];
+
+                // Skip identical poses
+                if (other.x == ref.x && other.y == ref.y && other.z == ref.z) {
+                    continue;
+                }
+
+                // Build single-element flattened 3x1 array [x, y, theta]
+                double other_xyt[3];
+                other_xyt[0] = other.x;
+                other_xyt[1] = other.y;
+                other_xyt[2] = other.z;
+
+                double overlap = overlap_ref_with_list(ref, other_xyt, 1);
+                if (overlap <= 0.0) continue;
+
+                // x
+                double3 ref_px = ref; ref_px.x += eps;
+                double3 ref_mx = ref; ref_mx.x -= eps;
+                double f_px = overlap_ref_with_list(ref_px, other_xyt, 1);
+                double f_mx = overlap_ref_with_list(ref_mx, other_xyt, 1);
+                local_grad[0] += (f_px - f_mx) / (2.0 * eps);
+
+                // y
+                double3 ref_py = ref; ref_py.y += eps;
+                double3 ref_my = ref; ref_my.y -= eps;
+                double f_py = overlap_ref_with_list(ref_py, other_xyt, 1);
+                double f_my = overlap_ref_with_list(ref_my, other_xyt, 1);
+                local_grad[1] += (f_py - f_my) / (2.0 * eps);
+
+                // theta
+                double3 ref_pz = ref; ref_pz.z += eps;
+                double3 ref_mz = ref; ref_mz.z -= eps;
+                double f_pz = overlap_ref_with_list(ref_pz, other_xyt, 1);
+                double f_mz = overlap_ref_with_list(ref_mz, other_xyt, 1);
+                local_grad[2] += (f_pz - f_mz) / (2.0 * eps);
+            }
+
+            // Write per-tree gradient to output
             out_grads[tid * 3 + 0] = local_grad[0];
             out_grads[tid * 3 + 1] = local_grad[1];
             out_grads[tid * 3 + 2] = local_grad[2];
         }
     }
 
-    // Shared-memory reduction (assumes blockDim.x <= 1024)
-    __shared__ double sdata[1024];
-    sdata[tid] = local_sum;
-    __syncthreads();
-
-    // Reduce only the first n1 elements (not blockDim.x)
-    for (int stride = 1; stride < n1; stride *= 2) {
-        int index = 2 * stride * tid;
-        if (index + stride < n1) {
-            sdata[index] += sdata[index + stride];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        // Divide by 2 since each pair is counted twice
-        out_total[0] = sdata[0] / 2.0;
+    // Atomic reduction - faster for small thread counts, avoids __syncthreads() overhead
+    if (tid < n1) {
+        atomicAdd(out_total, local_sum / 2.0);
     }
     
 }
@@ -420,35 +433,19 @@ __global__ void overlap_list_total_kernel(
     const int n1,
     const double* __restrict__ xyt2_3xN, // flattened row-major: 3 rows, N2 cols
     const int n2,
-    const double* __restrict__ piece_xy,
-    const int* __restrict__ piece_nverts,
-    const int num_pieces,
     double* __restrict__ out_total,
     double* __restrict__ out_grads) // if non-NULL, write gradients for xyt1
 {
     // Delegate to the threaded device helper which accumulates
     // per-thread partial sums into out_total[0] and computes gradients.
-    overlap_list_total(xyt1_3xN, n1, xyt2_3xN, n2, piece_xy, piece_nverts, num_pieces, out_total, out_grads);
-}
-
-__global__ void overlap_two_trees_kernel(
-    const double tx1, const double ty1, const double th1,
-    const double tx2, const double ty2, const double th2,
-    const double* __restrict__ piece_xy,      // length num_pieces * MAX_VERTS_PER_PIECE * 2
-    const int*    __restrict__ piece_nverts,  // length num_pieces
-    const int num_pieces,
-    double* __restrict__ out_area)
-{
-    // Accept scalar inputs from the host, but construct double3 PODs
-    double3 a; a.x = tx1; a.y = ty1; a.z = th1;
-    double3 b; b.x = tx2; b.y = ty2; b.z = th2;
-
-    out_area[0] = overlap_two_trees(a, b, piece_xy, piece_nverts, num_pieces);
+    // Note: piece data comes from constant memory (const_piece_xy, const_piece_nverts)
+    overlap_list_total(xyt1_3xN, n1, xyt2_3xN, n2, out_total, out_grads);
 }
 
 
 } // extern "C"
 """
+
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +460,6 @@ _num_pieces: int = 0
 
 # Compiled CUDA module and kernel
 _raw_module: cp.RawModule | None = None
-_overlap_two_trees_kernel: cp.RawKernel | None = None
 _overlap_list_total_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
@@ -540,14 +536,14 @@ def _ensure_initialized() -> None:
 
     On first call, this:
     - Converts CONVEX_PIECES into flat NumPy arrays.
-    - Uploads the convex pieces to device memory.
+    - Uploads the convex pieces to constant memory on device.
     - Compiles the CUDA source and fetches the overlap kernel.
 
     Subsequent calls are no-ops, so you can safely call this at the start
     of public API functions.
     """
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module, _overlap_two_trees_kernel, _overlap_list_total_kernel
+    global _num_pieces, _raw_module,  _overlap_list_total_kernel
 
     if _initialized:
         return
@@ -556,12 +552,45 @@ def _ensure_initialized() -> None:
 
     _num_pieces = piece_nverts.shape[0]
 
+    # Keep host copies for reference (not used by kernels anymore)
     _piece_xy_d = cp.asarray(piece_xy_flat, dtype=cp.float64)
     _piece_nverts_d = cp.asarray(piece_nverts, dtype=cp.int32)
 
-    _raw_module = cp.RawModule(code=_CUDA_SRC, options=("--std=c++11",))
-    _overlap_two_trees_kernel = _raw_module.get_function("overlap_two_trees_kernel")
+    # Persist the CUDA source to a stable .cu file inside kgs.temp_dir
+    # and compile from that file so profilers can correlate source lines.
+    persist_dir = os.fspath(kgs.temp_dir)
+    persist_path = os.path.join(persist_dir, 'pack_cuda_saved.cu')
+
+    # Overwrite the file each time to ensure it matches the compiled source.
+    # Let any IO errors propagate so callers see a clear failure.
+    with open(persist_path, 'w', encoding='utf-8') as _f:
+        _f.write(_CUDA_SRC)
+
+    # Compile CUDA module from the in-memory source string. This keeps
+    # behavior compatible across CuPy versions that may not accept
+    os.environ['PATH'] = '/usr/local/cuda/bin:' + os.environ.get('PATH','')
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path is None:
+        raise RuntimeError("nvcc not found in PATH; please install the CUDA toolkit or add nvcc to PATH")
+
+    ptx_path = os.path.join(persist_dir, 'pack_cuda_saved.ptx')
+    cmd = [nvcc_path, "-lineinfo", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
+
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise RuntimeError(f"nvcc failed (exit {proc.returncode}):\n{proc.stderr.decode(errors='ignore')}")
+
+    # Load compiled PTX into a CuPy RawModule
+    _raw_module = cp.RawModule(path=ptx_path)
+    _raw_module = cp.RawModule(path='/mnt/d/packing/temp/pack_cuda_saved.ptx', backend='nvcc', options=('-lineinfo',))
     _overlap_list_total_kernel = _raw_module.get_function("overlap_list_total_kernel")
+
+    # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
+    const_piece_xy_ptr = _raw_module.get_global('const_piece_xy')
+    const_piece_nverts_ptr = _raw_module.get_global('const_piece_nverts')
+    # Use memcpyHtoD to copy to device constant memory
+    cp.cuda.runtime.memcpy(const_piece_xy_ptr.ptr, piece_xy_flat.ctypes.data, piece_xy_flat.nbytes, cp.cuda.runtime.memcpyHostToDevice)
+    cp.cuda.runtime.memcpy(const_piece_nverts_ptr.ptr, piece_nverts.ctypes.data, piece_nverts.nbytes, cp.cuda.runtime.memcpyHostToDevice)
 
     _initialized = True
 
@@ -569,48 +598,6 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 # 4. Public API
 # ---------------------------------------------------------------------------
-
-def overlap_two_trees(xyt1, xyt2) -> cp.ndarray:
-    """Compute overlap area between two poses of the SAME polygon on the GPU.
-
-    Parameters
-    ----------
-    xyt1, xyt2 : array-like (length 3)
-        Each is a sequence of (x, y, theta) for a single pose. Matrices/batches
-        are not supported by this function; pass single 3-element sequences.
-
-    Returns
-    -------
-    area : cp.float64
-        A scalar CuPy float containing the computed overlap area.
-    """
-    _ensure_initialized()
-
-    # Convert to sequences and validate length
-    a = list(xyt1)
-    b = list(xyt2)
-    if len(a) != 3 or len(b) != 3:
-        raise ValueError("xyt1 and xyt2 must be length-3 sequences: (x, y, theta)")
-
-    areas_arr = cp.empty(1, dtype=cp.float64)
-
-    threads_per_block = 1
-    blocks = 1
-
-    _overlap_two_trees_kernel(
-        (blocks,),
-        (threads_per_block,),
-        (
-            float(a[0]), float(a[1]), float(a[2]),
-            float(b[0]), float(b[1]), float(b[2]),
-            _piece_xy_d,
-            _piece_nverts_d,
-            np.int32(_num_pieces),
-            areas_arr,
-        ),
-    )
-
-    return areas_arr[0]
 
 
 def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
@@ -673,9 +660,6 @@ def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
             np.int32(n1),
             xyt2_3xN,
             np.int32(n2),
-            _piece_xy_d,
-            _piece_nverts_d,
-            np.int32(_num_pieces),
             out_total,
             out_grads if out_grads is not None else null_ptr,
         ),
