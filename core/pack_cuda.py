@@ -872,7 +872,7 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):
+def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True, stream: cp.cuda.Stream | None = None):
     """Compute total overlap sum for multiple ensembles in parallel.
     
     This launches one GPU block per ensemble, allowing many ensembles to run
@@ -886,6 +886,8 @@ def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):
         List of ensemble pose arrays, each shape (N2_i, 3) for ensemble i.
     compute_grad : bool, optional
         If True, compute and return gradients. Default is True.
+    stream : cp.cuda.Stream, optional
+        CUDA stream for kernel execution. If None, uses default stream.
     
     Returns
     -------
@@ -975,6 +977,7 @@ def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):
             grads_ptrs if grads_ptrs is not None else null_ptr,
             np.int32(num_ensembles),
         ),
+        stream=stream,
     )
     
     if compute_grad:
@@ -985,7 +988,7 @@ def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):
         return out_totals, None
 
 
-def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False):
+def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False, stream: cp.cuda.Stream | None = None):
     """Compute total boundary violation area for multiple ensembles in parallel.
     
     This launches one GPU block per ensemble, allowing many ensembles to run
@@ -999,6 +1002,8 @@ def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False):
         List of boundary sizes, one per ensemble.
     compute_grad : bool, optional
         If True, compute and return gradients. Default is False.
+    stream : cp.cuda.Stream, optional
+        CUDA stream for kernel execution. If None, uses default stream.
     
     Returns
     -------
@@ -1091,6 +1096,7 @@ def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False):
             grad_h_ptrs if grad_h_ptrs is not None else null_ptr,
             np.int32(num_ensembles),
         ),
+        stream=stream,
     )
     
     if compute_grad:
