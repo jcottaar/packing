@@ -25,7 +25,6 @@ import h5py
 import time
 import sklearn
 import shutil
-import torch
 import inspect
 from tqdm import tqdm
 import hashlib
@@ -40,7 +39,7 @@ if os.path.isdir('/mnt/d/packing/'):
     env = 'local'
     d_drive = '/mnt/d/'    
 else:
-    raise Exception('Unknown environment')
+    env = 'vast'
 print(env)
 
 profiling = False
@@ -52,7 +51,11 @@ match env:
     case 'local':
         data_dir = d_drive+'/packing/data/'
         temp_dir = d_drive+'/packing/temp/'             
-        code_dir = d_drive+'/packing/core/' 
+        code_dir = d_drive+'/packing/code/core/' 
+    case 'vast':
+        data_dir = '/packing/data/'
+        temp_dir = '/packing/temp/'             
+        code_dir = '/packing/code/core/'
 os.makedirs(data_dir, exist_ok=True)
 os.makedirs(temp_dir, exist_ok=True)
 

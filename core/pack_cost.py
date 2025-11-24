@@ -199,9 +199,9 @@ class BoundaryCost(Cost):
 
         return cp.array(area), grad, grad_bound
     
-    def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
-        cost,grad,grad_h = pack_cuda.boundary_list_total(xyt, bound[0], compute_grad=True)
-        return cost,grad,grad_h
+    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
+        cost,grad,grad_h = pack_cuda.boundary_multi_ensemble(xyt, bound, compute_grad=True)
+        return cost,cp.array(grad),cp.array(grad_h)
 
 @dataclass 
 class AreaCost(Cost):

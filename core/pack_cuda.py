@@ -536,18 +536,6 @@ __device__ void boundary_list_total(
     }
 }
 
-// Kernel: compute total boundary violation area for a list of trees
-__global__ void boundary_list_total_kernel(
-    const double* __restrict__ xyt_3xN,  // flattened row-major: 3 rows, N cols
-    const int n,
-    const double h,
-    double* __restrict__ out_total,
-    double* __restrict__ out_grads,  // not used, gradients computed in Python
-    double* __restrict__ out_grad_h)  // not used, gradients computed in Python
-{
-    boundary_list_total(xyt_3xN, n, h, out_total, out_grads, out_grad_h);
-}
-
 // Sum overlaps between trees in xyt1 and trees in xyt2.
 // Each tree in xyt1 is compared against all trees in xyt2.
 // Identical poses are automatically skipped.
@@ -610,20 +598,7 @@ __device__ void overlap_list_total(
     }
 }
 
-// Kernel: one thread per reference element in xyt1 computes sum(ref vs all in xyt2)
-__global__ void overlap_list_total_kernel(
-    const double* __restrict__ xyt1_3xN, // flattened row-major: 3 rows, N1 cols
-    const int n1,
-    const double* __restrict__ xyt2_3xN, // flattened row-major: 3 rows, N2 cols
-    const int n2,
-    double* __restrict__ out_total,
-    double* __restrict__ out_grads) // if non-NULL, write gradients for xyt1
-{
-    // Delegate to the threaded device helper which accumulates
-    // per-thread partial sums into out_total[0] and computes gradients.
-    // Note: piece data comes from constant memory (const_piece_xy, const_piece_nverts)
-    overlap_list_total(xyt1_3xN, n1, xyt2_3xN, n2, out_total, out_grads);
-}
+
 
 // Multi-ensemble kernel: one block per ensemble
 // Each block processes one ensemble by calling overlap_list_total
@@ -636,7 +611,7 @@ __global__ void overlap_list_total_kernel(
 //   out_totals: array of output totals, one per ensemble
 //   out_grads_list: array of pointers to gradient outputs, one per ensemble (can be NULL)
 //   num_ensembles: number of ensembles to process
-__global__ void multi_ensemble_kernel(
+__global__ void multi_overlap_list_total(
     const double** __restrict__ xyt1_list,  // [num_ensembles] pointers
     const int* __restrict__ n1_list,        // [num_ensembles]
     const double** __restrict__ xyt2_list,  // [num_ensembles] pointers
@@ -671,6 +646,52 @@ __global__ void multi_ensemble_kernel(
     overlap_list_total(xyt1, n1, xyt2, n2, out_total, out_grads);
 }
 
+// Multi-ensemble kernel for boundary: one block per ensemble
+// Each block processes one ensemble by calling boundary_list_total
+//
+// Parameters:
+//   xyt_list: array of pointers to xyt data for each ensemble
+//   n_list: array of n values (number of trees) for each ensemble
+//   h_list: array of h values (boundary size) for each ensemble
+//   out_totals: array of output totals, one per ensemble
+//   out_grads_list: array of pointers to gradient outputs, one per ensemble (can be NULL)
+//   out_grad_h_list: array of pointers to h gradients, one per ensemble (can be NULL)
+//   num_ensembles: number of ensembles to process
+__global__ void multi_boundary_list_total(
+    const double** __restrict__ xyt_list,      // [num_ensembles] pointers
+    const int* __restrict__ n_list,            // [num_ensembles]
+    const double* __restrict__ h_list,         // [num_ensembles]
+    double* __restrict__ out_totals,           // [num_ensembles]
+    double** __restrict__ out_grads_list,      // [num_ensembles] pointers (NULL entries allowed)
+    double** __restrict__ out_grad_h_list,     // [num_ensembles] pointers (NULL entries allowed)
+    const int num_ensembles)
+{
+    int ensemble_id = blockIdx.x;
+    
+    if (ensemble_id >= num_ensembles) {
+        return;  // Extra blocks beyond num_ensembles
+    }
+    
+    // Load parameters for this ensemble
+    const double* xyt = xyt_list[ensemble_id];
+    int n = n_list[ensemble_id];
+    double h = h_list[ensemble_id];
+    double* out_total = &out_totals[ensemble_id];
+    double* out_grads = (out_grads_list != NULL) ? out_grads_list[ensemble_id] : NULL;
+    double* out_grad_h = (out_grad_h_list != NULL) ? out_grad_h_list[ensemble_id] : NULL;
+    
+    // Initialize output
+    if (threadIdx.x == 0) {
+        *out_total = 0.0;
+    }
+    __syncthreads();
+    
+    // Call the existing boundary_list_total device function
+    // This function is designed to be called by ALL threads in the block
+    // It internally uses threadIdx.x to determine which tree each thread processes
+    boundary_list_total(xyt, n, h, out_total, out_grads, out_grad_h);
+}
+
 } // extern "C"
 """
 
@@ -688,9 +709,8 @@ _num_pieces: int = 0
 
 # Compiled CUDA module and kernel
 _raw_module: cp.RawModule | None = None
-_overlap_list_total_kernel: cp.RawKernel | None = None
-_multi_ensemble_kernel: cp.RawKernel | None = None
-_boundary_list_total_kernel: cp.RawKernel | None = None
+_multi_overlap_list_total_kernel: cp.RawKernel | None = None
+_multi_boundary_list_total_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
@@ -773,7 +793,7 @@ def _ensure_initialized() -> None:
     of public API functions.
     """
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module,  _overlap_list_total_kernel, _multi_ensemble_kernel, _boundary_list_total_kernel
+    global _num_pieces, _raw_module, _multi_overlap_list_total_kernel, _multi_boundary_list_total_kernel
 
     if _initialized:
         return
@@ -828,9 +848,8 @@ def _ensure_initialized() -> None:
     # Load compiled PTX into a CuPy RawModule
     _raw_module = cp.RawModule(path=ptx_path)
     #_raw_module = cp.RawModule(code=_CUDA_SRC, backend='nvcc', options=())
-    _overlap_list_total_kernel = _raw_module.get_function("overlap_list_total_kernel")
-    _multi_ensemble_kernel = _raw_module.get_function("multi_ensemble_kernel")
-    _boundary_list_total_kernel = _raw_module.get_function("boundary_list_total_kernel")
+    _multi_overlap_list_total_kernel = _raw_module.get_function("multi_overlap_list_total")
+    _multi_boundary_list_total_kernel = _raw_module.get_function("multi_boundary_list_total")
 
     # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
     # Convert to appropriate dtype if using float32
@@ -851,182 +870,6 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 # 4. Public API
 # ---------------------------------------------------------------------------
-
-
-def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
-    """Compute total overlap sum between poses in xyt1 and xyt2.
-
-    Parameters
-    ----------
-    xyt1 : array-like, shape (N1,3)
-        First list of poses (x, y, theta).
-    xyt2 : array-like, shape (N2,3)
-        Second list of poses (x, y, theta).
-    compute_grad : bool, optional
-        If True, compute and return gradients. Default is True.
-
-    Returns
-    -------
-    total : float
-        Sum of overlap areas between each tree in xyt1 and each tree in xyt2,
-        divided by 2 (since each pair is counted twice).
-    grads : cp.ndarray, shape (N1,3), optional
-        Gradients with respect to each pose in xyt1 (x, y, theta).
-        Only returned if compute_grad=True.
-    """
-    _ensure_initialized()
-
-    # Determine dtype based on USE_FLOAT32 setting
-    dtype = cp.float32 if USE_FLOAT32 else cp.float64
-
-    xyt1_arr = cp.asarray(xyt1, dtype=dtype)
-    if xyt1_arr.ndim != 2 or xyt1_arr.shape[1] != 3:
-        raise ValueError("xyt1 must be shape (N,3)")
-
-    xyt2_arr = cp.asarray(xyt2, dtype=dtype)
-    if xyt2_arr.ndim != 2 or xyt2_arr.shape[1] != 3:
-        raise ValueError("xyt2 must be shape (N,3)")
-
-    n1 = int(xyt1_arr.shape[0])
-    n2 = int(xyt2_arr.shape[0])
-
-    # Flatten to 3xN row-major so rows are x,y,theta
-    xyt1_3xN = cp.ascontiguousarray(xyt1_arr.T).ravel()
-    xyt2_3xN = cp.ascontiguousarray(xyt2_arr.T).ravel()
-
-    # Allocate a single-element output to hold the accumulated total
-    out_total = cp.zeros(1, dtype=dtype)
-    
-    # Allocate gradient output if requested (gradients are w.r.t. xyt1)
-    out_grads = cp.zeros(n1 * 3, dtype=dtype) if compute_grad else None
-
-    # Launch with 4 threads per tree (one for each polygon piece)
-    threads_per_block = n1 * 4
-    blocks = 1
-
-    # Dummy empty array to use when gradient output is not requested.
-    # Passing an empty CuPy array is safer than constructing an unowned
-    # memory pointer (some CuPy versions reject a zero-sized UnownedMemory).
-    null_ptr = cp.asarray([], dtype=dtype)
-
-    _overlap_list_total_kernel(
-        (blocks,),
-        (threads_per_block,),
-        (
-            xyt1_3xN,
-            np.int32(n1),
-            xyt2_3xN,
-            np.int32(n2),
-            out_total,
-            out_grads if out_grads is not None else null_ptr,
-        ),
-    )
-
-    # Ensure kernel finished and results are visible
-    # cp.cuda.Stream.null.synchronize()
-    
-    if compute_grad:
-        # Reshape gradients back to (N1, 3)
-        grads = out_grads.reshape(n1, 3)
-        return out_total, grads
-    else:
-        return out_total, None
-
-
-def boundary_list_total(xyt, h, compute_grad: bool = False):
-    """Compute total area of trees outside square boundary [-h/2, h/2].
-    
-    For each tree in the list, computes the area that lies outside the square
-    boundary from -h/2 to h/2 in both x and y directions.
-    
-    Parameters
-    ----------
-    xyt : array-like, shape (N,3)
-        List of poses (x, y, theta) for N trees.
-    h : float
-        Side length of the square boundary.
-    compute_grad : bool, optional
-        If True, compute and return gradients. Default is False.
-        Note: Gradient computation is not yet implemented.
-    
-    Returns
-    -------
-    total : cp.ndarray, shape (1,)
-        Total area of all trees outside the boundary.
-    grads : cp.ndarray, shape (N,3), optional
-        Gradients with respect to each pose (x, y, theta).
-        Only returned if compute_grad=True.
-        Computed using two-sided finite differences with eps=1e-3.
-    grad_h : cp.ndarray, shape (1,), optional
-        Gradient with respect to h.
-        Only returned if compute_grad=True.
-        Computed using two-sided finite differences with eps=1e-3.
-    """
-    _ensure_initialized()
-    
-    # Determine dtype based on USE_FLOAT32 setting
-    dtype = cp.float32 if USE_FLOAT32 else cp.float64
-    
-    xyt_arr = cp.asarray(xyt, dtype=dtype)
-    if xyt_arr.ndim != 2 or xyt_arr.shape[1] != 3:
-        raise ValueError("xyt must be shape (N,3)")
-    
-    n = int(xyt_arr.shape[0])
-    h_scalar = float(h)
-    
-    # Flatten to 3xN row-major so rows are x,y,theta
-    xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
-    
-    # Allocate output for total area
-    out_total = cp.zeros(1, dtype=dtype)
-    
-    # Launch with 4 threads per tree (one for each polygon piece)
-    threads_per_block = n * 4
-    blocks = 1
-    
-    # Get the kernel
-    boundary_kernel = _raw_module.get_function("boundary_list_total_kernel")
-    
-    if compute_grad:
-        # Allocate gradient arrays
-        out_grads = cp.zeros(n * 3, dtype=dtype)
-        out_grad_h = cp.zeros(1, dtype=dtype)
-        
-        boundary_kernel(
-            (blocks,),
-            (threads_per_block,),
-            (
-                xyt_3xN,
-                np.int32(n),
-                dtype(h_scalar),
-                out_total,
-                out_grads,
-                out_grad_h,
-            ),
-        )
-        
-        # Reshape gradients back to (N, 3)
-        grads = out_grads.reshape((n, 3))
-        
-        return out_total, grads, out_grad_h
-    else:
-        # Dummy empty array for kernel (gradients not computed)
-        null_ptr = cp.asarray([], dtype=dtype)
-        
-        boundary_kernel(
-            (blocks,),
-            (threads_per_block,),
-            (
-                xyt_3xN,
-                np.int32(n),
-                dtype(h_scalar),
-                out_total,
-                null_ptr,
-                null_ptr,
-            ),
-        )
-        
-        return out_total, None, None
 
 
 def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):
@@ -1120,7 +963,7 @@ def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):
     # Cast pointer arrays to proper type for kernel
     null_ptr = cp.array([0], dtype=cp.uint64)
     
-    _multi_ensemble_kernel(
+    _multi_overlap_list_total_kernel(
         (blocks,),
         (threads_per_block,),
         (
@@ -1140,5 +983,122 @@ def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):
         return out_totals, grads_list
     else:
         return out_totals, None
+
+
+def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False):
+    """Compute total boundary violation area for multiple ensembles in parallel.
+    
+    This launches one GPU block per ensemble, allowing many ensembles to run
+    concurrently and utilize more of the GPU's streaming multiprocessors.
+    
+    Parameters
+    ----------
+    xyt_list : list of array-like
+        List of ensemble pose arrays, each shape (N_i, 3) for ensemble i.
+    h_list : list of float
+        List of boundary sizes, one per ensemble.
+    compute_grad : bool, optional
+        If True, compute and return gradients. Default is False.
+    
+    Returns
+    -------
+    totals : cp.ndarray, shape (num_ensembles,)
+        Total boundary violation area for each ensemble.
+    grads_list : list of cp.ndarray, optional
+        List of gradient arrays (N_i, 3) for each ensemble.
+        Only returned if compute_grad=True.
+    grad_h_list : list of cp.ndarray, optional
+        List of h gradient arrays (1,) for each ensemble.
+        Only returned if compute_grad=True.
+    """
+    _ensure_initialized()
+    
+    if len(xyt_list) != len(h_list):
+        raise ValueError("xyt_list and h_list must have same length")
+    
+    num_ensembles = len(xyt_list)
+    if num_ensembles == 0:
+        if compute_grad:
+            return cp.array([]), [], []
+        else:
+            return cp.array([]), None, None
+    
+    # Determine dtype based on USE_FLOAT32 setting
+    dtype = cp.float32 if USE_FLOAT32 else cp.float64
+    
+    # Process and validate all input arrays
+    xyt_arrays = []
+    n_list = []
+    max_n = 0
+    
+    for i, xyt in enumerate(xyt_list):
+        xyt_arr = cp.asarray(xyt, dtype=dtype)
+        if xyt_arr.ndim != 2 or xyt_arr.shape[1] != 3:
+            raise ValueError(f"xyt_list[{i}] must be shape (N,3)")
+        
+        n = int(xyt_arr.shape[0])
+        
+        # Flatten to 3xN row-major
+        xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
+        
+        xyt_arrays.append(xyt_3xN)
+        n_list.append(n)
+        max_n = max(max_n, n)
+    
+    # Validate h_list
+    h_array = cp.array(h_list, dtype=dtype)
+    if h_array.shape[0] != num_ensembles:
+        raise ValueError(f"h_list must have {num_ensembles} elements")
+    
+    # Create arrays of pointers (device addresses)
+    xyt_ptrs = cp.array([arr.data.ptr for arr in xyt_arrays], dtype=cp.uint64)
+    n_array = cp.array(n_list, dtype=cp.int32)
+    
+    # Allocate outputs
+    out_totals = cp.zeros(num_ensembles, dtype=dtype)
+    
+    # Allocate gradients if requested
+    grads_arrays = []
+    grads_ptrs = None
+    grad_h_arrays = []
+    grad_h_ptrs = None
+    
+    if compute_grad:
+        for n in n_list:
+            grads_arrays.append(cp.zeros(n * 3, dtype=dtype))
+        grads_ptrs = cp.array([arr.data.ptr for arr in grads_arrays], dtype=cp.uint64)
+        
+        for _ in range(num_ensembles):
+            grad_h_arrays.append(cp.zeros(1, dtype=dtype))
+        grad_h_ptrs = cp.array([arr.data.ptr for arr in grad_h_arrays], dtype=cp.uint64)
+    
+    # Launch kernel: one block per ensemble, max_n * 4 threads per block
+    blocks = num_ensembles
+    threads_per_block = max_n * 4
+    
+    # Cast pointer arrays to proper type for kernel
+    null_ptr = cp.array([0], dtype=cp.uint64)
+    
+    _multi_boundary_list_total_kernel(
+        (blocks,),
+        (threads_per_block,),
+        (
+            xyt_ptrs,
+            n_array,
+            h_array,
+            out_totals,
+            grads_ptrs if grads_ptrs is not None else null_ptr,
+            grad_h_ptrs if grad_h_ptrs is not None else null_ptr,
+            np.int32(num_ensembles),
+        ),
+    )
+    
+    if compute_grad:
+        # Reshape gradient arrays back to (N_i, 3) and (1,)
+        grads_list = [grads_arrays[i].reshape(n_list[i], 3) for i in range(num_ensembles)]
+        grad_h_list = [grad_h_arrays[i] for i in range(num_ensembles)]
+        return out_totals, grads_list, grad_h_list
+    else:
+        return out_totals, None, None
 
 
