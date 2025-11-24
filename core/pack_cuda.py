@@ -362,6 +362,111 @@ __device__ void backward_overlap_ref_with_list(
     }
 }
 
+// Compute the area of a single convex polygon that lies outside the square [-h/2, h/2] x [-h/2, h/2]
+// Uses the clipping algorithm to find the intersection with the square, then subtracts from polygon area
+__device__ double convex_area_outside_square(
+    const d2* __restrict__ poly,
+    const int n,
+    const double h)
+{
+    if (n < 3) return 0.0;
+    
+    double half_h = h * 0.5;
+    
+    // Define square vertices (CCW order)
+    d2 square[4];
+    square[0] = make_d2(-half_h, -half_h);
+    square[1] = make_d2(half_h, -half_h);
+    square[2] = make_d2(half_h, half_h);
+    square[3] = make_d2(-half_h, half_h);
+    
+    // Compute intersection area between polygon and square
+    double intersection_area = convex_intersection_area(poly, n, square, 4);
+    
+    // Compute total polygon area
+    double total_area = 0.0;
+    for (int i = 0; i < n; ++i) {
+        int j = (i + 1) % n;
+        total_area += poly[i].x * poly[j].y - poly[j].x * poly[i].y;
+    }
+    total_area = fabs(total_area) * 0.5;
+    
+    // Area outside = total area - intersection area
+    return total_area - intersection_area;
+}
+
+// Compute total area outside square boundary for one piece (pi) of one tree
+__device__ double boundary_area_piece(
+    const double3 pose,
+    const double h,
+    const int pi)  // piece index to process (0-3)
+{
+    // Compute transformed polygon for this piece
+    d2 poly[MAX_VERTS_PER_PIECE];
+    double aabb_min_x, aabb_max_x, aabb_min_y, aabb_max_y;
+    
+    compute_tree_poly_and_aabb(pose, pi, poly, aabb_min_x, aabb_max_x,
+                                aabb_min_y, aabb_max_y);
+    
+    int n = const_piece_nverts[pi];
+    
+    // Compute area outside square for this piece
+    return convex_area_outside_square(poly, n, h);
+}
+
+// Compute total boundary violation area for a list of trees
+// Each tree consists of 4 convex pieces
+// Uses N*4 threads: one thread per piece of each tree
+__device__ void boundary_list_total(
+    const double* __restrict__ xyt_3xN,  // flattened row-major: 3 rows, N cols
+    const int n,
+    const double h,
+    double* __restrict__ out_total,
+    double* __restrict__ out_grads,  // if non-NULL, write gradients [n*3] (not implemented yet)
+    double* __restrict__ out_grad_h)  // if non-NULL, write gradient w.r.t. h (not implemented yet)
+{
+    // Thread organization: 4 threads per tree
+    // tid = tree_idx * 4 + piece_idx
+    int tid = threadIdx.x;
+    int tree_idx = tid / 4;  // which tree (0 to n-1)
+    int piece_idx = tid % 4; // which piece of that tree (0 to 3)
+    
+    const double* row_x = xyt_3xN + 0 * n;
+    const double* row_y = xyt_3xN + 1 * n;
+    const double* row_t = xyt_3xN + 2 * n;
+    
+    double local_area = 0.0;
+    
+    if (tree_idx < n) {
+        double3 pose;
+        pose.x = row_x[tree_idx];
+        pose.y = row_y[tree_idx];
+        pose.z = row_t[tree_idx];
+        
+        // Each thread computes area outside boundary for one piece
+        local_area = boundary_area_piece(pose, h, piece_idx);
+        
+        // Atomic add for total area
+        atomicAdd(out_total, local_area);
+        
+        // TODO: Gradient computation not yet implemented
+        // if (out_grads != NULL) { ... }
+        // if (out_grad_h != NULL) { ... }
+    }
+}
+
+// Kernel: compute total boundary violation area for a list of trees
+__global__ void boundary_list_total_kernel(
+    const double* __restrict__ xyt_3xN,  // flattened row-major: 3 rows, N cols
+    const int n,
+    const double h,
+    double* __restrict__ out_total,
+    double* __restrict__ out_grads,  // not used, gradients computed in Python
+    double* __restrict__ out_grad_h)  // not used, gradients computed in Python
+{
+    boundary_list_total(xyt_3xN, n, h, out_total, out_grads, out_grad_h);
+}
+
 // Sum overlaps between trees in xyt1 and trees in xyt2.
 // Each tree in xyt1 is compared against all trees in xyt2.
 // Identical poses are automatically skipped.
@@ -504,6 +609,7 @@ _num_pieces: int = 0
 _raw_module: cp.RawModule | None = None
 _overlap_list_total_kernel: cp.RawKernel | None = None
 _multi_ensemble_kernel: cp.RawKernel | None = None
+_boundary_list_total_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
@@ -586,7 +692,7 @@ def _ensure_initialized() -> None:
     of public API functions.
     """
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module,  _overlap_list_total_kernel, _multi_ensemble_kernel
+    global _num_pieces, _raw_module,  _overlap_list_total_kernel, _multi_ensemble_kernel, _boundary_list_total_kernel
 
     if _initialized:
         return
@@ -643,6 +749,7 @@ def _ensure_initialized() -> None:
     #_raw_module = cp.RawModule(code=_CUDA_SRC, backend='nvcc', options=())
     _overlap_list_total_kernel = _raw_module.get_function("overlap_list_total_kernel")
     _multi_ensemble_kernel = _raw_module.get_function("multi_ensemble_kernel")
+    _boundary_list_total_kernel = _raw_module.get_function("boundary_list_total_kernel")
 
     # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
     # Convert to appropriate dtype if using float32
@@ -743,6 +850,132 @@ def overlap_list_total(xyt1, xyt2, compute_grad: bool = True):
         return out_total, grads
     else:
         return out_total, None
+
+
+def boundary_list_total(xyt, h, compute_grad: bool = False):
+    """Compute total area of trees outside square boundary [-h/2, h/2].
+    
+    For each tree in the list, computes the area that lies outside the square
+    boundary from -h/2 to h/2 in both x and y directions.
+    
+    Parameters
+    ----------
+    xyt : array-like, shape (N,3)
+        List of poses (x, y, theta) for N trees.
+    h : float
+        Side length of the square boundary.
+    compute_grad : bool, optional
+        If True, compute and return gradients. Default is False.
+        Note: Gradient computation is not yet implemented.
+    
+    Returns
+    -------
+    total : cp.ndarray, shape (1,)
+        Total area of all trees outside the boundary.
+    grads : cp.ndarray, shape (N,3), optional
+        Gradients with respect to each pose (x, y, theta).
+        Only returned if compute_grad=True.
+        Computed using two-sided finite differences with eps=1e-3.
+    grad_h : cp.ndarray, shape (1,), optional
+        Gradient with respect to h.
+        Only returned if compute_grad=True.
+        Computed using two-sided finite differences with eps=1e-3.
+    """
+    _ensure_initialized()
+    
+    # Determine dtype based on USE_FLOAT32 setting
+    dtype = cp.float32 if USE_FLOAT32 else cp.float64
+    
+    xyt_arr = cp.asarray(xyt, dtype=dtype)
+    if xyt_arr.ndim != 2 or xyt_arr.shape[1] != 3:
+        raise ValueError("xyt must be shape (N,3)")
+    
+    n = int(xyt_arr.shape[0])
+    h_scalar = float(h)
+    
+    # Flatten to 3xN row-major so rows are x,y,theta
+    xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
+    
+    # Allocate output for total area
+    out_total = cp.zeros(1, dtype=dtype)
+    
+    # Launch with 4 threads per tree (one for each polygon piece)
+    threads_per_block = n * 4
+    blocks = 1
+    
+    # Dummy empty array for kernel (gradients not computed in kernel)
+    null_ptr = cp.asarray([], dtype=dtype)
+    
+    # Get the kernel
+    boundary_kernel = _raw_module.get_function("boundary_list_total_kernel")
+    
+    boundary_kernel(
+        (blocks,),
+        (threads_per_block,),
+        (
+            xyt_3xN,
+            np.int32(n),
+            dtype(h_scalar),
+            out_total,
+            null_ptr,
+            null_ptr,
+        ),
+    )
+    
+    if compute_grad:
+        # Compute gradients using two-sided finite differences
+        eps = 1e-3
+        grads = cp.zeros((n, 3), dtype=dtype)
+        
+        # Gradients w.r.t. each tree's pose
+        for i in range(n):
+            for j in range(3):  # x, y, theta
+                # Perturb +eps
+                xyt_plus = xyt_arr.copy()
+                xyt_plus[i, j] += eps
+                xyt_plus_3xN = cp.ascontiguousarray(xyt_plus.T).ravel()
+                out_plus = cp.zeros(1, dtype=dtype)
+                boundary_kernel(
+                    (blocks,), (threads_per_block,),
+                    (xyt_plus_3xN, np.int32(n), dtype(h_scalar), out_plus, null_ptr, null_ptr)
+                )
+                
+                # Perturb -eps
+                xyt_minus = xyt_arr.copy()
+                xyt_minus[i, j] -= eps
+                xyt_minus_3xN = cp.ascontiguousarray(xyt_minus.T).ravel()
+                out_minus = cp.zeros(1, dtype=dtype)
+                boundary_kernel(
+                    (blocks,), (threads_per_block,),
+                    (xyt_minus_3xN, np.int32(n), dtype(h_scalar), out_minus, null_ptr, null_ptr)
+                )
+                
+                # Central difference
+                grads[i, j] = (out_plus[0] - out_minus[0]) / (2.0 * eps)
+        
+        # Gradient w.r.t. h
+        grad_h = cp.zeros(1, dtype=dtype)
+        
+        # Perturb h +eps
+        out_plus = cp.zeros(1, dtype=dtype)
+        boundary_kernel(
+            (blocks,), (threads_per_block,),
+            (xyt_3xN, np.int32(n), dtype(h_scalar + eps), out_plus, null_ptr, null_ptr)
+        )
+        
+        # Perturb h -eps
+        out_minus = cp.zeros(1, dtype=dtype)
+        boundary_kernel(
+            (blocks,), (threads_per_block,),
+            (xyt_3xN, np.int32(n), dtype(h_scalar - eps), out_minus, null_ptr, null_ptr)
+        )
+        
+        # Central difference
+        grad_h[0] = (out_plus[0] - out_minus[0]) / (2.0 * eps)
+        
+        return out_total, grads, grad_h
+    else:
+        return out_total, None, None
 
 
 def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True):

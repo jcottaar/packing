@@ -259,6 +259,7 @@ def create_center_tree():
     return initial_polygon, convex_breakdown, max_radius
 center_tree, convex_breakdown, tree_max_radius = create_center_tree()
 center_tree_prepped = prep(center_tree)
+tree_area = center_tree.area
 
 
 @typechecked

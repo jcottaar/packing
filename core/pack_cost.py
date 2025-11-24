@@ -51,6 +51,35 @@ class Cost(kgs.BaseClass):
     def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
         return self._compute_cost_single_ref(xyt, bound)
 
+@dataclass 
+class CostCompound(Cost):
+    # Compound cost: sum of multiple costs
+    costs:list = field(init=True, default_factory=list)
+
+    def _compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+        N_ensembles = xyt.shape[0]
+        total_cost = cp.zeros(N_ensembles)
+        total_grad = cp.zeros_like(xyt)
+        total_grad_bound = cp.zeros_like(bound)
+        for c in self.costs:
+            c_cost, c_grad, c_grad_bound = c.compute_cost_ref(xyt, bound)
+            total_cost += c_cost
+            total_grad += c_grad
+            total_grad_bound += c_grad_bound
+        return total_cost, total_grad, total_grad_bound
+
+    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
+        N_ensembles = xyt.shape[0]
+        total_cost = cp.zeros(N_ensembles)
+        total_grad = cp.zeros_like(xyt)
+        total_grad_bound = cp.zeros_like(bound)
+        for c in self.costs:
+            c_cost, c_grad, c_grad_bound = c.compute_cost(xyt, bound)
+            total_cost += c_cost
+            total_grad += c_grad
+            total_grad_bound += c_grad_bound
+        return total_cost, total_grad, total_grad_bound
+
 @dataclass
 class CostDummy(Cost):
     # Dummy: always zero cost
@@ -60,7 +89,6 @@ class CostDummy(Cost):
 @dataclass    
 class CollisionCost(Cost):
     
-    @typechecked 
     def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
         # Compute collision cost for all pairs of trees
         assert(xyt.shape[1]==3)  # x, y, theta
@@ -83,8 +111,7 @@ class CollisionCost(Cost):
 class CollisionCostOverlappingArea(CollisionCost):
     # Collision cost based on overlapping area of two trees
     def _compute_cost_one_tree_ref(self, xyt1:cp.ndarray, xyt2:cp.ndarray, tree1:Polygon, tree2:list):
-        # Compute overlapping area between tree1 and the union of tree2 geometries.
-        # tree2 is a list of shapely geometries; create a union before intersecting.
+        # Compute overlapping area between tree1 and the union of tree2 geometries.        
         area = cp.array(np.sum(shapely.area(tree1.intersection(tree2))))
         # Gradient computation is complex; use finite differences as a placeholder
         grad = cp.zeros_like(xyt1)
@@ -105,3 +132,83 @@ class CollisionCostOverlappingArea(CollisionCost):
     def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
         cost,grad = pack_cuda.overlap_multi_ensemble(xyt, xyt)
         return cost,cp.array(grad),cp.zeros_like(bound)
+    
+
+@dataclass
+class BoundaryCost(Cost):
+    # Cost for trees being out of bounds
+    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+        assert(bound.shape[0]==1) #other case todo
+        # xyt is (n_trees, 3), bound is (1,); compute area outside square using union of all tree geometries
+        # Use TreeList.get_trees() to build geometries and perform a single difference against the square (vectorized).
+        b = float(bound[0].get().item())
+        half = b / 2.0
+        square = Polygon([(-half, -half), (half, -half), (half, half), (-half, half)])
+
+        tree_list = kgs.TreeList()
+        tree_list.xyt = xyt
+        trees = tree_list.get_trees()
+
+        n_trees = xyt.shape[0]
+        area = n_trees*kgs.tree_area - np.sum(shapely.area(square.intersection(trees)))
+
+        # Finite-difference gradient (central differences) w.r.t. each tree's x, y, theta
+        grad = cp.zeros_like(xyt)
+        epsilon = 1e-6
+        for i in range(n_trees):
+            # Extract base values as Python floats
+            xi = xyt[i,0].get().item()
+            yi = xyt[i,1].get().item()
+            thetai = xyt[i,2].get().item()
+            for j in range(3):
+                if j == 0:
+                    x_plus, x_minus = xi + epsilon, xi - epsilon
+                    y_plus = y_minus = yi
+                    th_plus = th_minus = thetai
+                elif j == 1:
+                    y_plus, y_minus = yi + epsilon, yi - epsilon
+                    x_plus = x_minus = xi
+                    th_plus = th_minus = thetai
+                else:
+                    th_plus, th_minus = thetai + epsilon, thetai - epsilon
+                    x_plus = x_minus = xi
+                    y_plus = y_minus = yi
+
+                # create perturbed trees lists by replacing the i-th tree
+                tree_plus = kgs.create_tree(x_plus, y_plus, th_plus*360/2/np.pi)
+                tree_minus = kgs.create_tree(x_minus, y_minus, th_minus*360/2/np.pi)                
+
+                area_plus = - square.intersection(tree_plus).area
+                area_minus = - square.intersection(tree_minus).area
+
+                grad_val = (area_plus - area_minus) / (2.0 * epsilon)
+                grad[i, j] = cp.array(grad_val)
+
+        # Compute gradient w.r.t. bound using finite differences
+        grad_bound = cp.zeros_like(bound)
+        b_plus = b + epsilon
+        b_minus = b - epsilon
+        half_plus = b_plus / 2.0
+        half_minus = b_minus / 2.0
+        square_plus = Polygon([(-half_plus, -half_plus), (half_plus, -half_plus), (half_plus, half_plus), (-half_plus, half_plus)])
+        square_minus = Polygon([(-half_minus, -half_minus), (half_minus, -half_minus), (half_minus, half_minus), (-half_minus, half_minus)])
+        
+        area_plus = n_trees*kgs.tree_area - np.sum(shapely.area(square_plus.intersection(trees)))
+        area_minus = n_trees*kgs.tree_area - np.sum(shapely.area(square_minus.intersection(trees)))
+        grad_bound[0] = cp.array((area_plus - area_minus) / (2.0 * epsilon))
+
+        return cp.array(area), grad, grad_bound
+    
+    def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
+        cost,grad,grad_h = pack_cuda.boundary_list_total(xyt, bound[0], compute_grad=True)
+        return cost,grad,grad_h
+    
+@dataclass 
+class AreaCost(Cost):
+    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+        assert(bound.shape[0]==1) #other case todo
+        cost = bound[0]**2
+        grad_bound = cp.array([2.0*bound[0]])
+        return cost, cp.zeros_like(xyt), grad_bound
+
+        
