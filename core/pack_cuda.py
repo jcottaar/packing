@@ -626,8 +626,9 @@ def _ensure_initialized() -> None:
         raise RuntimeError("nvcc not found in PATH; please install the CUDA toolkit or add nvcc to PATH")
 
     ptx_path = os.path.join(persist_dir, 'pack_cuda_saved.ptx')
-    cmd = [nvcc_path, "-lineinfo", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
-    cmd = [nvcc_path, "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
+    #cmd = [nvcc_path, "-lineinfo", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
+    #cmd = [nvcc_path, "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
+    cmd = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
 
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
