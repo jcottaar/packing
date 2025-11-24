@@ -16,54 +16,112 @@ def run_all_tests():
     print("All tests passed.")
 
 def test_costs():
-    #cost = pack_cost.PackingCost()
-    #cost.collision_cost = pack_cost.CollisionCostOverlappingArea()
-    #costs_to_test = [cost]
-
-    print('add bounds grad check')
+    print('Testing cost computation and gradients')
     costs_to_test = [pack_cost.CostDummy(), pack_cost.CollisionCostOverlappingArea(scaling=3.)]
 
-    tree_list = pack_basics.place_random(10, 1.5)
-    #tree_list = pack_basics.place_random(3, 0.1)
-    #tree_list.xyt = [[5.,5.,5.],[1.,2,3.],[1.,2.,3.01]]
-    pack_vis.visualize_tree_list(tree_list)
+    tree_list = []
+    tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=0)))
+    tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=1)))
+    pack_vis.visualize_tree_list(tree_list[0])
+    pack_vis.visualize_tree_list(tree_list[1])
 
-    bounds = cp.array([1.])
+    bounds = cp.array([[1.],[1.1]])  # square bounds
+
 
     for c in costs_to_test:
-        # First, check that compute_cost and compute_cost_ref agree
-        cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(cp.array(tree_list.xyt), bounds)
-        cost_fast, grad_fast, grad_fast_ref = c.compute_cost(cp.array(tree_list.xyt), bounds)        
-        # Show full precision
-        print(cp.array2string(cp.asarray(cost_fast), precision=17, suppress_small=False))
-        print(cp.array2string(cp.asarray(cost_ref), precision=17, suppress_small=False))
-        if not isinstance(c, pack_cost.CostDummy):
-            assert cost_ref>0
-        assert cp.allclose(cost_ref, cost_fast, rtol=1e-6), f"Cost mismatch: {cost_ref} vs {cost_fast}"
-        assert cp.allclose(grad_ref, grad_fast, rtol=1e-4, atol=1e-4), f"Gradient mismatch: {grad_ref} vs {grad_fast}"
+        # Collect all outputs for vectorized check
+        all_ref_outputs = []
+        all_fast_outputs = []
+        all_xyt = []
+        all_bounds = []
 
-        # Now check gradients via finite differences
-        def _get_cost(obj, xyt_arr):
-            return obj.compute_cost_ref(cp.array(xyt_arr), bounds)[0]
+        print(f"\nTesting {c.__class__.__name__}")
 
-        x0 = tree_list.xyt.copy()
-        shape = x0.shape
-        x_flat = x0.ravel()
-        n = x_flat.size
-        eps = 1e-6
-        grad_num = cp.zeros(n, dtype=float)
+        for t, b in zip(tree_list, bounds):
+            xyt_single = cp.array(t.xyt[None])
+            b_single = b[None]
+            
+            # Store for vectorized check
+            all_xyt.append(xyt_single)
+            all_bounds.append(b_single)
+            
+            # First, check that compute_cost and compute_cost_ref agree
+            cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(xyt_single, b_single)
+            cost_fast, grad_fast, grad_bound_fast = c.compute_cost(xyt_single, b_single)
+            
+            # Store all outputs
+            all_ref_outputs.append((cost_ref, grad_ref, grad_bound_ref))
+            all_fast_outputs.append((cost_fast, grad_fast, grad_bound_fast))
+            
+            # Show full precision
+            print(cp.array2string(cp.asarray(cost_fast), precision=17, suppress_small=False))
+            print(cp.array2string(cp.asarray(cost_ref), precision=17, suppress_small=False))
+            if not isinstance(c, pack_cost.CostDummy):
+                assert cost_ref > 0
+            assert cp.allclose(cost_ref, cost_fast, rtol=1e-6), f"Cost mismatch: {cost_ref} vs {cost_fast}"
+            assert cp.allclose(grad_ref, grad_fast, rtol=1e-4, atol=1e-4), f"Gradient mismatch: {grad_ref} vs {grad_fast}"
+            assert cp.allclose(grad_bound_ref, grad_bound_fast, rtol=1e-4, atol=1e-4), f"Bound gradient mismatch: {grad_bound_ref} vs {grad_bound_fast}"
 
-        for i in range(n):
-            x_plus = x_flat.copy()
-            x_minus = x_flat.copy()
-            x_plus[i] += eps
-            x_minus[i] -= eps
+            # Now check gradients via finite differences
+            def _get_cost(obj, xyt_arr):
+                return obj.compute_cost_ref(cp.array(xyt_arr[None]), b_single)[0]
 
-            c_plus = _get_cost(c, x_plus.reshape(shape))
-            c_minus = _get_cost(c, x_minus.reshape(shape))
-            grad_num[i] = (c_plus - c_minus) / (2.0 * eps)
+            x0 = t.xyt.copy()
+            shape = x0.shape
+            x_flat = x0.ravel()
+            n = x_flat.size
+            eps = 1e-6
+            grad_num = cp.zeros(n, dtype=float)
 
-        grad_fast_flat = cp.asarray(grad_fast).ravel()
-        max_diff = cp.max(cp.abs(grad_num - grad_fast_flat)).get().item()
-        #print(grad_num, grad_fast_flat)
-        assert cp.allclose(grad_num, grad_fast_flat, rtol=1e-4, atol=1e-6), f"Finite-diff gradient mismatch (max diff {max_diff})"
+            for i in range(n):
+                x_plus = x_flat.copy()
+                x_minus = x_flat.copy()
+                x_plus[i] += eps
+                x_minus[i] -= eps
+
+                c_plus = _get_cost(c, x_plus.reshape(shape))
+                c_minus = _get_cost(c, x_minus.reshape(shape))
+                grad_num[i] = (c_plus - c_minus) / (2.0 * eps)
+
+            grad_fast_flat = cp.asarray(grad_fast).ravel()
+            max_diff = cp.max(cp.abs(grad_num - grad_fast_flat)).get().item()
+            assert cp.allclose(grad_num, grad_fast_flat, rtol=1e-4, atol=1e-6), f"Finite-diff gradient mismatch (max diff {max_diff})"
+        
+        # Vectorized check: call with all xyt and bounds for this cost function
+        print(f"  Vectorized check for {c.__class__.__name__}")
+        full_xyt = cp.concatenate(all_xyt, axis=0)
+        full_bounds = cp.concatenate(all_bounds, axis=0)
+        
+        # Compute vectorized results
+        vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_xyt, full_bounds)
+        vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost(full_xyt, full_bounds)
+        
+        # Check each tree's results
+        for i in range(len(tree_list)):
+            # Get stored individual outputs
+            stored_ref = all_ref_outputs[i]
+            stored_fast = all_fast_outputs[i]
+            
+            # Extract from vectorized results
+            vec_ref_cost_i = vec_cost_ref[i]
+            vec_fast_cost_i = vec_cost_fast[i]
+            vec_ref_grad_i = vec_grad_ref[i]
+            vec_fast_grad_i = vec_grad_fast[i]
+            vec_ref_grad_bound_i = vec_grad_bound_ref[i]
+            vec_fast_grad_bound_i = vec_grad_bound_fast[i]
+            
+            # Compare vectorized with individual calls - must be exactly identical
+            assert cp.array_equal(vec_ref_cost_i, stored_ref[0][0]), \
+                f"Vectorized ref cost mismatch for {c.__class__.__name__} tree {i}: {vec_ref_cost_i} vs {stored_ref[0]}"
+            assert cp.array_equal(vec_fast_cost_i, stored_fast[0][0]), \
+                f"Vectorized fast cost mismatch for {c.__class__.__name__} tree {i}: {vec_fast_cost_i} vs {stored_fast[0]}"
+            assert cp.array_equal(vec_ref_grad_i, stored_ref[1][0]), \
+                f"Vectorized ref grad mismatch for {c.__class__.__name__} tree {i}"
+            assert cp.array_equal(vec_fast_grad_i, stored_fast[1][0]), \
+                f"Vectorized fast grad mismatch for {c.__class__.__name__} tree {i}"
+            assert cp.array_equal(vec_ref_grad_bound_i, stored_ref[2][0]), \
+                f"Vectorized ref bound grad mismatch for {c.__class__.__name__} tree {i}"
+            assert cp.array_equal(vec_fast_grad_bound_i, stored_fast[2][0]), \
+                f"Vectorized fast bound grad mismatch for {c.__class__.__name__} tree {i}"
+        
+        print(f"  ✓ Vectorized results exactly match individual calls")

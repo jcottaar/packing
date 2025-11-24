@@ -16,13 +16,22 @@ class Cost(kgs.BaseClass):
 
     @typechecked 
     def compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
-        assert(xyt.shape[1]==3)  # x, y, theta
-        assert(bound.shape == (1,) or bound.shape == (3,)) # 1: square bound, 3: periodic bound
-        cost,grad_xyt,grad_bound = self._compute_cost_ref(xyt, bound)
-        assert cost.shape == ()
-        assert grad_xyt.shape == xyt.shape
-        assert grad_bound.shape == bound.shape
+        # xyt: (n_ensemble, n_trees, 3) array
+        #bound: (n_ensemble, 1 or 3) array
+        assert(xyt.shape[2]==3)  # x, y, theta
+        N_ensembles = xyt.shape[0]
+        assert(bound.shape == (N_ensembles,1) or bound.shape == (N_ensembles,3)) # 1: square bound, 3: periodic bound      
+        cost,grad_xyt,grad_bound = self._compute_cost_ref(xyt,bound)
         return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
+    
+    def _compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+        N_ensembles = xyt.shape[0]
+        cost = cp.zeros(N_ensembles)
+        grad_xyt = cp.zeros_like(xyt)
+        grad_bound = cp.zeros_like(bound)
+        for i in range(N_ensembles):
+            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(xyt[i], bound[i])
+        return cost,grad_xyt,grad_bound
         
     def compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
         # Subclass can implement faster version
@@ -31,19 +40,28 @@ class Cost(kgs.BaseClass):
     
     def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
         # Subclass can implement faster version
-        return self._compute_cost_ref(xyt, bound)
+        N_ensembles = xyt.shape[0]
+        cost = cp.zeros(N_ensembles)
+        grad_xyt = cp.zeros_like(xyt)
+        grad_bound = cp.zeros_like(bound)
+        for i in range(N_ensembles):
+            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(xyt[i], bound[i])
+        return cost,grad_xyt,grad_bound
+    
+    def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
+        return self._compute_cost_single_ref(xyt, bound)
 
 @dataclass
 class CostDummy(Cost):
     # Dummy: always zero cost
-    def _compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
         return cp.array(0.0), cp.zeros_like(xyt), cp.zeros_like(bound)
 
 @dataclass    
 class CollisionCost(Cost):
     
     @typechecked 
-    def _compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
         # Compute collision cost for all pairs of trees
         assert(xyt.shape[1]==3)  # x, y, theta
         n_trees = xyt.shape[0]
@@ -83,8 +101,7 @@ class CollisionCostOverlappingArea(CollisionCost):
                 area_minus = np.sum(shapely.area(tree1_minus.intersection(tree2)))
                 grad[j] = cp.array((area_plus - area_minus) / (2 * epsilon))
         return area, grad
-        
-    @kgs.profile_each_line
+
     def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
-        cost,grad = pack_cuda.overlap_list_total(xyt, xyt)
-        return cost,grad,cp.zeros_like(bound)
+        cost,grad = pack_cuda.overlap_multi_ensemble(xyt, xyt)
+        return cost,cp.array(grad),cp.zeros_like(bound)
