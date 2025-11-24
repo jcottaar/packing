@@ -1,0 +1,509 @@
+"""
+pack_cuda_primitives.py
+
+Primitive CUDA device functions for polygon operations.
+These are low-level geometric operations used by higher-level functions.
+"""
+
+PRIMITIVE_SRC = r"""
+typedef struct {
+    double x;
+    double y;
+} d2;
+
+__device__ __forceinline__ d2 make_d2(double x, double y) {
+    d2 p; p.x = x; p.y = y; return p;
+}
+
+__device__ __forceinline__ double cross3(d2 a, d2 b, d2 c) {
+    // Oriented area of triangle (a, b, c) = cross(b-a, c-a)
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+__device__ __forceinline__ d2 line_intersection(d2 p1, d2 p2,
+                                                d2 q1, d2 q2)
+{
+    // Solve p1 + t*(p2-p1) == q1 + u*(q2-q1)
+    double rx = p2.x - p1.x;
+    double ry = p2.y - p1.y;
+    double sx = q2.x - q1.x;
+    double sy = q2.y - q1.y;
+
+    double denom = rx * sy - ry * sx;
+
+    // Assume denom != 0 for non-parallel lines; for robustness you could
+    // add an epsilon check here.
+    double t = ((q1.x - p1.x) * sy - (q1.y - p1.y) * sx) / denom;
+
+    return make_d2(p1.x + t * rx, p1.y + t * ry);
+}
+
+__device__ __forceinline__ int clip_against_edge(
+    const d2* in_pts, int in_count,
+    d2 A, d2 B,
+    d2* out_pts)
+{
+    // Clip a convex polygon "in_pts" against the half-plane defined by
+    // the directed edge A->B: keep points on the left side (cross >= 0).
+    if (in_count == 0) return 0;
+
+    int out_count = 0;
+
+    d2 S = in_pts[in_count - 1];
+    double S_side = cross3(A, B, S);
+
+    for (int i = 0; i < in_count; ++i) {
+        d2 E = in_pts[i];
+        double E_side = cross3(A, B, E);
+
+        bool S_inside = (S_side >= 0.0);
+        bool E_inside = (E_side >= 0.0);
+
+        if (S_inside && E_inside) {
+            // keep E
+            out_pts[out_count++] = E;
+        } else if (S_inside && !E_inside) {
+            // leaving - keep intersection only
+            out_pts[out_count++] = line_intersection(S, E, A, B);
+        } else if (!S_inside && E_inside) {
+            // entering - add intersection then E
+            out_pts[out_count++] = line_intersection(S, E, A, B);
+            out_pts[out_count++] = E;
+        }
+        // else both outside -> keep nothing
+
+        S = E;
+        S_side = E_side;
+    }
+
+    return out_count;
+}
+
+__device__ __forceinline__ double polygon_area(const d2* v, int n) {
+    // Signed polygon area via the shoelace formula (absolute value returned).
+    if (n < 3) return 0.0;
+    double sum = 0.0;
+    for (int i = 0; i < n; ++i) {
+        int j = (i + 1) % n;
+        sum += v[i].x * v[j].y - v[j].x * v[i].y;
+    }
+    double a = 0.5 * sum;
+    return a >= 0.0 ? a : -a;
+}
+
+// ============================================================================
+// BACKWARD PASS PRIMITIVES
+// ============================================================================
+
+// Backward for polygon_area: given d_area (gradient w.r.t. area output),
+// compute gradients w.r.t. each vertex (x,y) coordinate.
+// Shoelace: A = 0.5 * sum_i (x_i*y_{i+1} - x_{i+1}*y_i)
+// ∂A/∂x_k = 0.5 * (y_{k+1} - y_{k-1})
+// ∂A/∂y_k = 0.5 * (x_{k-1} - x_{k+1})
+__device__ __forceinline__ void backward_polygon_area(
+    const d2* v, int n,
+    double d_area,
+    d2* d_v)  // output: gradients w.r.t each vertex
+{
+    if (n < 3) {
+        for (int i = 0; i < n; ++i) {
+            d_v[i] = make_d2(0.0, 0.0);
+        }
+        return;
+    }
+    
+    // Compute signed area to determine sign
+    double sum = 0.0;
+    for (int i = 0; i < n; ++i) {
+        int j = (i + 1) % n;
+        sum += v[i].x * v[j].y - v[j].x * v[i].y;
+    }
+    double signed_area = 0.5 * sum;
+    double sign = (signed_area >= 0.0) ? 1.0 : -1.0;
+    
+    // Gradient of |A| = sign(A) * ∂A/∂v
+    double factor = sign * d_area;
+    
+    for (int k = 0; k < n; ++k) {
+        int k_prev = (k - 1 + n) % n;
+        int k_next = (k + 1) % n;
+        
+        d_v[k].x = factor * 0.5 * (v[k_next].y - v[k_prev].y);
+        d_v[k].y = factor * 0.5 * (v[k_prev].x - v[k_next].x);
+    }
+}
+
+// Backward for line_intersection: given d_out (gradient w.r.t. intersection point),
+// compute gradients w.r.t. the four input points p1, p2, q1, q2.
+// The intersection solves: p1 + t*(p2-p1) = q1 + u*(q2-q1)
+// where t = ((q1-p1) × (q2-q1)) / ((p2-p1) × (q2-q1))
+// and out = p1 + t*(p2-p1)
+__device__ __forceinline__ void backward_line_intersection(
+    d2 p1, d2 p2, d2 q1, d2 q2,
+    d2 d_out,  // gradient w.r.t. output intersection point
+    d2* d_p1, d2* d_p2, d2* d_q1, d2* d_q2)  // output gradients
+{
+    double rx = p2.x - p1.x;
+    double ry = p2.y - p1.y;
+    double sx = q2.x - q1.x;
+    double sy = q2.y - q1.y;
+    
+    double denom = rx * sy - ry * sx;
+    
+    // Numerator for t
+    double num = (q1.x - p1.x) * sy - (q1.y - p1.y) * sx;
+    double t = num / denom;
+    
+    // out = p1 + t * (p2 - p1)
+    // ∂out/∂p1 = I - t*I + (p2-p1) ⊗ ∂t/∂p1 = (1-t)*I + (p2-p1) ⊗ ∂t/∂p1
+    // ∂out/∂p2 = t*I + (p2-p1) ⊗ ∂t/∂p2
+    // ∂out/∂q1 = (p2-p1) ⊗ ∂t/∂q1
+    // ∂out/∂q2 = (p2-p1) ⊗ ∂t/∂q2
+    
+    // First compute ∂t/∂(p1,p2,q1,q2)
+    // t = num / denom
+    // ∂t/∂x = (∂num/∂x * denom - num * ∂denom/∂x) / denom^2
+    //
+    // IMPORTANT: s = q2 - q1, so when q1 or q2 change, s also changes!
+    // ∂s/∂q1 = -I,  ∂s/∂q2 = +I
+    
+    double denom2 = denom * denom;
+    
+    // ∂num/∂p1.x = -sy,  ∂num/∂p1.y = sx
+    // ∂denom/∂p1.x = -sy (from ∂rx/∂p1.x = -1), ∂denom/∂p1.y = sx (from ∂ry/∂p1.y = -1)
+    double dnum_dp1_x = -sy;
+    double dnum_dp1_y = sx;
+    double ddenom_dp1_x = -sy;
+    double ddenom_dp1_y = sx;
+    d2 dt_dp1 = make_d2((dnum_dp1_x * denom - num * ddenom_dp1_x) / denom2,
+                        (dnum_dp1_y * denom - num * ddenom_dp1_y) / denom2);
+    
+    // ∂num/∂p2 = 0
+    // ∂denom/∂p2.x = sy,  ∂denom/∂p2.y = -sx
+    d2 dt_dp2 = make_d2((-num * sy) / denom2, (num * sx) / denom2);
+    
+    // ∂num/∂q1.x = sy + (q1.y - p1.y) (from ∂sy/∂q1.x = 0 and ∂sx/∂q1.x = -1)
+    // ∂num/∂q1.y = -sx - (q1.x - p1.x) (from ∂sy/∂q1.y = -1 and ∂sx/∂q1.y = 0)
+    // ∂denom/∂q1.x = ry (from ∂sy/∂q1.x = 0 and ∂sx/∂q1.x = -1)
+    // ∂denom/∂q1.y = -rx (from ∂sy/∂q1.y = -1 and ∂sx/∂q1.y = 0)
+    double dnum_dq1_x = sy + (q1.y - p1.y);
+    double dnum_dq1_y = -sx - (q1.x - p1.x);
+    double ddenom_dq1_x = ry;
+    double ddenom_dq1_y = -rx;
+    d2 dt_dq1 = make_d2((dnum_dq1_x * denom - num * ddenom_dq1_x) / denom2,
+                        (dnum_dq1_y * denom - num * ddenom_dq1_y) / denom2);
+    
+    // ∂num/∂q2.x = -(q1.y - p1.y) (from ∂sy/∂q2.x = 0 and ∂sx/∂q2.x = +1)
+    // ∂num/∂q2.y = (q1.x - p1.x) (from ∂sy/∂q2.y = +1 and ∂sx/∂q2.y = 0)
+    // ∂denom/∂q2.x = -ry (from ∂sy/∂q2.x = 0 and ∂sx/∂q2.x = +1)
+    // ∂denom/∂q2.y = rx (from ∂sy/∂q2.y = +1 and ∂sx/∂q2.y = 0)
+    double dnum_dq2_x = -(q1.y - p1.y);
+    double dnum_dq2_y = (q1.x - p1.x);
+    double ddenom_dq2_x = -ry;
+    double ddenom_dq2_y = rx;
+    d2 dt_dq2 = make_d2((dnum_dq2_x * denom - num * ddenom_dq2_x) / denom2,
+                        (dnum_dq2_y * denom - num * ddenom_dq2_y) / denom2);
+    
+    // Now compute ∂out/∂inputs using chain rule
+    // out = [p1_x + t*rx, p1_y + t*ry]^T where rx = p2_x - p1_x, ry = p2_y - p1_y
+    //
+    // Jacobian ∂out/∂p1 (accounting for ∂rx/∂p1_x = -1, ∂ry/∂p1_y = -1):
+    // ∂out_x/∂p1_x = 1 + t*(-1) + rx * ∂t/∂p1_x = 1 - t + rx * ∂t/∂p1_x
+    // ∂out_x/∂p1_y = t*0 + rx * ∂t/∂p1_y = rx * ∂t/∂p1_y
+    // ∂out_y/∂p1_x = t*0 + ry * ∂t/∂p1_x = ry * ∂t/∂p1_x
+    // ∂out_y/∂p1_y = 1 + t*(-1) + ry * ∂t/∂p1_y = 1 - t + ry * ∂t/∂p1_y
+    //
+    // Gradient: d_p1 = J^T @ d_out
+    d_p1->x = (1.0 - t + rx * dt_dp1.x) * d_out.x + (ry * dt_dp1.x) * d_out.y;
+    d_p1->y = (rx * dt_dp1.y) * d_out.x + (1.0 - t + ry * dt_dp1.y) * d_out.y;
+    
+    // Jacobian ∂out/∂p2 (note: rx = p2_x - p1_x, so ∂rx/∂p2_x = 1, etc.):
+    // ∂out_x/∂p2_x = t + rx * ∂t/∂p2_x,  ∂out_x/∂p2_y = rx * ∂t/∂p2_y
+    // ∂out_y/∂p2_x = ry * ∂t/∂p2_x,      ∂out_y/∂p2_y = t + ry * ∂t/∂p2_y
+    d_p2->x = (t + rx * dt_dp2.x) * d_out.x + (ry * dt_dp2.x) * d_out.y;
+    d_p2->y = (rx * dt_dp2.y) * d_out.x + (t + ry * dt_dp2.y) * d_out.y;
+    
+    // Jacobian ∂out/∂q1:
+    // ∂out_x/∂q1_x = rx * ∂t/∂q1_x,  ∂out_x/∂q1_y = rx * ∂t/∂q1_y
+    // ∂out_y/∂q1_x = ry * ∂t/∂q1_x,  ∂out_y/∂q1_y = ry * ∂t/∂q1_y
+    d_q1->x = (rx * dt_dq1.x) * d_out.x + (ry * dt_dq1.x) * d_out.y;
+    d_q1->y = (rx * dt_dq1.y) * d_out.x + (ry * dt_dq1.y) * d_out.y;
+    
+    // Jacobian ∂out/∂q2:
+    // ∂out_x/∂q2_x = rx * ∂t/∂q2_x,  ∂out_x/∂q2_y = rx * ∂t/∂q2_y
+    // ∂out_y/∂q2_x = ry * ∂t/∂q2_x,  ∂out_y/∂q2_y = ry * ∂t/∂q2_y
+    d_q2->x = (rx * dt_dq2.x) * d_out.x + (ry * dt_dq2.x) * d_out.y;
+    d_q2->y = (rx * dt_dq2.y) * d_out.x + (ry * dt_dq2.y) * d_out.y;
+}
+
+// Backward for transform: given gradient w.r.t. transformed vertices,
+// compute gradients w.r.t. pose (x, y, theta).
+// Transform: v_t = R(theta) * v_local + (x, y)
+// where R(theta) = [[cos(theta), -sin(theta)], [sin(theta), cos(theta)]]
+__device__ __forceinline__ void backward_transform_vertices(
+    const d2* v_local, int n,
+    const d2* d_v_transformed,  // gradient w.r.t. transformed vertices
+    double c, double s,  // cos(theta), sin(theta)
+    double3* d_pose)  // output: gradient w.r.t. (x, y, theta)
+{
+    d_pose->x = 0.0;
+    d_pose->y = 0.0;
+    d_pose->z = 0.0;
+    
+    for (int i = 0; i < n; ++i) {
+        // v_t.x = c * v.x - s * v.y + pose.x
+        // v_t.y = s * v.x + c * v.y + pose.y
+        
+        // ∂v_t.x/∂pose.x = 1, ∂v_t.y/∂pose.x = 0
+        d_pose->x += d_v_transformed[i].x;
+        
+        // ∂v_t.x/∂pose.y = 0, ∂v_t.y/∂pose.y = 1
+        d_pose->y += d_v_transformed[i].y;
+        
+        // ∂v_t.x/∂theta = -s * v.x - c * v.y
+        // ∂v_t.y/∂theta = c * v.x - s * v.y
+        d_pose->z += d_v_transformed[i].x * (-s * v_local[i].x - c * v_local[i].y);
+        d_pose->z += d_v_transformed[i].y * (c * v_local[i].x - s * v_local[i].y);
+    }
+}
+
+// Structure to track clipping metadata for backward pass
+struct ClipMetadata {
+    int n_out;  // number of output vertices
+    // For each output vertex: source type and indices
+    // type: 0 = original vertex from input, 1 = intersection point
+    int src_type[MAX_INTERSECTION_VERTS];
+    int src_idx[MAX_INTERSECTION_VERTS];  // if type==0: index in input; if type==1: edge index
+    int src_idx2[MAX_INTERSECTION_VERTS];  // if type==1: next edge vertex index
+};
+
+// Enhanced clip_against_edge that also saves metadata for backward
+__device__ __forceinline__ int clip_against_edge_with_metadata(
+    const d2* in_pts, int in_count,
+    d2 A, d2 B,
+    d2* out_pts,
+    ClipMetadata* meta)
+{
+    if (in_count == 0) {
+        meta->n_out = 0;
+        return 0;
+    }
+
+    int out_count = 0;
+    d2 S = in_pts[in_count - 1];
+    double S_side = cross3(A, B, S);
+    int S_idx = in_count - 1;
+
+    for (int i = 0; i < in_count; ++i) {
+        d2 E = in_pts[i];
+        double E_side = cross3(A, B, E);
+
+        bool S_inside = (S_side >= 0.0);
+        bool E_inside = (E_side >= 0.0);
+
+        if (S_inside && E_inside) {
+            // keep E - original vertex
+            out_pts[out_count] = E;
+            meta->src_type[out_count] = 0;
+            meta->src_idx[out_count] = i;
+            out_count++;
+        } else if (S_inside && !E_inside) {
+            // leaving - keep intersection only
+            out_pts[out_count] = line_intersection(S, E, A, B);
+            meta->src_type[out_count] = 1;
+            meta->src_idx[out_count] = S_idx;
+            meta->src_idx2[out_count] = i;
+            out_count++;
+        } else if (!S_inside && E_inside) {
+            // entering - add intersection then E
+            out_pts[out_count] = line_intersection(S, E, A, B);
+            meta->src_type[out_count] = 1;
+            meta->src_idx[out_count] = S_idx;
+            meta->src_idx2[out_count] = i;
+            out_count++;
+            
+            out_pts[out_count] = E;
+            meta->src_type[out_count] = 0;
+            meta->src_idx[out_count] = i;
+            out_count++;
+        }
+
+        S = E;
+        S_side = E_side;
+        S_idx = i;
+    }
+
+    meta->n_out = out_count;
+    return out_count;
+}
+
+// Backward for clip_against_edge: distribute gradients from output vertices
+// back to input vertices and clip edge vertices
+__device__ __forceinline__ void backward_clip_against_edge(
+    const d2* in_pts, int in_count,
+    d2 A, d2 B,
+    const d2* d_out_pts,  // gradient w.r.t. output vertices
+    const ClipMetadata* meta,
+    d2* d_in_pts,  // output: gradient w.r.t. input vertices
+    d2* d_A, d2* d_B)  // output: gradient w.r.t. clip edge
+{
+    // Initialize gradients to zero
+    for (int i = 0; i < in_count; ++i) {
+        d_in_pts[i] = make_d2(0.0, 0.0);
+    }
+    d_A->x = 0.0; d_A->y = 0.0;
+    d_B->x = 0.0; d_B->y = 0.0;
+    
+    // Backpropagate through each output vertex
+    for (int i = 0; i < meta->n_out; ++i) {
+        if (meta->src_type[i] == 0) {
+            // Original vertex - gradient flows directly to input
+            int src = meta->src_idx[i];
+            d_in_pts[src].x += d_out_pts[i].x;
+            d_in_pts[src].y += d_out_pts[i].y;
+        } else {
+            // Intersection point - backprop through line_intersection
+            int idx1 = meta->src_idx[i];
+            int idx2 = meta->src_idx2[i];
+            d2 S = in_pts[idx1];
+            d2 E = in_pts[idx2];
+            
+            d2 d_S, d_E, d_A_local, d_B_local;
+            backward_line_intersection(S, E, A, B, d_out_pts[i],
+                                      &d_S, &d_E, &d_A_local, &d_B_local);
+            
+            d_in_pts[idx1].x += d_S.x;
+            d_in_pts[idx1].y += d_S.y;
+            d_in_pts[idx2].x += d_E.x;
+            d_in_pts[idx2].y += d_E.y;
+            d_A->x += d_A_local.x;
+            d_A->y += d_A_local.y;
+            d_B->x += d_B_local.x;
+            d_B->y += d_B_local.y;
+        }
+    }
+}
+
+__device__ double convex_intersection_area(
+    const d2* subj, int n_subj,
+    const d2* clip, int n_clip)
+{
+    // Compute the area of intersection between two convex polygons using
+    // Sutherland-Hodgman clipping of "subj" against all edges of "clip".
+    if (n_subj == 0 || n_clip == 0) return 0.0;
+
+    d2 polyA[MAX_INTERSECTION_VERTS];
+    d2 polyB[MAX_INTERSECTION_VERTS];
+
+    int nA = n_subj;
+    // Copy subject polygon into work buffer
+    for (int i = 0; i < n_subj; ++i) {
+        polyA[i] = subj[i];
+    }
+
+    // Clip A against each edge of clip polygon
+    for (int e = 0; e < n_clip && nA > 0; ++e) {
+        d2 A = clip[e];
+        d2 B = clip[(e + 1) % n_clip];
+
+        int nB = clip_against_edge(polyA, nA, A, B, polyB);
+
+        // Copy back to polyA for next iteration
+        nA = nB;
+        for (int i = 0; i < nA; ++i) {
+            polyA[i] = polyB[i];
+        }
+    }
+
+    return polygon_area(polyA, nA);
+}
+
+// Backward for convex_intersection_area
+// Recomputes forward clipping sequence while tracking metadata,
+// then backpropagates through clipping and area computation
+__device__ void backward_convex_intersection_area(
+    const d2* subj, int n_subj,
+    const d2* clip, int n_clip,
+    double d_area,  // gradient w.r.t. output area
+    d2* d_subj,     // output: gradient w.r.t. subject vertices
+    d2* d_clip)     // output: gradient w.r.t. clip vertices
+{
+    // Initialize output gradients
+    for (int i = 0; i < n_subj; ++i) {
+        d_subj[i] = make_d2(0.0, 0.0);
+    }
+    for (int i = 0; i < n_clip; ++i) {
+        d_clip[i] = make_d2(0.0, 0.0);
+    }
+    
+    if (n_subj == 0 || n_clip == 0 || d_area == 0.0) return;
+
+    // Forward pass: recompute clipping with metadata AND save intermediate polygons
+    d2 forward_polys[MAX_VERTS_PER_PIECE + 1][MAX_INTERSECTION_VERTS];
+    int forward_counts[MAX_VERTS_PER_PIECE + 1];
+    ClipMetadata metadata[MAX_VERTS_PER_PIECE];  // one per clipping edge
+    
+    // Initialize with subject polygon
+    forward_counts[0] = n_subj;
+    for (int i = 0; i < n_subj; ++i) {
+        forward_polys[0][i] = subj[i];
+    }
+
+    // Apply each clipping edge, save metadata and intermediate results
+    int clip_count = 0;
+    for (int e = 0; e < n_clip && forward_counts[e] > 0; ++e) {
+        d2 A = clip[e];
+        d2 B = clip[(e + 1) % n_clip];
+
+        int n_out = clip_against_edge_with_metadata(
+            forward_polys[e], forward_counts[e], 
+            A, B, 
+            forward_polys[e + 1], &metadata[e]);
+        forward_counts[e + 1] = n_out;
+        clip_count++;
+    }
+
+    // Final polygon is in forward_polys[clip_count]
+    int final_n = forward_counts[clip_count];
+    
+    // Backward through polygon_area
+    d2 d_polyFinal[MAX_INTERSECTION_VERTS];
+    backward_polygon_area(forward_polys[clip_count], final_n, d_area, d_polyFinal);
+    
+    // Backward through each clipping stage in reverse
+    d2 d_current[MAX_INTERSECTION_VERTS];
+    for (int i = 0; i < final_n; ++i) {
+        d_current[i] = d_polyFinal[i];
+    }
+    
+    for (int e = clip_count - 1; e >= 0; --e) {
+        int e_idx = e % n_clip;
+        int e_next = (e + 1) % n_clip;
+        d2 A = clip[e_idx];
+        d2 B = clip[e_next];
+        
+        d2 d_in[MAX_INTERSECTION_VERTS];
+        d2 d_A, d_B;
+        
+        backward_clip_against_edge(forward_polys[e], forward_counts[e], A, B,
+                                   d_current, &metadata[e],
+                                   d_in, &d_A, &d_B);
+        
+        // Accumulate gradients for clip vertices
+        d_clip[e_idx].x += d_A.x;
+        d_clip[e_idx].y += d_A.y;
+        d_clip[e_next].x += d_B.x;
+        d_clip[e_next].y += d_B.y;
+        
+        // Update current gradient for next iteration
+        for (int i = 0; i < forward_counts[e]; ++i) {
+            d_current[i] = d_in[i];
+        }
+    }
+    
+    // After all clipping stages, d_current contains gradients w.r.t. subject
+    for (int i = 0; i < n_subj; ++i) {
+        d_subj[i] = d_current[i];
+    }
+}
+"""
