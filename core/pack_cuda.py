@@ -135,7 +135,6 @@ __device__ double overlap_ref_with_list_piece(
     const int n,
     const int pi) // piece index to process (0-3)
 {
-    const double eps = 1e-6;
     double sum = 0.0;
 
     const double* row_x = xyt_3xN + 0 * n;
@@ -626,13 +625,18 @@ def _ensure_initialized() -> None:
         raise RuntimeError("nvcc not found in PATH; please install the CUDA toolkit or add nvcc to PATH")
 
     ptx_path = os.path.join(persist_dir, 'pack_cuda_saved.ptx')
-    #cmd = [nvcc_path, "-lineinfo", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
-    #cmd = [nvcc_path, "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
     cmd = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
 
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Run nvcc and capture output to display diagnostics
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    
+    # Print compiler output (including --ptxas-options=-v diagnostics)
+    if proc.stdout:
+        print("=== NVCC Compilation Output ===")
+        print(proc.stdout)
+    
     if proc.returncode != 0:
-        raise RuntimeError(f"nvcc failed (exit {proc.returncode}):\n{proc.stderr.decode(errors='ignore')}")
+        raise RuntimeError(f"nvcc failed (exit {proc.returncode}):\n{proc.stdout}")
 
     # Load compiled PTX into a CuPy RawModule
     _raw_module = cp.RawModule(path=ptx_path)

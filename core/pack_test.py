@@ -16,29 +16,35 @@ def run_all_tests():
     print("All tests passed.")
 
 def test_costs():
-    cost = pack_cost.PackingCost()
-    cost.collision_cost = pack_cost.CollisionCostOverlappingArea()
-    costs_to_test = [cost]
+    #cost = pack_cost.PackingCost()
+    #cost.collision_cost = pack_cost.CollisionCostOverlappingArea()
+    #costs_to_test = [cost]
+
+    print('add bounds grad check')
+    costs_to_test = [pack_cost.CostDummy(), pack_cost.CollisionCostOverlappingArea(scaling=3.)]
 
     tree_list = pack_basics.place_random(10, 1.5)
     #tree_list = pack_basics.place_random(3, 0.1)
     #tree_list.xyt = [[5.,5.,5.],[1.,2,3.],[1.,2.,3.01]]
     pack_vis.visualize_tree_list(tree_list)
 
+    bounds = cp.array([1.])
+
     for c in costs_to_test:
         # First, check that compute_cost and compute_cost_ref agree
-        cost_ref, grad_ref = c.compute_total_cost_ref(cp.array(tree_list.xyt), include_gradients=True)
-        cost_fast, grad_fast = c.compute_total_cost(cp.array(tree_list.xyt), include_gradients=True)        
+        cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(cp.array(tree_list.xyt), bounds)
+        cost_fast, grad_fast, grad_fast_ref = c.compute_cost(cp.array(tree_list.xyt), bounds)        
         # Show full precision
         print(cp.array2string(cp.asarray(cost_fast), precision=17, suppress_small=False))
         print(cp.array2string(cp.asarray(cost_ref), precision=17, suppress_small=False))
-        assert cost_ref>0
+        if not isinstance(c, pack_cost.CostDummy):
+            assert cost_ref>0
         assert cp.allclose(cost_ref, cost_fast, rtol=1e-6), f"Cost mismatch: {cost_ref} vs {cost_fast}"
         assert cp.allclose(grad_ref, grad_fast, rtol=1e-4, atol=1e-4), f"Gradient mismatch: {grad_ref} vs {grad_fast}"
 
         # Now check gradients via finite differences
         def _get_cost(obj, xyt_arr):
-            return obj.compute_total_cost_ref(cp.array(xyt_arr), include_gradients=False)[0]
+            return obj.compute_cost_ref(cp.array(xyt_arr), bounds)[0]
 
         x0 = tree_list.xyt.copy()
         shape = x0.shape
