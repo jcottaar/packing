@@ -4,8 +4,19 @@ import scipy as sp
 import cupy as cp
 import kaggle_support as kgs
 
-def visualize_tree_list(tree_list, ax=None):
+def visualize_tree_list(tree_list, ax=None, h=None):
     trees = tree_list.get_trees()
+    if h is not None:
+        # plot a square with size h centered at origin
+        # ensure we have an Axes to draw the square on
+        if ax is None:
+            fig, ax = plt.subplots()
+        half = float(h) / 2.0
+        square = Polygon([(-half, -half), (half, -half), (half, half), (-half, half)])
+        # draw square on the provided axes (outline, no fill)
+        x, y = square.exterior.xy
+        patch = MplPolygon(list(zip(x, y)), closed=True, facecolor='none', edgecolor='k', linewidth=1.0, zorder=2)
+        ax.add_patch(patch)
     return plot_polygons(trees, ax=ax)
     
 
@@ -16,6 +27,7 @@ from matplotlib.patches import Polygon as MplPolygon
 from shapely.geometry import Polygon, MultiPolygon
 import colorsys
 from shapely.ops import unary_union
+from shapely.geometry import Polygon
 
 
 def _pastel_color(i, n, s=0.45, l=0.72):

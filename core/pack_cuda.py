@@ -396,10 +396,13 @@ __device__ double convex_area_outside_square(
 }
 
 // Compute total area outside square boundary for one piece (pi) of one tree
+// Also computes gradients w.r.t. pose (x, y, theta) and h using finite differences
 __device__ double boundary_area_piece(
     const double3 pose,
     const double h,
-    const int pi)  // piece index to process (0-3)
+    const int pi,  // piece index to process (0-3)
+    double3* d_pose,  // output: gradient w.r.t. pose (can be NULL)
+    double* d_h)      // output: gradient w.r.t. h (can be NULL)
 {
     // Compute transformed polygon for this piece
     d2 poly[MAX_VERTS_PER_PIECE];
@@ -411,7 +414,70 @@ __device__ double boundary_area_piece(
     int n = const_piece_nverts[pi];
     
     // Compute area outside square for this piece
-    return convex_area_outside_square(poly, n, h);
+    double area = convex_area_outside_square(poly, n, h);
+    
+    // Compute gradients using finite differences if requested
+    if (d_pose != NULL || d_h != NULL) {
+        const double eps = 1e-3;
+        
+        if (d_pose != NULL) {
+            // Gradient w.r.t. x
+            double3 pose_plus = pose;
+            pose_plus.x += eps;
+            d2 poly_plus[MAX_VERTS_PER_PIECE];
+            compute_tree_poly_and_aabb(pose_plus, pi, poly_plus, aabb_min_x, aabb_max_x,
+                                        aabb_min_y, aabb_max_y);
+            double area_plus = convex_area_outside_square(poly_plus, n, h);
+            
+            double3 pose_minus = pose;
+            pose_minus.x -= eps;
+            d2 poly_minus[MAX_VERTS_PER_PIECE];
+            compute_tree_poly_and_aabb(pose_minus, pi, poly_minus, aabb_min_x, aabb_max_x,
+                                        aabb_min_y, aabb_max_y);
+            double area_minus = convex_area_outside_square(poly_minus, n, h);
+            
+            d_pose->x = (area_plus - area_minus) / (2.0 * eps);
+            
+            // Gradient w.r.t. y
+            pose_plus = pose;
+            pose_plus.y += eps;
+            compute_tree_poly_and_aabb(pose_plus, pi, poly_plus, aabb_min_x, aabb_max_x,
+                                        aabb_min_y, aabb_max_y);
+            area_plus = convex_area_outside_square(poly_plus, n, h);
+            
+            pose_minus = pose;
+            pose_minus.y -= eps;
+            compute_tree_poly_and_aabb(pose_minus, pi, poly_minus, aabb_min_x, aabb_max_x,
+                                        aabb_min_y, aabb_max_y);
+            area_minus = convex_area_outside_square(poly_minus, n, h);
+            
+            d_pose->y = (area_plus - area_minus) / (2.0 * eps);
+            
+            // Gradient w.r.t. theta
+            pose_plus = pose;
+            pose_plus.z += eps;
+            compute_tree_poly_and_aabb(pose_plus, pi, poly_plus, aabb_min_x, aabb_max_x,
+                                        aabb_min_y, aabb_max_y);
+            area_plus = convex_area_outside_square(poly_plus, n, h);
+            
+            pose_minus = pose;
+            pose_minus.z -= eps;
+            compute_tree_poly_and_aabb(pose_minus, pi, poly_minus, aabb_min_x, aabb_max_x,
+                                        aabb_min_y, aabb_max_y);
+            area_minus = convex_area_outside_square(poly_minus, n, h);
+            
+            d_pose->z = (area_plus - area_minus) / (2.0 * eps);
+        }
+        
+        if (d_h != NULL) {
+            // Gradient w.r.t. h
+            double area_plus = convex_area_outside_square(poly, n, h + eps);
+            double area_minus = convex_area_outside_square(poly, n, h - eps);
+            *d_h = (area_plus - area_minus) / (2.0 * eps);
+        }
+    }
+    
+    return area;
 }
 
 // Compute total boundary violation area for a list of trees
@@ -422,8 +488,8 @@ __device__ void boundary_list_total(
     const int n,
     const double h,
     double* __restrict__ out_total,
-    double* __restrict__ out_grads,  // if non-NULL, write gradients [n*3] (not implemented yet)
-    double* __restrict__ out_grad_h)  // if non-NULL, write gradient w.r.t. h (not implemented yet)
+    double* __restrict__ out_grads,  // if non-NULL, write gradients [n*3]
+    double* __restrict__ out_grad_h)  // if non-NULL, write gradient w.r.t. h
 {
     // Thread organization: 4 threads per tree
     // tid = tree_idx * 4 + piece_idx
@@ -443,15 +509,30 @@ __device__ void boundary_list_total(
         pose.y = row_y[tree_idx];
         pose.z = row_t[tree_idx];
         
-        // Each thread computes area outside boundary for one piece
-        local_area = boundary_area_piece(pose, h, piece_idx);
+        // Compute gradients if requested
+        double3 d_pose;
+        double d_h_local;
+        
+        // Each thread computes area outside boundary for one piece with gradients
+        local_area = boundary_area_piece(pose, h, piece_idx, 
+                                          (out_grads != NULL) ? &d_pose : NULL,
+                                          (out_grad_h != NULL) ? &d_h_local : NULL);
         
         // Atomic add for total area
         atomicAdd(out_total, local_area);
         
-        // TODO: Gradient computation not yet implemented
-        // if (out_grads != NULL) { ... }
-        // if (out_grad_h != NULL) { ... }
+        // Accumulate gradients if computed
+        if (out_grads != NULL) {
+            // Each of the 4 threads for this tree contributes gradient from its piece
+            atomicAdd(&out_grads[tree_idx * 3 + 0], d_pose.x);
+            atomicAdd(&out_grads[tree_idx * 3 + 1], d_pose.y);
+            atomicAdd(&out_grads[tree_idx * 3 + 2], d_pose.z);
+        }
+        
+        if (out_grad_h != NULL) {
+            // All threads contribute to d/dh
+            atomicAdd(out_grad_h, d_h_local);
+        }
     }
 }
 
@@ -903,78 +984,48 @@ def boundary_list_total(xyt, h, compute_grad: bool = False):
     threads_per_block = n * 4
     blocks = 1
     
-    # Dummy empty array for kernel (gradients not computed in kernel)
-    null_ptr = cp.asarray([], dtype=dtype)
-    
     # Get the kernel
     boundary_kernel = _raw_module.get_function("boundary_list_total_kernel")
     
-    boundary_kernel(
-        (blocks,),
-        (threads_per_block,),
-        (
-            xyt_3xN,
-            np.int32(n),
-            dtype(h_scalar),
-            out_total,
-            null_ptr,
-            null_ptr,
-        ),
-    )
-    
     if compute_grad:
-        # Compute gradients using two-sided finite differences
-        eps = 1e-3
-        grads = cp.zeros((n, 3), dtype=dtype)
+        # Allocate gradient arrays
+        out_grads = cp.zeros(n * 3, dtype=dtype)
+        out_grad_h = cp.zeros(1, dtype=dtype)
         
-        # Gradients w.r.t. each tree's pose
-        for i in range(n):
-            for j in range(3):  # x, y, theta
-                # Perturb +eps
-                xyt_plus = xyt_arr.copy()
-                xyt_plus[i, j] += eps
-                xyt_plus_3xN = cp.ascontiguousarray(xyt_plus.T).ravel()
-                out_plus = cp.zeros(1, dtype=dtype)
-                boundary_kernel(
-                    (blocks,), (threads_per_block,),
-                    (xyt_plus_3xN, np.int32(n), dtype(h_scalar), out_plus, null_ptr, null_ptr)
-                )
-                
-                # Perturb -eps
-                xyt_minus = xyt_arr.copy()
-                xyt_minus[i, j] -= eps
-                xyt_minus_3xN = cp.ascontiguousarray(xyt_minus.T).ravel()
-                out_minus = cp.zeros(1, dtype=dtype)
-                boundary_kernel(
-                    (blocks,), (threads_per_block,),
-                    (xyt_minus_3xN, np.int32(n), dtype(h_scalar), out_minus, null_ptr, null_ptr)
-                )
-                
-                # Central difference
-                grads[i, j] = (out_plus[0] - out_minus[0]) / (2.0 * eps)
-        
-        # Gradient w.r.t. h
-        grad_h = cp.zeros(1, dtype=dtype)
-        
-        # Perturb h +eps
-        out_plus = cp.zeros(1, dtype=dtype)
         boundary_kernel(
-            (blocks,), (threads_per_block,),
-            (xyt_3xN, np.int32(n), dtype(h_scalar + eps), out_plus, null_ptr, null_ptr)
+            (blocks,),
+            (threads_per_block,),
+            (
+                xyt_3xN,
+                np.int32(n),
+                dtype(h_scalar),
+                out_total,
+                out_grads,
+                out_grad_h,
+            ),
         )
         
-        # Perturb h -eps
-        out_minus = cp.zeros(1, dtype=dtype)
-        boundary_kernel(
-            (blocks,), (threads_per_block,),
-            (xyt_3xN, np.int32(n), dtype(h_scalar - eps), out_minus, null_ptr, null_ptr)
-        )
+        # Reshape gradients back to (N, 3)
+        grads = out_grads.reshape((n, 3))
         
-        # Central difference
-        grad_h[0] = (out_plus[0] - out_minus[0]) / (2.0 * eps)
-        
-        return out_total, grads, grad_h
+        return out_total, grads, out_grad_h
     else:
+        # Dummy empty array for kernel (gradients not computed)
+        null_ptr = cp.asarray([], dtype=dtype)
+        
+        boundary_kernel(
+            (blocks,),
+            (threads_per_block,),
+            (
+                xyt_3xN,
+                np.int32(n),
+                dtype(h_scalar),
+                out_total,
+                null_ptr,
+                null_ptr,
+            ),
+        )
+        
         return out_total, None, None
 
 

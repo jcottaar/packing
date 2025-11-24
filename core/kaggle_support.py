@@ -260,6 +260,7 @@ def create_center_tree():
 center_tree, convex_breakdown, tree_max_radius = create_center_tree()
 center_tree_prepped = prep(center_tree)
 tree_area = center_tree.area
+tree_vertices = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float64)
 
 
 @typechecked

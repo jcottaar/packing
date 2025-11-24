@@ -202,7 +202,7 @@ class BoundaryCost(Cost):
     def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
         cost,grad,grad_h = pack_cuda.boundary_list_total(xyt, bound[0], compute_grad=True)
         return cost,grad,grad_h
-    
+
 @dataclass 
 class AreaCost(Cost):
     def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
@@ -210,5 +210,221 @@ class AreaCost(Cost):
         cost = bound[0]**2
         grad_bound = cp.array([2.0*bound[0]])
         return cost, cp.zeros_like(xyt), grad_bound
+
+@dataclass
+class BoundaryDistanceCost(Cost):
+    # Cost based on squared distance of vertices outside the square boundary
+    # Per tree, use only the vertex with the maximum distance
+    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+        assert(bound.shape[0]==1) #other case todo
+        # xyt is (n_trees, 3), bound is (1,); compute squared distance for each vertex outside square
+        b = float(bound[0].get().item())
+        half = b / 2.0
+        
+        tree_list = kgs.TreeList()
+        tree_list.xyt = xyt
+        trees = tree_list.get_trees()
+        
+        n_trees = xyt.shape[0]
+        total_cost = 0.0
+        
+        # For each tree, find vertex with maximum distance outside square (vectorized over vertices)
+        for i, tree in enumerate(trees):
+            coords = np.array(tree.exterior.coords[:-1])  # skip closing vertex
+            if coords.size == 0:
+                continue
+            vx = coords[:, 0]
+            vy = coords[:, 1]
+            dx = np.maximum(0.0, np.abs(vx) - half)
+            dy = np.maximum(0.0, np.abs(vy) - half)
+            dist_sq = dx**2 + dy**2
+            max_dist_sq = float(np.max(dist_sq))
+            total_cost += max_dist_sq
+        
+        # Compute gradients using finite differences
+        grad = cp.zeros_like(xyt)
+        epsilon = 1e-6
+        
+        for i in range(n_trees):
+            xi = xyt[i,0].get().item()
+            yi = xyt[i,1].get().item()
+            thetai = xyt[i,2].get().item()
+            
+            for j in range(3):
+                if j == 0:
+                    x_plus, x_minus = xi + epsilon, xi - epsilon
+                    y_plus = y_minus = yi
+                    th_plus = th_minus = thetai
+                elif j == 1:
+                    y_plus, y_minus = yi + epsilon, yi - epsilon
+                    x_plus = x_minus = xi
+                    th_plus = th_minus = thetai
+                else:
+                    th_plus, th_minus = thetai + epsilon, thetai - epsilon
+                    x_plus = x_minus = xi
+                    y_plus = y_minus = yi
+                
+                # Compute cost for perturbed positions (vectorized over vertices)
+                tree_plus = kgs.create_tree(x_plus, y_plus, th_plus*360/2/np.pi)
+                tree_minus = kgs.create_tree(x_minus, y_minus, th_minus*360/2/np.pi)
+
+                coords_plus = np.array(tree_plus.exterior.coords[:-1])
+                if coords_plus.size == 0:
+                    cost_plus = 0.0
+                else:
+                    vx_p = coords_plus[:, 0]
+                    vy_p = coords_plus[:, 1]
+                    dx_p = np.maximum(0.0, np.abs(vx_p) - half)
+                    dy_p = np.maximum(0.0, np.abs(vy_p) - half)
+                    dist_sq_p = dx_p**2 + dy_p**2
+                    cost_plus = float(np.max(dist_sq_p))
+
+                coords_minus = np.array(tree_minus.exterior.coords[:-1])
+                if coords_minus.size == 0:
+                    cost_minus = 0.0
+                else:
+                    vx_m = coords_minus[:, 0]
+                    vy_m = coords_minus[:, 1]
+                    dx_m = np.maximum(0.0, np.abs(vx_m) - half)
+                    dy_m = np.maximum(0.0, np.abs(vy_m) - half)
+                    dist_sq_m = dx_m**2 + dy_m**2
+                    cost_minus = float(np.max(dist_sq_m))
+                
+                grad_val = (cost_plus - cost_minus) / (2.0 * epsilon)
+                grad[i, j] = cp.array(grad_val)
+        
+        # Compute gradient w.r.t. bound using finite differences
+        grad_bound = cp.zeros_like(bound)
+        b_plus = b + epsilon
+        b_minus = b - epsilon
+        half_plus = b_plus / 2.0
+        half_minus = b_minus / 2.0
+        
+        # Recompute cost for perturbed bounds (vectorized per-tree over vertices)
+        cost_plus = 0.0
+        for tree in trees:
+            coords = np.array(tree.exterior.coords[:-1])
+            if coords.size == 0:
+                continue
+            vx = coords[:, 0]
+            vy = coords[:, 1]
+            dx = np.maximum(0.0, np.abs(vx) - half_plus)
+            dy = np.maximum(0.0, np.abs(vy) - half_plus)
+            dist_sq = dx**2 + dy**2
+            cost_plus += float(np.max(dist_sq))
+
+        cost_minus = 0.0
+        for tree in trees:
+            coords = np.array(tree.exterior.coords[:-1])
+            if coords.size == 0:
+                continue
+            vx = coords[:, 0]
+            vy = coords[:, 1]
+            dx = np.maximum(0.0, np.abs(vx) - half_minus)
+            dy = np.maximum(0.0, np.abs(vy) - half_minus)
+            dist_sq = dx**2 + dy**2
+            cost_minus += float(np.max(dist_sq))
+        
+        grad_bound[0] = cp.array((cost_plus - cost_minus) / (2.0 * epsilon))
+        
+        return cp.array(total_cost), grad, grad_bound
+    
+    def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
+        assert(bound.shape[0]==1) #other case todo
+        # xyt is (n_trees, 3), bound is (1,)
+        # Use kgs.tree_vertices (precomputed center tree vertices) for efficient vectorized computation
+        b = float(bound[0].get().item())
+        half = b / 2.0
+        
+        n_trees = xyt.shape[0]
+        
+        epsilon = 1e-6
+        
+        # Extract positions
+        x = xyt[:, 0:1]  # (n_trees, 1)
+        y = xyt[:, 1:2]  # (n_trees, 1)
+        theta = xyt[:, 2:3]  # (n_trees, 1)
+        
+        # Rotation matrices for all trees
+        cos_t = cp.cos(theta)  # (n_trees, 1)
+        sin_t = cp.sin(theta)  # (n_trees, 1)
+        
+        # kgs.tree_vertices is on GPU as CuPy array (n_vertices, 2)
+        vx = kgs.tree_vertices[:, 0]  # (n_vertices,)
+        vy = kgs.tree_vertices[:, 1]  # (n_vertices,)
+        
+        # Apply rotation and translation: R @ v + t for each tree
+        # Rotated vertices: (n_trees, n_vertices) via broadcasting
+        vx_rot = cos_t * vx - sin_t * vy  # (n_trees, n_vertices)
+        vy_rot = sin_t * vx + cos_t * vy  # (n_trees, n_vertices)
+        
+        # Translate: add (x, y) for each tree
+        vx_final = vx_rot + x  # (n_trees, n_vertices)
+        vy_final = vy_rot + y  # (n_trees, n_vertices)
+        
+        # Compute boundary distance for each vertex
+        dx = cp.maximum(0.0, cp.abs(vx_final) - half)  # (n_trees, n_vertices)
+        dy = cp.maximum(0.0, cp.abs(vy_final) - half)  # (n_trees, n_vertices)
+        dist_sq = dx**2 + dy**2  # (n_trees, n_vertices)
+        
+        # Max per tree
+        max_dist_sq = cp.max(dist_sq, axis=1)  # (n_trees,)
+        total_cost = cp.sum(max_dist_sq)
+        
+        # Compute gradients
+        grad = cp.zeros_like(xyt)
+        
+        # Analytical gradients for x and y via backpropagation (vectorized)
+        # For each tree, find which vertex has max distance
+        max_indices = cp.argmax(dist_sq, axis=1)  # (n_trees,)
+        
+        # Vectorized extraction: get max-vertex values for all trees
+        # max_indices shape: (n_trees,), need to gather from (n_trees, n_vertices)
+        vx_max = vx_final[cp.arange(n_trees), max_indices]  # (n_trees,)
+        vy_max = vy_final[cp.arange(n_trees), max_indices]  # (n_trees,)
+        
+        # Compute dx, dy for max vertex of each tree
+        dx_max = cp.maximum(0.0, cp.abs(vx_max) - half)  # (n_trees,)
+        dy_max = cp.maximum(0.0, cp.abs(vy_max) - half)  # (n_trees,)
+        
+        # Analytical gradients (vectorized over all trees)
+        # d(dist_sq)/d(vx_final) = 2*dx * sign(vx_final) if dx > 0 else 0
+        # d(dist_sq)/d(vy_final) = 2*dy * sign(vy_final) if dy > 0 else 0
+        grad_vx_max = cp.where(dx_max > 0, 2.0 * dx_max * cp.sign(vx_max), 0.0)  # (n_trees,)
+        grad_vy_max = cp.where(dy_max > 0, 2.0 * dy_max * cp.sign(vy_max), 0.0)  # (n_trees,)
+        
+        # d(vx_final)/d(x) = 1, d(vy_final)/d(y) = 1
+        grad[:, 0] = grad_vx_max
+        grad[:, 1] = grad_vy_max
+        
+        # Analytical gradient for theta via backpropagation (vectorized)
+        # For max vertex of each tree, compute d(dist_sq)/d(theta)
+        # Chain rule: d(dist_sq)/d(theta) = d(dist_sq)/d(vx_final) * d(vx_final)/d(theta) + d(dist_sq)/d(vy_final) * d(vy_final)/d(theta)
+        # d(vx_final)/d(theta) = d(vx_rot)/d(theta) = -sin(theta)*vx - cos(theta)*vy
+        # d(vy_final)/d(theta) = d(vy_rot)/d(theta) = cos(theta)*vx - sin(theta)*vy
+        
+        # Get the original (unrotated) vertex coordinates for max vertex of each tree
+        vx_orig = vx[max_indices]  # (n_trees,)
+        vy_orig = vy[max_indices]  # (n_trees,)
+        
+        # Derivatives of rotated vertices w.r.t. theta
+        dvx_rot_dtheta = -sin_t[:, 0] * vx_orig - cos_t[:, 0] * vy_orig  # (n_trees,)
+        dvy_rot_dtheta = cos_t[:, 0] * vx_orig - sin_t[:, 0] * vy_orig   # (n_trees,)
+        
+        # Chain through boundary distance
+        grad_theta = grad_vx_max * dvx_rot_dtheta + grad_vy_max * dvy_rot_dtheta  # (n_trees,)
+        grad[:, 2] = grad_theta
+        
+        # Analytical gradient for h (bound) via backpropagation (vectorized)
+        # For the h gradient, we don't use the previous grad_vx/vy_max which include sign factors.
+        # Instead: d(dist_sq)/d(half) = -2*dx - 2*dy (regardless of sign of vx/vy)
+        # And d(dist_sq)/d(b) = d(dist_sq)/d(half) * d(half)/d(b) = -2*(dx_max + dy_max) * (1/2)
+        
+        grad_h = -(dx_max + dy_max)  # (n_trees,)
+        grad_bound_val = cp.sum(grad_h)
+        
+        grad_bound = cp.array([grad_bound_val])
+        
+        return total_cost, grad, grad_bound
 
         
