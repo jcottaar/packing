@@ -82,6 +82,10 @@ extern "C" {
 __constant__ double const_piece_xy[MAX_PIECES * MAX_VERTS_PER_PIECE * 2];
 __constant__ int const_piece_nverts[MAX_PIECES];
 
+// Constant memory for tree vertices (precomputed from center tree)
+__constant__ double const_tree_vertices_xy[256];  // Max 128 vertices (256 floats for x,y pairs)
+__constant__ int const_n_tree_vertices;
+
 """ + pack_cuda_primitives.PRIMITIVE_SRC + r"""
 
 __device__ __forceinline__ void compute_tree_poly_and_aabb(
@@ -706,6 +710,202 @@ __global__ void multi_boundary_list_total(
     boundary_list_total(xyt_ensemble, n, h, out_total, out_grads, out_grad_h_elem);
 }
 
+// Compute boundary distance cost for a single tree
+// Returns the maximum squared distance of any vertex outside the boundary
+__device__ double boundary_distance_tree(
+    const double3 pose,
+    const double h,
+    double3* d_pose,  // output: gradient w.r.t. pose (can be NULL)
+    double* d_h)      // output: gradient w.r.t. h (can be NULL)
+{
+    double half = h * 0.5;
+    
+    // Get number of vertices from constant memory
+    int n_verts = const_n_tree_vertices;
+    
+    // Precompute rotation matrix
+    double c = 0.0;
+    double s = 0.0;
+    sincos(pose.z, &s, &c);
+    
+    // Find maximum squared distance over all vertices
+    double max_dist_sq = 0.0;
+    int max_idx = 0;
+    
+    for (int v = 0; v < n_verts; ++v) {
+        // Load vertex from constant memory
+        double vx_local = const_tree_vertices_xy[v * 2 + 0];
+        double vy_local = const_tree_vertices_xy[v * 2 + 1];
+        
+        // Apply rotation and translation
+        double vx = c * vx_local - s * vy_local + pose.x;
+        double vy = s * vx_local + c * vy_local + pose.y;
+        
+        // Compute distance outside boundary
+        double abs_vx = fabs(vx);
+        double abs_vy = fabs(vy);
+        double dx = (abs_vx > half) ? (abs_vx - half) : 0.0;
+        double dy = (abs_vy > half) ? (abs_vy - half) : 0.0;
+        double dist_sq = dx * dx + dy * dy;
+        
+        if (dist_sq > max_dist_sq) {
+            max_dist_sq = dist_sq;
+            max_idx = v;
+        }
+    }
+    
+    // Compute gradients if requested
+    if (d_pose != NULL || d_h != NULL) {
+        // Recompute the max vertex transformed coordinates
+        double vx_local = const_tree_vertices_xy[max_idx * 2 + 0];
+        double vy_local = const_tree_vertices_xy[max_idx * 2 + 1];
+        
+        double vx_max = c * vx_local - s * vy_local + pose.x;
+        double vy_max = s * vx_local + c * vy_local + pose.y;
+        
+        double abs_vx_max = fabs(vx_max);
+        double abs_vy_max = fabs(vy_max);
+        double dx_max = (abs_vx_max > half) ? (abs_vx_max - half) : 0.0;
+        double dy_max = (abs_vy_max > half) ? (abs_vy_max - half) : 0.0;
+        
+        if (d_pose != NULL) {
+            // Analytical gradients
+            // d(dist_sq)/d(vx) = 2*dx*sign(vx) if dx > 0 else 0
+            // d(dist_sq)/d(vy) = 2*dy*sign(vy) if dy > 0 else 0
+            double grad_vx_max = (dx_max > 0.0) ? 2.0 * dx_max * ((vx_max >= 0.0) ? 1.0 : -1.0) : 0.0;
+            double grad_vy_max = (dy_max > 0.0) ? 2.0 * dy_max * ((vy_max >= 0.0) ? 1.0 : -1.0) : 0.0;
+            
+            // d(vx)/d(x) = 1, d(vy)/d(y) = 1
+            d_pose->x = grad_vx_max;
+            d_pose->y = grad_vy_max;
+            
+            // d(vx)/d(theta) = -sin(theta)*vx_local - cos(theta)*vy_local
+            // d(vy)/d(theta) = cos(theta)*vx_local - sin(theta)*vy_local
+            double dvx_dtheta = -s * vx_local - c * vy_local;
+            double dvy_dtheta = c * vx_local - s * vy_local;
+            
+            d_pose->z = grad_vx_max * dvx_dtheta + grad_vy_max * dvy_dtheta;
+        }
+        
+        if (d_h != NULL) {
+            // d(dist_sq)/d(h) = d(dist_sq)/d(half) * d(half)/d(h)
+            // d(dist_sq)/d(half) = -2*dx - 2*dy (chain rule through abs)
+            // d(half)/d(h) = 0.5
+            *d_h = -(dx_max + dy_max);
+        }
+    }
+    
+    return max_dist_sq;
+}
+
+// Compute total boundary distance cost for a list of trees
+// Uses 1 thread per tree
+__device__ void boundary_distance_list_total(
+    const double* __restrict__ xyt_Nx3,  // flattened: [n, 3] in C-contiguous layout
+    const int n,
+    const double h,
+    double* __restrict__ out_total,
+    double* __restrict__ out_grads,  // if non-NULL, write gradients [n*3]
+    double* __restrict__ out_grad_h)  // if non-NULL, write gradient w.r.t. h
+{
+    // Thread organization: 1 thread per tree
+    int tree_idx = threadIdx.x;
+    
+    double local_cost = 0.0;
+    
+    if (tree_idx < n) {
+        // Read pose with strided access: [tree_idx, component]
+        double3 pose;
+        pose.x = xyt_Nx3[tree_idx * 3 + 0];
+        pose.y = xyt_Nx3[tree_idx * 3 + 1];
+        pose.z = xyt_Nx3[tree_idx * 3 + 2];
+        
+        // Compute gradients if requested
+        double3 d_pose;
+        double d_h_local;
+        
+        // Each thread computes boundary distance cost for one tree with gradients
+        local_cost = boundary_distance_tree(pose, h, 
+                                             (out_grads != NULL) ? &d_pose : NULL,
+                                             (out_grad_h != NULL) ? &d_h_local : NULL);
+        
+        // Atomic add for total cost
+        atomicAdd(out_total, local_cost);
+        
+        // Write gradients if computed
+        if (out_grads != NULL) {
+            out_grads[tree_idx * 3 + 0] = d_pose.x;
+            out_grads[tree_idx * 3 + 1] = d_pose.y;
+            out_grads[tree_idx * 3 + 2] = d_pose.z;
+        }
+        
+        if (out_grad_h != NULL) {
+            // All threads contribute to d/dh
+            atomicAdd(out_grad_h, d_h_local);
+        }
+    }
+}
+
+// Multi-ensemble kernel for boundary distance: one block per ensemble
+// Each block processes one ensemble by calling boundary_distance_list_total
+//
+// Accepts single 3D array with strided access - no transpose needed
+// Parameters:
+//   xyt_base: base pointer to 3D array [num_ensembles, n_trees, 3] in C-contiguous layout
+//   n_trees: number of trees per ensemble (same for all)
+//   h_list: array of h values (boundary size) for each ensemble
+//   out_totals: array of output totals, one per ensemble
+//   out_grads_base: base pointer to gradient output [num_ensembles, n_trees, 3] (can be NULL)
+//   out_grad_h: array of h gradients [num_ensembles] (can be NULL)
+//   num_ensembles: number of ensembles to process
+__global__ void multi_boundary_distance_list_total(
+    const double* __restrict__ xyt_base,       // base pointer to [num_ensembles, n_trees, 3]
+    const int n_trees,                          // number of trees per ensemble
+    const double* __restrict__ h_list,         // [num_ensembles]
+    double* __restrict__ out_totals,           // [num_ensembles]
+    double* __restrict__ out_grads_base,       // base pointer to [num_ensembles, n_trees, 3] (NULL allowed)
+    double* __restrict__ out_grad_h,           // [num_ensembles] (NULL allowed)
+    const int num_ensembles)
+{
+    int ensemble_id = blockIdx.x;
+    
+    if (ensemble_id >= num_ensembles) {
+        return;  // Extra blocks beyond num_ensembles
+    }
+    
+    // Calculate offset for this ensemble's data using strided access
+    // Layout: [num_ensembles, n_trees, 3]
+    // Stride: each ensemble is n_trees*3 elements apart
+    int ensemble_stride = n_trees * 3;
+    const double* xyt_ensemble = xyt_base + ensemble_id * ensemble_stride;
+    
+    // Parameters for boundary_distance_list_total
+    int n = n_trees;
+    double h = h_list[ensemble_id];
+    double* out_total = &out_totals[ensemble_id];
+    double* out_grads = (out_grads_base != NULL) ? (out_grads_base + ensemble_id * ensemble_stride) : NULL;
+    double* out_grad_h_elem = (out_grad_h != NULL) ? &out_grad_h[ensemble_id] : NULL;
+    
+    // Initialize outputs
+    if (threadIdx.x == 0) {
+        *out_total = 0.0;
+        if (out_grad_h_elem != NULL) {
+            *out_grad_h_elem = 0.0;
+        }
+    }
+    // Initialize gradient buffer
+    if (out_grads != NULL) {
+        int tid = threadIdx.x;
+        for (int idx = tid; idx < n_trees * 3; idx += n_trees) {
+            out_grads[idx] = 0.0;
+        }
+    }
+    __syncthreads();
+    
+    // Call boundary_distance_list_total - it reads (n_trees, 3) format directly
+    boundary_distance_list_total(xyt_ensemble, n, h, out_total, out_grads, out_grad_h_elem);
+}
+
 } // extern "C"
 """
 
@@ -725,6 +925,7 @@ _num_pieces: int = 0
 _raw_module: cp.RawModule | None = None
 _multi_overlap_list_total_kernel: cp.RawKernel | None = None
 _multi_boundary_list_total_kernel: cp.RawKernel | None = None
+_multi_boundary_distance_list_total_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
@@ -807,7 +1008,7 @@ def _ensure_initialized() -> None:
     of public API functions.
     """
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module, _multi_overlap_list_total_kernel, _multi_boundary_list_total_kernel
+    global _num_pieces, _raw_module, _multi_overlap_list_total_kernel, _multi_boundary_list_total_kernel, _multi_boundary_distance_list_total_kernel
 
     if _initialized:
         return
@@ -870,6 +1071,7 @@ def _ensure_initialized() -> None:
     #_raw_module = cp.RawModule(code=_CUDA_SRC, backend='nvcc', options=())
     _multi_overlap_list_total_kernel = _raw_module.get_function("multi_overlap_list_total")
     _multi_boundary_list_total_kernel = _raw_module.get_function("multi_boundary_list_total")
+    _multi_boundary_distance_list_total_kernel = _raw_module.get_function("multi_boundary_distance_list_total")
 
     # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
     # Convert to appropriate dtype if using float32
@@ -883,6 +1085,23 @@ def _ensure_initialized() -> None:
     # Use memcpyHtoD to copy to device constant memory
     cp.cuda.runtime.memcpy(const_piece_xy_ptr.ptr, piece_xy_flat_device.ctypes.data, piece_xy_flat_device.nbytes, cp.cuda.runtime.memcpyHostToDevice)
     cp.cuda.runtime.memcpy(const_piece_nverts_ptr.ptr, piece_nverts.ctypes.data, piece_nverts.nbytes, cp.cuda.runtime.memcpyHostToDevice)
+
+    # Copy tree vertices to constant memory for boundary distance computation
+    # Get tree vertices from kgs.tree_vertices (should be CuPy array on GPU)
+    tree_verts = kgs.tree_vertices.get()  # Convert to NumPy for copying to constant memory
+    tree_verts_flat = tree_verts.ravel()  # Flatten (n_vertices, 2) to 1D array
+    n_tree_verts = tree_verts.shape[0]
+    
+    if USE_FLOAT32:
+        tree_verts_flat_device = tree_verts_flat.astype(np.float32)
+    else:
+        tree_verts_flat_device = tree_verts_flat
+    
+    const_tree_vertices_xy_ptr = _raw_module.get_global('const_tree_vertices_xy')
+    const_n_tree_vertices_ptr = _raw_module.get_global('const_n_tree_vertices')
+    cp.cuda.runtime.memcpy(const_tree_vertices_xy_ptr.ptr, tree_verts_flat_device.ctypes.data, tree_verts_flat_device.nbytes, cp.cuda.runtime.memcpyHostToDevice)
+    n_tree_verts_np = np.array([n_tree_verts], dtype=np.int32)
+    cp.cuda.runtime.memcpy(const_n_tree_vertices_ptr.ptr, n_tree_verts_np.ctypes.data, n_tree_verts_np.nbytes, cp.cuda.runtime.memcpyHostToDevice)
 
     _initialized = True
 
@@ -1058,6 +1277,102 @@ def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool =
     threads_per_block = n_trees * 4
     
     _multi_boundary_list_total_kernel(
+        (blocks,),
+        (threads_per_block,),
+        (
+            xyt,
+            np.int32(n_trees),
+            h,
+            out_totals,
+            out_grads if out_grads is not None else cp.array([0], dtype=cp.uint64),
+            out_grad_h if out_grad_h is not None else cp.array([0], dtype=cp.uint64),
+            np.int32(num_ensembles),
+        ),
+        stream=stream,
+    )
+    
+    if compute_grad:
+        return out_totals, out_grads, out_grad_h
+    else:
+        return out_totals, None, None
+
+
+def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool = False, stream: cp.cuda.Stream | None = None):
+    """Compute total boundary distance cost for multiple ensembles in parallel.
+    
+    For each tree, computes the maximum squared distance of any vertex outside the boundary.
+    Sum over all trees in each ensemble.
+    
+    Parameters
+    ----------
+    xyt : cp.ndarray, shape (n_ensembles, n_trees, 3)
+        Pose arrays. Must be C-contiguous and correct dtype.
+    h : cp.ndarray, shape (n_ensembles,)
+        Boundary sizes for each ensemble.
+    compute_grad : bool, optional
+        If True, compute and return gradients. Default is False.
+    stream : cp.cuda.Stream, optional
+        CUDA stream for kernel execution. If None, uses default stream.
+    
+    Returns
+    -------
+    totals : cp.ndarray, shape (n_ensembles,)
+        Total boundary distance cost for each ensemble.
+    grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
+        Gradient arrays. Only returned if compute_grad=True.
+    grad_h : cp.ndarray, shape (n_ensembles,), optional
+        Gradient w.r.t. h. Only returned if compute_grad=True.
+    """
+    _ensure_initialized()
+    
+    # Determine expected dtype based on USE_FLOAT32
+    expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
+    
+    # Assert inputs are correct shape
+    if xyt.ndim != 3 or xyt.shape[2] != 3:
+        raise ValueError(f"xyt must be shape (n_ensembles, n_trees, 3), got {xyt.shape}")
+    if h.ndim != 1:
+        raise ValueError(f"h must be 1D array, got shape {h.shape}")
+    
+    # Assert correct dtype
+    if xyt.dtype != expected_dtype:
+        raise ValueError(f"xyt must have dtype {expected_dtype}, got {xyt.dtype}")
+    if h.dtype != expected_dtype:
+        raise ValueError(f"h must have dtype {expected_dtype}, got {h.dtype}")
+    
+    # Assert contiguous
+    if not xyt.flags.c_contiguous:
+        raise ValueError("xyt must be C-contiguous")
+    
+    num_ensembles = xyt.shape[0]
+    n_trees = xyt.shape[1]
+    dtype = xyt.dtype
+    
+    if h.shape[0] != num_ensembles:
+        raise ValueError(f"h must have {num_ensembles} elements, got {h.shape[0]}")
+    
+    if num_ensembles == 0:
+        out_totals = cp.array([], dtype=dtype)
+        if compute_grad:
+            out_grads = cp.zeros((0, 0, 3), dtype=dtype)
+            out_grad_h = cp.zeros(0, dtype=dtype)
+            return out_totals, out_grads, out_grad_h
+        return out_totals, None, None
+    
+    # Allocate outputs (ONLY allocations allowed)
+    out_totals = cp.zeros(num_ensembles, dtype=dtype)
+    out_grads = None
+    out_grad_h = None
+    
+    if compute_grad:
+        out_grads = cp.zeros((num_ensembles, n_trees, 3), dtype=dtype)
+        out_grad_h = cp.zeros(num_ensembles, dtype=dtype)
+    
+    # Launch kernel: one block per ensemble, n_trees threads per block (1 thread per tree)
+    blocks = num_ensembles
+    threads_per_block = n_trees
+    
+    _multi_boundary_distance_list_total_kernel(
         (blocks,),
         (threads_per_block,),
         (

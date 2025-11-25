@@ -226,6 +226,7 @@ class AreaCost(Cost):
 
 @dataclass
 class BoundaryDistanceCost(Cost):
+    use_kernel : bool = field(init=True, default=True)
     # Cost based on squared distance of vertices outside the square boundary
     # Per tree, use only the vertex with the maximum distance
     def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
@@ -342,6 +343,13 @@ class BoundaryDistanceCost(Cost):
         
         return cp.array(total_cost), grad, grad_bound
     
+    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
+        if self.use_kernel:
+            cost,grad,grad_h = pack_cuda.boundary_distance_multi_ensemble(xyt, bound[:,0], compute_grad=True)
+            return cost,grad,grad_h[:,None]
+        else:
+            return super()._compute_cost(xyt, bound)
+            
     def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
         assert(bound.shape[0]==1) #other case todo
         # xyt is (n_trees, 3), bound is (1,)

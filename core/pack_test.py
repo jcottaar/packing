@@ -17,7 +17,7 @@ def run_all_tests():
 
 def test_costs():
     print('Testing cost computation and gradients')
-    costs_to_test = [pack_cost.CostDummy(), pack_cost.AreaCost(), pack_cost.BoundaryDistanceCost(), pack_cost.BoundaryCost(), pack_cost.CollisionCostOverlappingArea(scaling=3.), 
+    costs_to_test = [pack_cost.CostDummy(), pack_cost.AreaCost(), pack_cost.BoundaryDistanceCost(use_kernel=True), pack_cost.BoundaryDistanceCost(use_kernel=False), pack_cost.BoundaryCost(), pack_cost.CollisionCostOverlappingArea(scaling=3.), 
                      pack_cost.CostCompound(costs=[pack_cost.AreaCost(), pack_cost.BoundaryCost()])]
 
     tree_list = []
