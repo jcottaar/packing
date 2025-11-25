@@ -217,6 +217,12 @@ class AreaCost(Cost):
         cost = bound[0]**2
         grad_bound = cp.array([2.0*bound[0]])
         return cost, cp.zeros_like(xyt), grad_bound
+    
+    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
+        cost = bound[:,0]**2
+        grad_bound = cp.zeros_like(bound)
+        grad_bound[:,0] = 2.0*bound[:,0]
+        return cost, cp.zeros_like(xyt), grad_bound
 
 @dataclass
 class BoundaryDistanceCost(Cost):
