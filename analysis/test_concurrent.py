@@ -334,12 +334,12 @@ if __name__ == '__main__':
     # Test parameters
     # For simple kernel: n_threads is threads per block
     # For overlap kernel: n_threads is trees per ensemble (kernel uses n_threads * 4 actual threads)
-    n_threads = 20  # Thread count per block (simple) or trees per ensemble (overlap)
+    n_threads = 200  # Thread count per block (simple) or trees per ensemble (overlap)
     work_factor = 1000000  # Work iterations per thread
-    iters = 10
+    iters = 100
 
     # KERNEL TYPE FLAG: 'simple', 'simple_direct', 'overlap', 'boundary', 'boundary_direct', or 'simple_dummy'
-    for KERNEL_TYPE in ['overlap']:#'simple_dummy', 'simple', 'simple_direct']:
+    for KERNEL_TYPE in ['boundary', 'overlap']:#'simple_dummy', 'simple', 'simple_direct']:
 
         print("=" * 60)
         print(f"KERNEL TYPE: {KERNEL_TYPE.upper()}")
