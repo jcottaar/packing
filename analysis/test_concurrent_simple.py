@@ -126,6 +126,26 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         cp.cuda.Device().synchronize()
         end = time.perf_counter()
     
+    elif kernel_type == 'simple_dummy':
+        num_trees = n_threads // 4
+        total_ensembles = num_streams * num_blocks_per_stream
+        
+        # Create ensemble data lists (same as boundary)
+        xyt_list = [cp.random.randn(num_trees, 3) for _ in range(total_ensembles)]
+        h_list = [10.0] * total_ensembles
+        
+        # Warmup
+        pack_cuda.simple_dummy_multi_ensemble(xyt_list, h_list, compute_grad=True)
+        cp.cuda.Device().synchronize()
+        
+        # Timed run
+        cp.cuda.Device().synchronize()
+        start = time.perf_counter()
+        for i in range(iters_per_stream):
+            pack_cuda.simple_dummy_multi_ensemble(xyt_list, h_list, compute_grad=True)
+        cp.cuda.Device().synchronize()
+        end = time.perf_counter()
+    
     else:
         raise ValueError(f"Unknown kernel_type: {kernel_type}")
     
@@ -146,24 +166,24 @@ if __name__ == '__main__':
     work_factor = 10000  # Work iterations per thread
     iters = 100
 
-    # KERNEL TYPE FLAG: 'simple', 'overlap', or 'boundary'
-    for KERNEL_TYPE in ['boundary', 'simple', 'overlap']:
+    # KERNEL TYPE FLAG: 'simple', 'overlap', 'boundary', or 'simple_dummy'
+    for KERNEL_TYPE in ['simple_dummy', 'simple']:#, 'simple', 'overlap']:
 
         print("=" * 60)
         print(f"KERNEL TYPE: {KERNEL_TYPE.upper()}")
         print("=" * 60)
 
-        print("\n" + "=" * 60)
-        print("TEST 1: Block Count Scaling (Single Stream, Multiple Blocks)")
-        print(f"Config: {n_threads} threads/block, {work_factor} work iterations")
-        print("=" * 60)
-        print("Blocks\tKernels/sec\tElapsed(s)")
-        block_counts = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
-        for b in block_counts:
-            # Use run_trial_multi_stream with 1 stream for single stream test
-            kps, t = run_trial_multi_stream(1, iters, b, n_threads, work_factor, kernel_type=KERNEL_TYPE)
-            cp.cuda.Device().synchronize()
-            print(f"{b}\t{int(kps)}\t\t{t:.3f}")
+        # print("\n" + "=" * 60)
+        # print("TEST 1: Block Count Scaling (Single Stream, Multiple Blocks)")
+        # print(f"Config: {n_threads} threads/block, {work_factor} work iterations")
+        # print("=" * 60)
+        # print("Blocks\tKernels/sec\tElapsed(s)")
+        # block_counts = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+        # for b in block_counts:
+        #     # Use run_trial_multi_stream with 1 stream for single stream test
+        #     kps, t = run_trial_multi_stream(1, iters, b, n_threads, work_factor, kernel_type=KERNEL_TYPE)
+        #     cp.cuda.Device().synchronize()
+        #     print(f"{b}\t{int(kps)}\t\t{t:.3f}")
 
         print("\n" + "=" * 60)
         print("TEST 2: Parallel Kernel Execution (Multiple Streams, Each with Multiple Blocks)")

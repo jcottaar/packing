@@ -692,6 +692,72 @@ __global__ void multi_boundary_list_total(
     boundary_list_total(xyt, n, h, out_total, out_grads, out_grad_h);
 }
 
+// Simple dummy kernel for testing concurrency - minimal work, same interface as boundary
+__global__ void multi_simple_dummy(
+    const double** __restrict__ xyt_list,      // [num_ensembles] pointers
+    const int* __restrict__ n_list,            // [num_ensembles]
+    const double* __restrict__ h_list,         // [num_ensembles]
+    double* __restrict__ out_totals,           // [num_ensembles]
+    double** __restrict__ out_grads_list,      // [num_ensembles] pointers (NULL entries allowed)
+    double** __restrict__ out_grad_h_list,     // [num_ensembles] pointers (NULL entries allowed)
+    const int num_ensembles)
+{
+    int ensemble_id = blockIdx.x;
+    
+    if (ensemble_id >= num_ensembles) {
+        return;
+    }
+    
+    // Load parameters
+    const double* xyt = xyt_list[ensemble_id];
+    int n = n_list[ensemble_id];
+    double h = h_list[ensemble_id];
+    
+    // Very simple computation - just sum some values
+    int tid = threadIdx.x;
+    int idx = tid / 4;  // which tree (matching boundary kernel thread layout)
+    
+    double local_sum = 0.0;
+    if (idx < n) {
+        // Simple arithmetic - no complex operations
+        double x = xyt[idx];
+        double y = xyt[n + idx];
+        double t = xyt[2*n + idx];
+        local_sum = x * y + t * h;
+    }
+    
+    // Simple reduction using shared memory
+    extern __shared__ double s_data[];
+    s_data[tid] = local_sum;
+    __syncthreads();
+    
+    // Block-wide reduction
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_data[tid] += s_data[tid + stride];
+        }
+        __syncthreads();
+    }
+    
+    // Write result
+    if (tid == 0) {
+        out_totals[ensemble_id] = s_data[0];
+    }
+    
+    // Write dummy gradients if requested
+    if (out_grads_list != NULL && idx < n && (tid % 4) == 0) {
+        double* out_grads = out_grads_list[ensemble_id];
+        out_grads[idx * 3 + 0] = 1.0;
+        out_grads[idx * 3 + 1] = 1.0;
+        out_grads[idx * 3 + 2] = 1.0;
+    }
+    
+    if (out_grad_h_list != NULL && tid == 0) {
+        double* out_grad_h = out_grad_h_list[ensemble_id];
+        *out_grad_h = 1.0;
+    }
+}
+
 } // extern "C"
 """
 
@@ -711,6 +777,7 @@ _num_pieces: int = 0
 _raw_module: cp.RawModule | None = None
 _multi_overlap_list_total_kernel: cp.RawKernel | None = None
 _multi_boundary_list_total_kernel: cp.RawKernel | None = None
+_multi_simple_dummy_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
@@ -793,7 +860,7 @@ def _ensure_initialized() -> None:
     of public API functions.
     """
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module, _multi_overlap_list_total_kernel, _multi_boundary_list_total_kernel
+    global _num_pieces, _raw_module, _multi_overlap_list_total_kernel, _multi_boundary_list_total_kernel, _multi_simple_dummy_kernel
 
     if _initialized:
         return
@@ -856,6 +923,7 @@ def _ensure_initialized() -> None:
     #_raw_module = cp.RawModule(code=_CUDA_SRC, backend='nvcc', options=())
     _multi_overlap_list_total_kernel = _raw_module.get_function("multi_overlap_list_total")
     _multi_boundary_list_total_kernel = _raw_module.get_function("multi_boundary_list_total")
+    _multi_simple_dummy_kernel = _raw_module.get_function("multi_simple_dummy")
 
     # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
     # Convert to appropriate dtype if using float32
@@ -1112,5 +1180,119 @@ def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False, stream
         return out_totals, grads_list, grad_h_list
     else:
         return out_totals, None, None
+
+
+def simple_dummy_multi_ensemble(xyt_list, h_list, compute_grad: bool = False, stream: cp.cuda.Stream | None = None):
+    """Simple dummy kernel for concurrency testing - same interface as boundary_multi_ensemble.
+    
+    This is a minimal kernel with very simple arithmetic to isolate whether the concurrency
+    issue is in the kernel code or the calling/compilation infrastructure.
+    
+    Parameters
+    ----------
+    xyt_list : list of array-like
+        List of ensemble pose arrays, each shape (N_i, 3) for ensemble i.
+    h_list : list of float
+        List of boundary sizes, one per ensemble.
+    compute_grad : bool, optional
+        If True, compute and return dummy gradients. Default is False.
+    stream : cp.cuda.Stream, optional
+        CUDA stream for kernel execution. If None, uses default stream.
+        
+    Returns
+    -------
+    out_totals : cp.ndarray
+        Total dummy sum for each ensemble.
+    grads_list : list of cp.ndarray or None
+        If compute_grad=True, list of gradient arrays per ensemble.
+    grad_h_list : list of cp.ndarray or None
+        If compute_grad=True, list of h gradients per ensemble.
+    """
+    _ensure_initialized()
+    
+    num_ensembles = len(xyt_list)
+    
+    if num_ensembles == 0:
+        if compute_grad:
+            return cp.array([]), [], []
+        else:
+            return cp.array([]), None, None
+    
+    # Determine dtype based on USE_FLOAT32 setting
+    dtype = cp.float32 if USE_FLOAT32 else cp.float64
+    
+    # Process input arrays (same as boundary_multi_ensemble)
+    xyt_arrays = []
+    n_list = []
+    max_n = 0
+    
+    for i, xyt in enumerate(xyt_list):
+        xyt_arr = cp.asarray(xyt, dtype=dtype)
+        if xyt_arr.ndim != 2 or xyt_arr.shape[1] != 3:
+            raise ValueError(f"xyt_list[{i}] must be shape (N,3)")
+        
+        n = int(xyt_arr.shape[0])
+        xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
+        
+        xyt_arrays.append(xyt_3xN)
+        n_list.append(n)
+        max_n = max(max_n, n)
+    
+    h_array = cp.array(h_list, dtype=dtype)
+    if h_array.shape[0] != num_ensembles:
+        raise ValueError(f"h_list must have {num_ensembles} elements")
+    
+    # Create pointer arrays
+    xyt_ptrs = cp.array([arr.data.ptr for arr in xyt_arrays], dtype=cp.uint64)
+    n_array = cp.array(n_list, dtype=cp.int32)
+    
+    # Allocate outputs
+    out_totals = cp.zeros(num_ensembles, dtype=dtype)
+    
+    # Allocate gradients if requested
+    grads_arrays = []
+    grads_ptrs = None
+    grad_h_arrays = []
+    grad_h_ptrs = None
+    
+    if compute_grad:
+        for n in n_list:
+            grads_arrays.append(cp.zeros(n * 3, dtype=dtype))
+        grads_ptrs = cp.array([arr.data.ptr for arr in grads_arrays], dtype=cp.uint64)
+        
+        for _ in range(num_ensembles):
+            grad_h_arrays.append(cp.zeros(1, dtype=dtype))
+        grad_h_ptrs = cp.array([arr.data.ptr for arr in grad_h_arrays], dtype=cp.uint64)
+    
+    # Launch kernel
+    blocks = num_ensembles
+    threads_per_block = max_n * 4
+    shared_mem_bytes = threads_per_block * 8  # 8 bytes per double for reduction
+    
+    null_ptr = cp.array([0], dtype=cp.uint64)
+    
+    _multi_simple_dummy_kernel(
+        (blocks,),
+        (threads_per_block,),
+        (
+            xyt_ptrs,
+            n_array,
+            h_array,
+            out_totals,
+            grads_ptrs if grads_ptrs is not None else null_ptr,
+            grad_h_ptrs if grad_h_ptrs is not None else null_ptr,
+            np.int32(num_ensembles),
+        ),
+        shared_mem=shared_mem_bytes,
+        stream=stream,
+    )
+    
+    if compute_grad:
+        grads_list = [grads_arrays[i].reshape(n_list[i], 3) for i in range(num_ensembles)]
+        grad_h_list = [grad_h_arrays[i] for i in range(num_ensembles)]
+        return out_totals, grads_list, grad_h_list
+    else:
+        return out_totals, None, None
+
 
 
