@@ -832,18 +832,24 @@ def _ensure_initialized() -> None:
         raise RuntimeError("nvcc not found in PATH; please install the CUDA toolkit or add nvcc to PATH")
 
     ptx_path = os.path.join(persist_dir, 'pack_cuda_saved.ptx')
-    cmd = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
-
-    # Run nvcc and capture output to display diagnostics
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     
-    # Print compiler output (including --ptxas-options=-v diagnostics)
-    if proc.stdout:
-        print("=== NVCC Compilation Output ===")
-        print(proc.stdout)
+    # First compile to cubin to get ptxas verbose output (ptxas only runs for cubin, not ptx)
+    cubin_path = os.path.join(persist_dir, 'pack_cuda_saved.cubin')
+    cmd_cubin = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89", "-cubin", persist_path, "-o", cubin_path]
+    
+    print("=== Running NVCC Compilation (cubin for ptxas info) ===")
+    print(f"Command: {' '.join(cmd_cubin)}")
+    proc = subprocess.run(cmd_cubin, text=True)
     
     if proc.returncode != 0:
-        raise RuntimeError(f"nvcc failed (exit {proc.returncode}):\n{proc.stdout}")
+        raise RuntimeError(f"nvcc cubin compilation failed (exit {proc.returncode})")
+    
+    # Now compile to PTX for actual use
+    cmd = [nvcc_path, "-O3", "-use_fast_math", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
+    proc = subprocess.run(cmd, text=True)
+    
+    if proc.returncode != 0:
+        raise RuntimeError(f"nvcc failed (exit {proc.returncode})")
 
     # Load compiled PTX into a CuPy RawModule
     _raw_module = cp.RawModule(path=ptx_path)
