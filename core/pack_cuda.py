@@ -946,18 +946,15 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True, stream: cp.cuda.Stream | None = None):
+def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, compute_grad: bool = True, stream: cp.cuda.Stream | None = None):
     """Compute total overlap sum for multiple ensembles in parallel.
-    
-    This launches one GPU block per ensemble, allowing many ensembles to run
-    concurrently and utilize more of the GPU's streaming multiprocessors.
     
     Parameters
     ----------
-    xyt1_list : list of array-like
-        List of ensemble pose arrays, each shape (N1_i, 3) for ensemble i.
-    xyt2_list : list of array-like
-        List of ensemble pose arrays, each shape (N2_i, 3) for ensemble i.
+    xyt1 : cp.ndarray, shape (n_ensembles, n_trees, 3)
+        Pose arrays for first set of trees. Must be C-contiguous and correct dtype.
+    xyt2 : cp.ndarray, shape (n_ensembles, n_trees, 3)
+        Pose arrays for second set of trees. Must be C-contiguous and correct dtype.
     compute_grad : bool, optional
         If True, compute and return gradients. Default is True.
     stream : cp.cuda.Stream, optional
@@ -965,76 +962,81 @@ def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True, stre
     
     Returns
     -------
-    totals : cp.ndarray, shape (num_ensembles,)
+    totals : cp.ndarray, shape (n_ensembles,)
         Total overlap for each ensemble.
-    grads_list : list of cp.ndarray, optional
-        List of gradient arrays (N1_i, 3) for each ensemble.
-        Only returned if compute_grad=True.
+    grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
+        Gradient arrays. Only returned if compute_grad=True.
     """
     _ensure_initialized()
     
-    if len(xyt1_list) != len(xyt2_list):
-        raise ValueError("xyt1_list and xyt2_list must have same length")
+    # Determine expected dtype based on USE_FLOAT32
+    expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
     
-    num_ensembles = len(xyt1_list)
+    # Assert inputs are 3D arrays
+    if xyt1.ndim != 3 or xyt1.shape[2] != 3:
+        raise ValueError(f"xyt1 must be shape (n_ensembles, n_trees, 3), got {xyt1.shape}")
+    if xyt2.ndim != 3 or xyt2.shape[2] != 3:
+        raise ValueError(f"xyt2 must be shape (n_ensembles, n_trees, 3), got {xyt2.shape}")
+    
+    # Assert correct dtype
+    if xyt1.dtype != expected_dtype:
+        raise ValueError(f"xyt1 must have dtype {expected_dtype}, got {xyt1.dtype}")
+    if xyt2.dtype != expected_dtype:
+        raise ValueError(f"xyt2 must have dtype {expected_dtype}, got {xyt2.dtype}")
+    
+    # Assert they are contiguous
+    if not xyt1.flags.c_contiguous:
+        raise ValueError("xyt1 must be C-contiguous")
+    if not xyt2.flags.c_contiguous:
+        raise ValueError("xyt2 must be C-contiguous")
+    
+    # Validate matching dimensions
+    if xyt1.shape[0] != xyt2.shape[0]:
+        raise ValueError(f"xyt1 and xyt2 must have same number of ensembles: {xyt1.shape[0]} vs {xyt2.shape[0]}")
+    if xyt1.shape[1] != xyt2.shape[1]:
+        raise ValueError(f"xyt1 and xyt2 must have same number of trees: {xyt1.shape[1]} vs {xyt2.shape[1]}")
+    
+    num_ensembles = xyt1.shape[0]
+    n_trees = xyt1.shape[1]
+    dtype = xyt1.dtype
+    
     if num_ensembles == 0:
-        return cp.array([]), [] if compute_grad else None
+        out_totals = cp.array([], dtype=dtype)
+        if compute_grad:
+            out_grads = cp.zeros((0, 0, 3), dtype=dtype)
+            return out_totals, out_grads
+        return out_totals, None
     
-    # Determine dtype based on USE_FLOAT32 setting
-    dtype = cp.float32 if USE_FLOAT32 else cp.float64
-    
-    # Process and validate all input arrays
+    # Transpose to 3xN format for kernel (strided access)
     xyt1_arrays = []
     xyt2_arrays = []
-    n1_list = []
-    n2_list = []
-    max_n1 = 0
-    
-    for i, (xyt1, xyt2) in enumerate(zip(xyt1_list, xyt2_list)):
-        xyt1_arr = cp.asarray(xyt1, dtype=dtype)
-        if xyt1_arr.ndim != 2 or xyt1_arr.shape[1] != 3:
-            raise ValueError(f"xyt1_list[{i}] must be shape (N,3)")
-        
-        xyt2_arr = cp.asarray(xyt2, dtype=dtype)
-        if xyt2_arr.ndim != 2 or xyt2_arr.shape[1] != 3:
-            raise ValueError(f"xyt2_list[{i}] must be shape (N,3)")
-        
-        n1 = int(xyt1_arr.shape[0])
-        n2 = int(xyt2_arr.shape[0])
-        
-        # Flatten to 3xN row-major
-        xyt1_3xN = cp.ascontiguousarray(xyt1_arr.T).ravel()
-        xyt2_3xN = cp.ascontiguousarray(xyt2_arr.T).ravel()
-        
+    for i in range(num_ensembles):
+        xyt1_3xN = cp.ascontiguousarray(xyt1[i].T).ravel()
+        xyt2_3xN = cp.ascontiguousarray(xyt2[i].T).ravel()
         xyt1_arrays.append(xyt1_3xN)
         xyt2_arrays.append(xyt2_3xN)
-        n1_list.append(n1)
-        n2_list.append(n2)
-        max_n1 = max(max_n1, n1)
     
-    # Create arrays of pointers (device addresses)
-    # CuPy doesn't have a direct way to create pointer arrays, so we use data.ptr
+    # Create arrays of pointers
     xyt1_ptrs = cp.array([arr.data.ptr for arr in xyt1_arrays], dtype=cp.uint64)
     xyt2_ptrs = cp.array([arr.data.ptr for arr in xyt2_arrays], dtype=cp.uint64)
     
-    n1_array = cp.array(n1_list, dtype=cp.int32)
-    n2_array = cp.array(n2_list, dtype=cp.int32)
+    n1_array = cp.full(num_ensembles, n_trees, dtype=cp.int32)
+    n2_array = cp.full(num_ensembles, n_trees, dtype=cp.int32)
     
-    # Allocate outputs
+    # Allocate outputs (ONLY allocations allowed)
     out_totals = cp.zeros(num_ensembles, dtype=dtype)
     
     # Allocate gradients if requested
     grads_arrays = []
     grads_ptrs = None
     if compute_grad:
-        for n1 in n1_list:
-            grads_arrays.append(cp.zeros(n1 * 3, dtype=dtype))
+        for _ in range(num_ensembles):
+            grads_arrays.append(cp.zeros(n_trees * 3, dtype=dtype))
         grads_ptrs = cp.array([arr.data.ptr for arr in grads_arrays], dtype=cp.uint64)
     
-    # Launch kernel: one block per ensemble, max_n1 * 4 threads per block
-    # (4 threads per tree, one for each polygon piece)
+    # Launch kernel: one block per ensemble, n_trees * 4 threads per block
     blocks = num_ensembles
-    threads_per_block = max_n1 * 4
+    threads_per_block = n_trees * 4
     
     # Cast pointer arrays to proper type for kernel
     null_ptr = cp.array([0], dtype=cp.uint64)
@@ -1055,25 +1057,23 @@ def overlap_multi_ensemble(xyt1_list, xyt2_list, compute_grad: bool = True, stre
     )
     
     if compute_grad:
-        # Reshape gradient arrays back to (N1_i, 3)
-        grads_list = [grads_arrays[i].reshape(n1_list[i], 3) for i in range(num_ensembles)]
-        return out_totals, grads_list
+        # Reshape gradient arrays back to (n_ensembles, n_trees, 3)
+        out_grads = cp.stack([grads_arrays[i].reshape(n_trees, 3) for i in range(num_ensembles)], axis=0)
+        return out_totals, out_grads
     else:
         return out_totals, None
 
 
-def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False, stream: cp.cuda.Stream | None = None):
+@kgs.profile_each_line
+def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool = False, stream: cp.cuda.Stream | None = None):
     """Compute total boundary violation area for multiple ensembles in parallel.
-    
-    This launches one GPU block per ensemble, allowing many ensembles to run
-    concurrently and utilize more of the GPU's streaming multiprocessors.
     
     Parameters
     ----------
-    xyt_list : list of array-like
-        List of ensemble pose arrays, each shape (N_i, 3) for ensemble i.
-    h_list : list of float
-        List of boundary sizes, one per ensemble.
+    xyt : cp.ndarray, shape (n_ensembles, n_trees, 3)
+        Pose arrays. Must be C-contiguous and correct dtype.
+    h : cp.ndarray, shape (n_ensembles,)
+        Boundary sizes for each ensemble.
     compute_grad : bool, optional
         If True, compute and return gradients. Default is False.
     stream : cp.cuda.Stream, optional
@@ -1081,59 +1081,60 @@ def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False, stream
     
     Returns
     -------
-    totals : cp.ndarray, shape (num_ensembles,)
+    totals : cp.ndarray, shape (n_ensembles,)
         Total boundary violation area for each ensemble.
-    grads_list : list of cp.ndarray, optional
-        List of gradient arrays (N_i, 3) for each ensemble.
-        Only returned if compute_grad=True.
-    grad_h_list : list of cp.ndarray, optional
-        List of h gradient arrays (1,) for each ensemble.
-        Only returned if compute_grad=True.
+    grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
+        Gradient arrays. Only returned if compute_grad=True.
+    grad_h : cp.ndarray, shape (n_ensembles,), optional
+        Gradient w.r.t. h. Only returned if compute_grad=True.
     """
     _ensure_initialized()
     
-    if len(xyt_list) != len(h_list):
-        raise ValueError("xyt_list and h_list must have same length")
+    # Determine expected dtype based on USE_FLOAT32
+    expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
     
-    num_ensembles = len(xyt_list)
+    # Assert inputs are correct shape
+    if xyt.ndim != 3 or xyt.shape[2] != 3:
+        raise ValueError(f"xyt must be shape (n_ensembles, n_trees, 3), got {xyt.shape}")
+    if h.ndim != 1:
+        raise ValueError(f"h must be 1D array, got shape {h.shape}")
+    
+    # Assert correct dtype
+    if xyt.dtype != expected_dtype:
+        raise ValueError(f"xyt must have dtype {expected_dtype}, got {xyt.dtype}")
+    if h.dtype != expected_dtype:
+        raise ValueError(f"h must have dtype {expected_dtype}, got {h.dtype}")
+    
+    # Assert contiguous
+    if not xyt.flags.c_contiguous:
+        raise ValueError("xyt must be C-contiguous")
+    
+    num_ensembles = xyt.shape[0]
+    n_trees = xyt.shape[1]
+    dtype = xyt.dtype
+    
+    if h.shape[0] != num_ensembles:
+        raise ValueError(f"h must have {num_ensembles} elements, got {h.shape[0]}")
+    
     if num_ensembles == 0:
+        out_totals = cp.array([], dtype=dtype)
         if compute_grad:
-            return cp.array([]), [], []
-        else:
-            return cp.array([]), None, None
+            out_grads = cp.zeros((0, 0, 3), dtype=dtype)
+            out_grad_h = cp.zeros(0, dtype=dtype)
+            return out_totals, out_grads, out_grad_h
+        return out_totals, None, None
     
-    # Determine dtype based on USE_FLOAT32 setting
-    dtype = cp.float32 if USE_FLOAT32 else cp.float64
-    
-    # Process and validate all input arrays
+    # Transpose to 3xN format for kernel (strided access)
     xyt_arrays = []
-    n_list = []
-    max_n = 0
-    
-    for i, xyt in enumerate(xyt_list):
-        xyt_arr = cp.asarray(xyt, dtype=dtype)
-        if xyt_arr.ndim != 2 or xyt_arr.shape[1] != 3:
-            raise ValueError(f"xyt_list[{i}] must be shape (N,3)")
-        
-        n = int(xyt_arr.shape[0])
-        
-        # Flatten to 3xN row-major
-        xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
-        
+    for i in range(num_ensembles):
+        xyt_3xN = cp.ascontiguousarray(xyt[i].T).ravel()
         xyt_arrays.append(xyt_3xN)
-        n_list.append(n)
-        max_n = max(max_n, n)
     
-    # Validate h_list
-    h_array = cp.array(h_list, dtype=dtype)
-    if h_array.shape[0] != num_ensembles:
-        raise ValueError(f"h_list must have {num_ensembles} elements")
-    
-    # Create arrays of pointers (device addresses)
+    # Create arrays of pointers
     xyt_ptrs = cp.array([arr.data.ptr for arr in xyt_arrays], dtype=cp.uint64)
-    n_array = cp.array(n_list, dtype=cp.int32)
+    n_array = cp.full(num_ensembles, n_trees, dtype=cp.int32)
     
-    # Allocate outputs
+    # Allocate outputs (ONLY allocations allowed)
     out_totals = cp.zeros(num_ensembles, dtype=dtype)
     
     # Allocate gradients if requested
@@ -1143,17 +1144,17 @@ def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False, stream
     grad_h_ptrs = None
     
     if compute_grad:
-        for n in n_list:
-            grads_arrays.append(cp.zeros(n * 3, dtype=dtype))
+        for _ in range(num_ensembles):
+            grads_arrays.append(cp.zeros(n_trees * 3, dtype=dtype))
         grads_ptrs = cp.array([arr.data.ptr for arr in grads_arrays], dtype=cp.uint64)
         
         for _ in range(num_ensembles):
             grad_h_arrays.append(cp.zeros(1, dtype=dtype))
         grad_h_ptrs = cp.array([arr.data.ptr for arr in grad_h_arrays], dtype=cp.uint64)
     
-    # Launch kernel: one block per ensemble, max_n * 4 threads per block
+    # Launch kernel: one block per ensemble, n_trees * 4 threads per block
     blocks = num_ensembles
-    threads_per_block = max_n * 4
+    threads_per_block = n_trees * 4
     
     # Cast pointer arrays to proper type for kernel
     null_ptr = cp.array([0], dtype=cp.uint64)
@@ -1164,7 +1165,7 @@ def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False, stream
         (
             xyt_ptrs,
             n_array,
-            h_array,
+            h,
             out_totals,
             grads_ptrs if grads_ptrs is not None else null_ptr,
             grad_h_ptrs if grad_h_ptrs is not None else null_ptr,
@@ -1174,10 +1175,10 @@ def boundary_multi_ensemble(xyt_list, h_list, compute_grad: bool = False, stream
     )
     
     if compute_grad:
-        # Reshape gradient arrays back to (N_i, 3) and (1,)
-        grads_list = [grads_arrays[i].reshape(n_list[i], 3) for i in range(num_ensembles)]
-        grad_h_list = [grad_h_arrays[i] for i in range(num_ensembles)]
-        return out_totals, grads_list, grad_h_list
+        # Reshape gradient arrays back to (n_ensembles, n_trees, 3)
+        out_grads = cp.stack([grads_arrays[i].reshape(n_trees, 3) for i in range(num_ensembles)], axis=0)
+        out_grad_h = cp.concatenate([grad_h_arrays[i] for i in range(num_ensembles)])
+        return out_totals, out_grads, out_grad_h
     else:
         return out_totals, None, None
 

@@ -48,7 +48,7 @@ def test_costs():
             
             # First, check that compute_cost and compute_cost_ref agree
             cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(xyt_single, b_single)
-            cost_fast, grad_fast, grad_bound_fast = c.compute_cost(xyt_single, b_single)
+            cost_fast, grad_fast, grad_bound_fast = c.compute_cost(cp.array(xyt_single,dtype=cp.float32), cp.array(b_single,dtype=cp.float32))
             
             # Store all outputs
             all_ref_outputs.append((cost_ref, grad_ref, grad_bound_ref))
@@ -120,7 +120,7 @@ def test_costs():
         
         # Compute vectorized results
         vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_xyt, full_bounds)
-        vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost(full_xyt, full_bounds)
+        vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost(cp.array(full_xyt,dtype=cp.float32), cp.array(full_bounds,dtype=cp.float32))
         
         # Check each tree's results
         for i in range(len(tree_list)):

@@ -22,7 +22,10 @@ class Cost(kgs.BaseClass):
         N_ensembles = xyt.shape[0]
         assert(bound.shape == (N_ensembles,1) or bound.shape == (N_ensembles,3)) # 1: square bound, 3: periodic bound      
         cost,grad_xyt,grad_bound = self._compute_cost_ref(xyt,bound)
-        return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
+        return self.sc
+        aassert cost.shape == (N_ensembles,)
+        lassert grad_xyt.shape == xyt.shape
+        iassert grad_bound.shape == bound.shapeng*cost,self.scaling*grad_xyt,self.scaling*grad_bound
     
     def _compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
         N_ensembles = xyt.shape[0]
@@ -36,7 +39,10 @@ class Cost(kgs.BaseClass):
     def compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
         # Subclass can implement faster version
         cost,grad_xyt,grad_bound =  self._compute_cost(xyt, bound)
-        return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
+        return self.scaling*cost,self.s
+        cassert cost.shape == (xyt.shape[0],)
+        assert grad_xyt.shape == xyt.shape
+        assert grad_bound.shape == bound.shapealing*grad_xyt,self.scaling*grad_bound
     
     def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
         # Subclass can implement faster version
@@ -130,7 +136,9 @@ class CollisionCostOverlappingArea(CollisionCost):
         return area, grad
 
     def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
+        # xyt is (n_ensembles, n_trees, 3)
         cost,grad = pack_cuda.overlap_multi_ensemble(xyt, xyt)
+        return cost,grad,c        cost,grad = pack_cuda.overlap_multi_ensemble(xyt, xyt)
         return cost,cp.array(grad),cp.zeros_like(bound)
     
 
@@ -201,17 +209,9 @@ class BoundaryCost(Cost):
     
     def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
         cost,grad,grad_h = pack_cuda.boundary_multi_ensemble(xyt, bound, compute_grad=True)
-        return cost,cp.array(grad),cp.array(grad_h)
-
-@dataclass 
-class AreaCost(Cost):
-    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
-        assert(bound.shape[0]==1) #other case todo
-        cost = bound[0]**2
-        grad_bound = cp.array([2.0*bound[0]])
-        return cost, cp.zeros_like(xyt), grad_bound
-
-@dataclass
+        return cost,cp.array(grad),cp.array(grad_[:,0]h)
+rray([2.0*bound[0]])
+        return cosos_lke(xyt)grad_h[:,None]ataclass
 class BoundaryDistanceCost(Cost):
     # Cost based on squared distance of vertices outside the square boundary
     # Per tree, use only the vertex with the maximum distance

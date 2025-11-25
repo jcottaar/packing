@@ -1,11 +1,20 @@
-# Simple kernel concurrency test - comparing wrapper vs direct kernel calls
+# Simple kernel concurrency test - block size scaling and multi-stream parallelism
+# Supports both simple kernel and overlap kernel from pack_cuda
 
 import time
-import os
+import math
 import numpy as np
 import cupy as cp
+import sys
+import os
 import subprocess
 import shutil
+sys.path.insert(0, os.path.join(os.getcwd(), '../core'))
+sys.path.append('/mnt/d/packing/code/core/')
+
+import pack_cuda
+import kaggle_support as kgs
+kgs.profiling=True
 
 # ============================================================================
 # KERNEL SETUP
@@ -138,8 +147,10 @@ def simple_work_multi_ensemble(input_list, n_list, work_factor, stream=None):
     
     return output_list
 
-# Initialize kernel
+# Initialize kernels
 _ensure_simple_initialized()
+pack_cuda.USE_FLOAT32=True
+pack_cuda._ensure_initialized()
 
 # ============================================================================
 # TEST FUNCTIONS
@@ -202,6 +213,119 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
             )
         cp.cuda.Device().synchronize()
         end = time.perf_counter()
+        
+    elif kernel_type == 'overlap':
+        num_trees = n_threads // 4
+        total_ensembles = num_streams * num_blocks_per_stream
+        
+        # Determine dtype
+        dtype = cp.float32 if pack_cuda.USE_FLOAT32 else cp.float64
+        
+        # Create ensemble data as 3D arrays (n_ensembles, n_trees, 3)
+        xyt1 = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))
+        xyt2 = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))
+        
+        # Warmup
+        pack_cuda.overlap_multi_ensemble(xyt1, xyt2, compute_grad=True)
+        cp.cuda.Device().synchronize()
+        
+        # Timed run
+        cp.cuda.Device().synchronize()
+        start = time.perf_counter()
+        for i in range(iters_per_stream):
+            pack_cuda.overlap_multi_ensemble(xyt1, xyt2, compute_grad=True)
+        cp.cuda.Device().synchronize()
+        end = time.perf_counter()
+    
+    elif kernel_type == 'boundary':
+        num_trees = n_threads // 4
+        total_ensembles = num_streams * num_blocks_per_stream
+        
+        # Determine dtype
+        dtype = cp.float32 if pack_cuda.USE_FLOAT32 else cp.float64
+        
+        # Create ensemble data as 3D array (n_ensembles, n_trees, 3)
+        xyt = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))
+        h = cp.full(total_ensembles, 10.0, dtype=dtype)
+        
+        # Warmup
+        pack_cuda.boundary_multi_ensemble(xyt, h, compute_grad=True)
+        cp.cuda.Device().synchronize()
+        
+        # Timed run
+        cp.cuda.Device().synchronize()
+        start = time.perf_counter()
+        for i in range(iters_per_stream):
+            pack_cuda.boundary_multi_ensemble(xyt, h, compute_grad=True)
+        cp.cuda.Device().synchronize()
+        end = time.perf_counter()
+    
+    elif kernel_type == 'boundary_direct':
+        # Call boundary kernel directly (bypass wrapper)
+        num_trees = n_threads // 4
+        total_ensembles = num_streams * num_blocks_per_stream
+        
+        dtype = cp.float32 if pack_cuda.USE_FLOAT32 else cp.float64
+        
+        # Pre-allocate all data structures once
+        xyt_arrays = []
+        for _ in range(total_ensembles):
+            xyt_arr = cp.random.randn(num_trees, 3).astype(dtype)
+            xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
+            xyt_arrays.append(xyt_3xN)
+        
+        h_array = cp.array([10.0] * total_ensembles, dtype=dtype)
+        n_array = cp.array([num_trees] * total_ensembles, dtype=cp.int32)
+        xyt_ptrs = cp.array([arr.data.ptr for arr in xyt_arrays], dtype=cp.uint64)
+        
+        # Pre-allocate outputs
+        out_totals = cp.zeros(total_ensembles, dtype=dtype)
+        grads_arrays = [cp.zeros(num_trees * 3, dtype=dtype) for _ in range(total_ensembles)]
+        grads_ptrs = cp.array([arr.data.ptr for arr in grads_arrays], dtype=cp.uint64)
+        grad_h_arrays = [cp.zeros(1, dtype=dtype) for _ in range(total_ensembles)]
+        grad_h_ptrs = cp.array([arr.data.ptr for arr in grad_h_arrays], dtype=cp.uint64)
+        
+        threads_per_block = num_trees * 4
+        
+        # Warmup
+        pack_cuda._multi_boundary_list_total_kernel(
+            (total_ensembles,),
+            (threads_per_block,),
+            (xyt_ptrs, n_array, h_array, out_totals, grads_ptrs, grad_h_ptrs, np.int32(total_ensembles))
+        )
+        cp.cuda.Device().synchronize()
+        
+        # Timed run
+        cp.cuda.Device().synchronize()
+        start = time.perf_counter()
+        for i in range(iters_per_stream):
+            pack_cuda._multi_boundary_list_total_kernel(
+                (total_ensembles,),
+                (threads_per_block,),
+                (xyt_ptrs, n_array, h_array, out_totals, grads_ptrs, grad_h_ptrs, np.int32(total_ensembles))
+            )
+        cp.cuda.Device().synchronize()
+        end = time.perf_counter()
+    
+    elif kernel_type == 'simple_dummy':
+        num_trees = n_threads // 4
+        total_ensembles = num_streams * num_blocks_per_stream
+        
+        # Create ensemble data lists (same as boundary)
+        xyt_list = [cp.random.randn(num_trees, 3) for _ in range(total_ensembles)]
+        h_list = [10.0] * total_ensembles
+        
+        # Warmup
+        pack_cuda.simple_dummy_multi_ensemble(xyt_list, h_list, compute_grad=True)
+        cp.cuda.Device().synchronize()
+        
+        # Timed run
+        cp.cuda.Device().synchronize()
+        start = time.perf_counter()
+        for i in range(iters_per_stream):
+            pack_cuda.simple_dummy_multi_ensemble(xyt_list, h_list, compute_grad=True)
+        cp.cuda.Device().synchronize()
+        end = time.perf_counter()
     
     else:
         raise ValueError(f"Unknown kernel_type: {kernel_type}")
@@ -220,11 +344,11 @@ if __name__ == '__main__':
     # For simple kernel: n_threads is threads per block
     # For overlap kernel: n_threads is trees per ensemble (kernel uses n_threads * 4 actual threads)
     n_threads = 200  # Thread count per block (simple) or trees per ensemble (overlap)
-    work_factor = 100000  # Work iterations per thread
+    work_factor = 1000000  # Work iterations per thread
     iters = 1
 
-    # KERNEL TYPE FLAG: 'simple' (via wrapper) or 'simple_direct' (direct kernel call)
-    for KERNEL_TYPE in ['simple', 'simple_direct']:
+    # KERNEL TYPE FLAG: 'simple', 'simple_direct', 'overlap', 'boundary', 'boundary_direct', or 'simple_dummy'
+    for KERNEL_TYPE in ['boundary', 'boundary_direct']:#'simple_dummy', 'simple', 'simple_direct']:
 
         print("=" * 60)
         print(f"KERNEL TYPE: {KERNEL_TYPE.upper()}")
