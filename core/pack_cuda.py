@@ -484,7 +484,7 @@ __device__ double boundary_area_piece(
 // Each tree consists of 4 convex pieces
 // Uses N*4 threads: one thread per piece of each tree
 __device__ void boundary_list_total(
-    const double* __restrict__ xyt_3xN,  // flattened row-major: 3 rows, N cols
+    const double* __restrict__ xyt_Nx3,  // flattened: [n, 3] in C-contiguous layout
     const int n,
     const double h,
     double* __restrict__ out_total,
@@ -497,17 +497,14 @@ __device__ void boundary_list_total(
     int tree_idx = tid / 4;  // which tree (0 to n-1)
     int piece_idx = tid % 4; // which piece of that tree (0 to 3)
     
-    const double* row_x = xyt_3xN + 0 * n;
-    const double* row_y = xyt_3xN + 1 * n;
-    const double* row_t = xyt_3xN + 2 * n;
-    
     double local_area = 0.0;
     
     if (tree_idx < n) {
+        // Read pose with strided access: [tree_idx, component]
         double3 pose;
-        pose.x = row_x[tree_idx];
-        pose.y = row_y[tree_idx];
-        pose.z = row_t[tree_idx];
+        pose.x = xyt_Nx3[tree_idx * 3 + 0];
+        pose.y = xyt_Nx3[tree_idx * 3 + 1];
+        pose.z = xyt_Nx3[tree_idx * 3 + 2];
         
         // Compute gradients if requested
         double3 d_pose;
@@ -524,6 +521,7 @@ __device__ void boundary_list_total(
         // Accumulate gradients if computed
         if (out_grads != NULL) {
             // Each of the 4 threads for this tree contributes gradient from its piece
+            // Write to [tree_idx, component] layout
             atomicAdd(&out_grads[tree_idx * 3 + 0], d_pose.x);
             atomicAdd(&out_grads[tree_idx * 3 + 1], d_pose.y);
             atomicAdd(&out_grads[tree_idx * 3 + 2], d_pose.z);
@@ -649,21 +647,22 @@ __global__ void multi_overlap_list_total(
 // Multi-ensemble kernel for boundary: one block per ensemble
 // Each block processes one ensemble by calling boundary_list_total
 //
+// Accepts single 3D array with strided access - no transpose needed
 // Parameters:
-//   xyt_list: array of pointers to xyt data for each ensemble
-//   n_list: array of n values (number of trees) for each ensemble
+//   xyt_base: base pointer to 3D array [num_ensembles, n_trees, 3] in C-contiguous layout
+//   n_trees: number of trees per ensemble (same for all)
 //   h_list: array of h values (boundary size) for each ensemble
 //   out_totals: array of output totals, one per ensemble
-//   out_grads_list: array of pointers to gradient outputs, one per ensemble (can be NULL)
-//   out_grad_h_list: array of pointers to h gradients, one per ensemble (can be NULL)
+//   out_grads_base: base pointer to gradient output [num_ensembles, n_trees, 3] (can be NULL)
+//   out_grad_h: array of h gradients [num_ensembles] (can be NULL)
 //   num_ensembles: number of ensembles to process
 __global__ void multi_boundary_list_total(
-    const double** __restrict__ xyt_list,      // [num_ensembles] pointers
-    const int* __restrict__ n_list,            // [num_ensembles]
+    const double* __restrict__ xyt_base,       // base pointer to [num_ensembles, n_trees, 3]
+    const int n_trees,                          // number of trees per ensemble
     const double* __restrict__ h_list,         // [num_ensembles]
     double* __restrict__ out_totals,           // [num_ensembles]
-    double** __restrict__ out_grads_list,      // [num_ensembles] pointers (NULL entries allowed)
-    double** __restrict__ out_grad_h_list,     // [num_ensembles] pointers (NULL entries allowed)
+    double* __restrict__ out_grads_base,       // base pointer to [num_ensembles, n_trees, 3] (NULL allowed)
+    double* __restrict__ out_grad_h,           // [num_ensembles] (NULL allowed)
     const int num_ensembles)
 {
     int ensemble_id = blockIdx.x;
@@ -672,24 +671,38 @@ __global__ void multi_boundary_list_total(
         return;  // Extra blocks beyond num_ensembles
     }
     
-    // Load parameters for this ensemble
-    const double* xyt = xyt_list[ensemble_id];
-    int n = n_list[ensemble_id];
+    // Calculate offset for this ensemble's data using strided access
+    // Layout: [num_ensembles, n_trees, 3]
+    // Stride: each ensemble is n_trees*3 elements apart
+    int ensemble_stride = n_trees * 3;
+    const double* xyt_ensemble = xyt_base + ensemble_id * ensemble_stride;
+    
+    // Parameters for boundary_list_total
+    int n = n_trees;
     double h = h_list[ensemble_id];
     double* out_total = &out_totals[ensemble_id];
-    double* out_grads = (out_grads_list != NULL) ? out_grads_list[ensemble_id] : NULL;
-    double* out_grad_h = (out_grad_h_list != NULL) ? out_grad_h_list[ensemble_id] : NULL;
+    double* out_grads = (out_grads_base != NULL) ? (out_grads_base + ensemble_id * ensemble_stride) : NULL;
+    double* out_grad_h_elem = (out_grad_h != NULL) ? &out_grad_h[ensemble_id] : NULL;
     
-    // Initialize output
+    // Initialize outputs
     if (threadIdx.x == 0) {
         *out_total = 0.0;
+        if (out_grad_h_elem != NULL) {
+            *out_grad_h_elem = 0.0;
+        }
+    }
+    // Initialize gradient buffer
+    if (out_grads != NULL) {
+        int tid = threadIdx.x;
+        int max_tid = n_trees * 4;
+        for (int idx = tid; idx < n_trees * 3; idx += max_tid) {
+            out_grads[idx] = 0.0;
+        }
     }
     __syncthreads();
     
-    // Call the existing boundary_list_total device function
-    // This function is designed to be called by ALL threads in the block
-    // It internally uses threadIdx.x to determine which tree each thread processes
-    boundary_list_total(xyt, n, h, out_total, out_grads, out_grad_h);
+    // Call boundary_list_total - it now reads (n_trees, 3) format directly
+    boundary_list_total(xyt_ensemble, n, h, out_total, out_grads, out_grad_h_elem);
 }
 
 // Simple dummy kernel for testing concurrency - minimal work, same interface as boundary
@@ -1124,60 +1137,35 @@ def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool =
             return out_totals, out_grads, out_grad_h
         return out_totals, None, None
     
-    # Transpose to 3xN format for kernel (strided access)
-    xyt_arrays = []
-    for i in range(num_ensembles):
-        xyt_3xN = cp.ascontiguousarray(xyt[i].T).ravel()
-        xyt_arrays.append(xyt_3xN)
-    
-    # Create arrays of pointers
-    xyt_ptrs = cp.array([arr.data.ptr for arr in xyt_arrays], dtype=cp.uint64)
-    n_array = cp.full(num_ensembles, n_trees, dtype=cp.int32)
-    
     # Allocate outputs (ONLY allocations allowed)
     out_totals = cp.zeros(num_ensembles, dtype=dtype)
-    
-    # Allocate gradients if requested
-    grads_arrays = []
-    grads_ptrs = None
-    grad_h_arrays = []
-    grad_h_ptrs = None
+    out_grads = None
+    out_grad_h = None
     
     if compute_grad:
-        for _ in range(num_ensembles):
-            grads_arrays.append(cp.zeros(n_trees * 3, dtype=dtype))
-        grads_ptrs = cp.array([arr.data.ptr for arr in grads_arrays], dtype=cp.uint64)
-        
-        for _ in range(num_ensembles):
-            grad_h_arrays.append(cp.zeros(1, dtype=dtype))
-        grad_h_ptrs = cp.array([arr.data.ptr for arr in grad_h_arrays], dtype=cp.uint64)
+        out_grads = cp.zeros((num_ensembles, n_trees, 3), dtype=dtype)
+        out_grad_h = cp.zeros(num_ensembles, dtype=dtype)
     
     # Launch kernel: one block per ensemble, n_trees * 4 threads per block
     blocks = num_ensembles
     threads_per_block = n_trees * 4
     
-    # Cast pointer arrays to proper type for kernel
-    null_ptr = cp.array([0], dtype=cp.uint64)
-    
     _multi_boundary_list_total_kernel(
         (blocks,),
         (threads_per_block,),
         (
-            xyt_ptrs,
-            n_array,
+            xyt,
+            np.int32(n_trees),
             h,
             out_totals,
-            grads_ptrs if grads_ptrs is not None else null_ptr,
-            grad_h_ptrs if grad_h_ptrs is not None else null_ptr,
+            out_grads if out_grads is not None else cp.array([0], dtype=cp.uint64),
+            out_grad_h if out_grad_h is not None else cp.array([0], dtype=cp.uint64),
             np.int32(num_ensembles),
         ),
         stream=stream,
     )
     
     if compute_grad:
-        # Reshape gradient arrays back to (n_ensembles, n_trees, 3)
-        out_grads = cp.stack([grads_arrays[i].reshape(n_trees, 3) for i in range(num_ensembles)], axis=0)
-        out_grad_h = cp.concatenate([grad_h_arrays[i] for i in range(num_ensembles)])
         return out_totals, out_grads, out_grad_h
     else:
         return out_totals, None, None

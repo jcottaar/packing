@@ -14,7 +14,7 @@ sys.path.append('/mnt/d/packing/code/core/')
 
 import pack_cuda
 import kaggle_support as kgs
-kgs.profiling=True
+kgs.profiling=False
 
 # ============================================================================
 # KERNEL SETUP
@@ -261,29 +261,20 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         end = time.perf_counter()
     
     elif kernel_type == 'boundary_direct':
-        # Call boundary kernel directly (bypass wrapper)
+        # Call boundary kernel directly (bypass wrapper) - new interface with 3D arrays
         num_trees = n_threads // 4
         total_ensembles = num_streams * num_blocks_per_stream
         
         dtype = cp.float32 if pack_cuda.USE_FLOAT32 else cp.float64
         
-        # Pre-allocate all data structures once
-        xyt_arrays = []
-        for _ in range(total_ensembles):
-            xyt_arr = cp.random.randn(num_trees, 3).astype(dtype)
-            xyt_3xN = cp.ascontiguousarray(xyt_arr.T).ravel()
-            xyt_arrays.append(xyt_3xN)
-        
-        h_array = cp.array([10.0] * total_ensembles, dtype=dtype)
-        n_array = cp.array([num_trees] * total_ensembles, dtype=cp.int32)
-        xyt_ptrs = cp.array([arr.data.ptr for arr in xyt_arrays], dtype=cp.uint64)
+        # Pre-allocate single 3D array (n_ensembles, n_trees, 3) in C-contiguous layout
+        xyt = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))
+        h_array = cp.full(total_ensembles, 10.0, dtype=dtype)
         
         # Pre-allocate outputs
         out_totals = cp.zeros(total_ensembles, dtype=dtype)
-        grads_arrays = [cp.zeros(num_trees * 3, dtype=dtype) for _ in range(total_ensembles)]
-        grads_ptrs = cp.array([arr.data.ptr for arr in grads_arrays], dtype=cp.uint64)
-        grad_h_arrays = [cp.zeros(1, dtype=dtype) for _ in range(total_ensembles)]
-        grad_h_ptrs = cp.array([arr.data.ptr for arr in grad_h_arrays], dtype=cp.uint64)
+        out_grads = cp.zeros((total_ensembles, num_trees, 3), dtype=dtype)
+        out_grad_h = cp.zeros(total_ensembles, dtype=dtype)
         
         threads_per_block = num_trees * 4
         
@@ -291,7 +282,7 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         pack_cuda._multi_boundary_list_total_kernel(
             (total_ensembles,),
             (threads_per_block,),
-            (xyt_ptrs, n_array, h_array, out_totals, grads_ptrs, grad_h_ptrs, np.int32(total_ensembles))
+            (xyt, np.int32(num_trees), h_array, out_totals, out_grads, out_grad_h, np.int32(total_ensembles))
         )
         cp.cuda.Device().synchronize()
         
@@ -302,7 +293,7 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
             pack_cuda._multi_boundary_list_total_kernel(
                 (total_ensembles,),
                 (threads_per_block,),
-                (xyt_ptrs, n_array, h_array, out_totals, grads_ptrs, grad_h_ptrs, np.int32(total_ensembles))
+                (xyt, np.int32(num_trees), h_array, out_totals, out_grads, out_grad_h, np.int32(total_ensembles))
             )
         cp.cuda.Device().synchronize()
         end = time.perf_counter()
@@ -343,12 +334,12 @@ if __name__ == '__main__':
     # Test parameters
     # For simple kernel: n_threads is threads per block
     # For overlap kernel: n_threads is trees per ensemble (kernel uses n_threads * 4 actual threads)
-    n_threads = 200  # Thread count per block (simple) or trees per ensemble (overlap)
+    n_threads = 20  # Thread count per block (simple) or trees per ensemble (overlap)
     work_factor = 1000000  # Work iterations per thread
-    iters = 1
+    iters = 100
 
     # KERNEL TYPE FLAG: 'simple', 'simple_direct', 'overlap', 'boundary', 'boundary_direct', or 'simple_dummy'
-    for KERNEL_TYPE in ['boundary', 'boundary_direct']:#'simple_dummy', 'simple', 'simple_direct']:
+    for KERNEL_TYPE in ['boundary']:#'simple_dummy', 'simple', 'simple_direct']:
 
         print("=" * 60)
         print(f"KERNEL TYPE: {KERNEL_TYPE.upper()}")
@@ -366,17 +357,17 @@ if __name__ == '__main__':
             cp.cuda.Device().synchronize()
             print(f"{b}\t{int(kps)}\t\t{t:.3f}")
 
-        # print("\n" + "=" * 60)
-        # print("TEST 2: Parallel Kernel Execution (Multiple Streams, Each with Multiple Blocks)")
-        # print(f"Config: {n_threads} threads/block, {work_factor} work iterations")
-        # print("=" * 60)
-        # print("Streams\tBlocks/Stream\tKernels/sec\tElapsed(s)")
-        # num_blocks_per_stream = 1  # Fixed block count per kernel
-        # stream_counts = [1, 2, 4, 8]
-        # for num_streams in stream_counts:
-        #     kps, t = run_trial_multi_stream(num_streams, iters, num_blocks_per_stream, n_threads, work_factor, kernel_type=KERNEL_TYPE)
-        #     cp.cuda.Device().synchronize()
-        #     print(f"{num_streams}\t{num_blocks_per_stream}\t\t{int(kps)}\t\t{t:.3f}")
+        print("\n" + "=" * 60)
+        print("TEST 2: Parallel Kernel Execution (Multiple Streams, Each with Multiple Blocks)")
+        print(f"Config: {n_threads} threads/block, {work_factor} work iterations")
+        print("=" * 60)
+        print("Streams\tBlocks/Stream\tKernels/sec\tElapsed(s)")
+        num_blocks_per_stream = 60  # Fixed block count per kernel
+        stream_counts = [1, 2, 4, 8, 16, 32, 64]
+        for num_streams in stream_counts:
+            kps, t = run_trial_multi_stream(num_streams, iters, num_blocks_per_stream, n_threads, work_factor, kernel_type=KERNEL_TYPE)
+            cp.cuda.Device().synchronize()
+            print(f"{num_streams}\t{num_blocks_per_stream}\t\t{int(kps)}\t\t{t:.3f}")
 
         # print("\n" + "=" * 60)
         # print("GPU Info")
