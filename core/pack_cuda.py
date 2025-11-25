@@ -1203,7 +1203,6 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, compute_grad: boo
         return out_totals, None
 
 
-@kgs.profile_each_line
 def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool = False, stream: cp.cuda.Stream | None = None):
     """Compute total boundary violation area for multiple ensembles in parallel.
     
