@@ -116,7 +116,7 @@ __device__ __forceinline__ void compute_tree_poly_and_aabb(
         // Apply pose transform
         double x_t = c * x - s * y + pose.x;
         double y_t = s * x + c * y + pose.y;
-        out_poly[v] = make_d2(x_t, y_t);
+        out_poly[v] = make_double2(x_t, y_t);
         
         // Update AABB
         min_x = fmin(min_x, x_t);
@@ -373,10 +373,10 @@ __device__ double convex_area_outside_square(
     
     // Define square vertices (CCW order)
     d2 square[4];
-    square[0] = make_d2(-half_h, -half_h);
-    square[1] = make_d2(half_h, -half_h);
-    square[2] = make_d2(half_h, half_h);
-    square[3] = make_d2(-half_h, half_h);
+    square[0] = make_double2(-half_h, -half_h);
+    square[1] = make_double2(half_h, -half_h);
+    square[2] = make_double2(half_h, half_h);
+    square[3] = make_double2(-half_h, half_h);
     
     // Compute intersection area between polygon and square
     double intersection_area = convex_intersection_area(poly, n, square, 4);
@@ -1048,16 +1048,16 @@ def _ensure_initialized() -> None:
 
     ptx_path = os.path.join(persist_dir, 'pack_cuda_saved.ptx')
     
-    # First compile to cubin to get ptxas verbose output (ptxas only runs for cubin, not ptx)
-    cubin_path = os.path.join(persist_dir, 'pack_cuda_saved.cubin')
-    cmd_cubin = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89", "-cubin", persist_path, "-o", cubin_path]
+    # # First compile to cubin to get ptxas verbose output (ptxas only runs for cubin, not ptx)
+    # cubin_path = os.path.join(persist_dir, 'pack_cuda_saved.cubin')
+    # cmd_cubin = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89", "-cubin", persist_path, "-o", cubin_path]
     
-    print("=== Running NVCC Compilation (cubin for ptxas info) ===")
-    print(f"Command: {' '.join(cmd_cubin)}")
-    proc = subprocess.run(cmd_cubin, text=True)
+    # print("=== Running NVCC Compilation (cubin for ptxas info) ===")
+    # print(f"Command: {' '.join(cmd_cubin)}")
+    # proc = subprocess.run(cmd_cubin, text=True)
     
-    if proc.returncode != 0:
-        raise RuntimeError(f"nvcc cubin compilation failed (exit {proc.returncode})")
+    # if proc.returncode != 0:
+    #     raise RuntimeError(f"nvcc cubin compilation failed (exit {proc.returncode})")
     
     # Now compile to PTX for actual use
     cmd = [nvcc_path, "-O3", "-use_fast_math", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]

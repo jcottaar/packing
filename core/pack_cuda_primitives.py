@@ -6,14 +6,8 @@ These are low-level geometric operations used by higher-level functions.
 """
 
 PRIMITIVE_SRC = r"""
-typedef struct {
-    double x;
-    double y;
-} d2;
-
-__device__ __forceinline__ d2 make_d2(double x, double y) {
-    d2 p; p.x = x; p.y = y; return p;
-}
+// Use CUDA's built-in double2 type (more idiomatic and potentially better optimized)
+typedef double2 d2;
 
 __device__ __forceinline__ double cross3(d2 a, d2 b, d2 c) {
     // Oriented area of triangle (a, b, c) = cross(b-a, c-a)
@@ -35,7 +29,7 @@ __device__ __forceinline__ d2 line_intersection(d2 p1, d2 p2,
     // add an epsilon check here.
     double t = ((q1.x - p1.x) * sy - (q1.y - p1.y) * sx) / denom;
 
-    return make_d2(p1.x + t * rx, p1.y + t * ry);
+    return make_double2(p1.x + t * rx, p1.y + t * ry);
 }
 
 __device__ __forceinline__ int clip_against_edge(
@@ -107,7 +101,7 @@ __device__ __forceinline__ void backward_polygon_area(
 {
     if (n < 3) {
         for (int i = 0; i < n; ++i) {
-            d_v[i] = make_d2(0.0, 0.0);
+            d_v[i] = make_double2(0.0, 0.0);
         }
         return;
     }
@@ -175,12 +169,12 @@ __device__ __forceinline__ void backward_line_intersection(
     double dnum_dp1_y = sx;
     double ddenom_dp1_x = -sy;
     double ddenom_dp1_y = sx;
-    d2 dt_dp1 = make_d2((dnum_dp1_x * denom - num * ddenom_dp1_x) / denom2,
+    d2 dt_dp1 = make_double2((dnum_dp1_x * denom - num * ddenom_dp1_x) / denom2,
                         (dnum_dp1_y * denom - num * ddenom_dp1_y) / denom2);
     
     // ∂num/∂p2 = 0
     // ∂denom/∂p2.x = sy,  ∂denom/∂p2.y = -sx
-    d2 dt_dp2 = make_d2((-num * sy) / denom2, (num * sx) / denom2);
+    d2 dt_dp2 = make_double2((-num * sy) / denom2, (num * sx) / denom2);
     
     // ∂num/∂q1.x = sy + (q1.y - p1.y) (from ∂sy/∂q1.x = 0 and ∂sx/∂q1.x = -1)
     // ∂num/∂q1.y = -sx - (q1.x - p1.x) (from ∂sy/∂q1.y = -1 and ∂sx/∂q1.y = 0)
@@ -190,7 +184,7 @@ __device__ __forceinline__ void backward_line_intersection(
     double dnum_dq1_y = -sx - (q1.x - p1.x);
     double ddenom_dq1_x = ry;
     double ddenom_dq1_y = -rx;
-    d2 dt_dq1 = make_d2((dnum_dq1_x * denom - num * ddenom_dq1_x) / denom2,
+    d2 dt_dq1 = make_double2((dnum_dq1_x * denom - num * ddenom_dq1_x) / denom2,
                         (dnum_dq1_y * denom - num * ddenom_dq1_y) / denom2);
     
     // ∂num/∂q2.x = -(q1.y - p1.y) (from ∂sy/∂q2.x = 0 and ∂sx/∂q2.x = +1)
@@ -201,7 +195,7 @@ __device__ __forceinline__ void backward_line_intersection(
     double dnum_dq2_y = (q1.x - p1.x);
     double ddenom_dq2_x = -ry;
     double ddenom_dq2_y = rx;
-    d2 dt_dq2 = make_d2((dnum_dq2_x * denom - num * ddenom_dq2_x) / denom2,
+    d2 dt_dq2 = make_double2((dnum_dq2_x * denom - num * ddenom_dq2_x) / denom2,
                         (dnum_dq2_y * denom - num * ddenom_dq2_y) / denom2);
     
     // Now compute ∂out/∂inputs using chain rule
@@ -349,7 +343,7 @@ __device__ __forceinline__ void backward_clip_against_edge(
 {
     // Initialize gradients to zero
     for (int i = 0; i < in_count; ++i) {
-        d_in_pts[i] = make_d2(0.0, 0.0);
+        d_in_pts[i] = make_double2(0.0, 0.0);
     }
     d_A->x = 0.0; d_A->y = 0.0;
     d_B->x = 0.0; d_B->y = 0.0;
@@ -430,10 +424,10 @@ __device__ void backward_convex_intersection_area(
 {
     // Initialize output gradients
     for (int i = 0; i < n_subj; ++i) {
-        d_subj[i] = make_d2(0.0, 0.0);
+        d_subj[i] = make_double2(0.0, 0.0);
     }
     for (int i = 0; i < n_clip; ++i) {
-        d_clip[i] = make_d2(0.0, 0.0);
+        d_clip[i] = make_double2(0.0, 0.0);
     }
     
     if (n_subj == 0 || n_clip == 0 || d_area == 0.0) return;

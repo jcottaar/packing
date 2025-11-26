@@ -66,10 +66,10 @@ __global__ void test_line_intersection_fwd_bwd(
     if (idx >= n) return;
     
     // Forward pass: call line_intersection
-    d2 p1 = make_d2(p1_x[idx], p1_y[idx]);
-    d2 p2 = make_d2(p2_x[idx], p2_y[idx]);
-    d2 q1 = make_d2(q1_x[idx], q1_y[idx]);
-    d2 q2 = make_d2(q2_x[idx], q2_y[idx]);
+    d2 p1 = make_double2(p1_x[idx], p1_y[idx]);
+    d2 p2 = make_double2(p2_x[idx], p2_y[idx]);
+    d2 q1 = make_double2(q1_x[idx], q1_y[idx]);
+    d2 q2 = make_double2(q2_x[idx], q2_y[idx]);
     
     d2 out = line_intersection(p1, p2, q1, q2);
     out_x[idx] = out.x;
@@ -77,7 +77,7 @@ __global__ void test_line_intersection_fwd_bwd(
     
     // Backward pass: call backward_line_intersection (assuming d_out = (1.0, 1.0))
     if (compute_gradients) {
-        d2 d_out = make_d2(1.0, 1.0);
+        d2 d_out = make_double2(1.0, 1.0);
         d2 d_p1, d_p2, d_q1, d_q2;
         backward_line_intersection(p1, p2, q1, q2, d_out, &d_p1, &d_p2, &d_q1, &d_q2);
         
@@ -117,12 +117,12 @@ __global__ void test_clip_against_edge_fwd_bwd(
     d2 in_pts[MAX_INTERSECTION_VERTS];
     for (int i = 0; i < n_verts; ++i) {
         int offset = idx * max_n_in * 2 + i * 2;
-        in_pts[i] = make_d2(in_pts_flat[offset], in_pts_flat[offset + 1]);
+        in_pts[i] = make_double2(in_pts_flat[offset], in_pts_flat[offset + 1]);
     }
     
     // Load edge
-    d2 A = make_d2(edge_A_x[idx], edge_A_y[idx]);
-    d2 B = make_d2(edge_B_x[idx], edge_B_y[idx]);
+    d2 A = make_double2(edge_A_x[idx], edge_A_y[idx]);
+    d2 B = make_double2(edge_B_x[idx], edge_B_y[idx]);
     
     // Forward pass: call clip_against_edge with metadata
     d2 out_pts[MAX_INTERSECTION_VERTS];
@@ -141,7 +141,7 @@ __global__ void test_clip_against_edge_fwd_bwd(
     if (compute_gradients) {
         d2 d_out_pts[MAX_INTERSECTION_VERTS];
         for (int i = 0; i < n_out_verts; ++i) {
-            d_out_pts[i] = make_d2(1.0, 1.0);
+            d_out_pts[i] = make_double2(1.0, 1.0);
         }
         
         d2 d_in_pts[MAX_INTERSECTION_VERTS];
