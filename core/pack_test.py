@@ -9,11 +9,11 @@ import pack_cost
 import pack_basics
 import pack_vis
 import pack_cuda
-import pack_cuda_primitives
+import pack_cuda_primitives_test
 pack_cuda.USE_FLOAT32 = True
 
 def run_all_tests():
-    pack_cuda_primitives.run_all_tests()
+    pack_cuda_primitives_test.run_all_tests()
     test_costs()
     print("All tests passed.")
 

@@ -29,6 +29,8 @@ _initialized: bool = False
 
 # Kernel references (populated during initialization)
 _line_intersection_kernel: cp.RawKernel | None = None
+_clip_against_edge_kernel: cp.RawKernel | None = None
+_polygon_area_kernel: cp.RawKernel | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +88,114 @@ __global__ void test_line_intersection_fwd_bwd(
     d_q2_y[idx] = d_q2.y;
 }
 
+// ============================================================================
+// TEST KERNEL: clip_against_edge
+// ============================================================================
+__global__ void test_clip_against_edge_fwd_bwd(
+    const double* in_pts_flat,     // input: polygon vertices (batch, max_n_in*2)
+    const int* n_in,                // input: number of vertices per polygon (batch)
+    const double* edge_A_x, const double* edge_A_y,  // input: edge point A (batch)
+    const double* edge_B_x, const double* edge_B_y,  // input: edge point B (batch)
+    const int batch_size,
+    const int max_n_in,             // max vertices in input polygons
+    double* out_pts_flat,           // output: clipped vertices (batch, MAX_INTERSECTION_VERTS*2)
+    int* n_out,                     // output: number of output vertices (batch)
+    double* d_in_pts_flat,          // output: gradients w.r.t. input vertices
+    double* d_edge_A_x, double* d_edge_A_y,  // output: gradients w.r.t. edge A
+    double* d_edge_B_x, double* d_edge_B_y)  // output: gradients w.r.t. edge B
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    // Load input polygon
+    int n_verts = n_in[idx];
+    d2 in_pts[MAX_INTERSECTION_VERTS];
+    for (int i = 0; i < n_verts; ++i) {
+        int offset = idx * max_n_in * 2 + i * 2;
+        in_pts[i] = make_d2(in_pts_flat[offset], in_pts_flat[offset + 1]);
+    }
+    
+    // Load edge
+    d2 A = make_d2(edge_A_x[idx], edge_A_y[idx]);
+    d2 B = make_d2(edge_B_x[idx], edge_B_y[idx]);
+    
+    // Forward pass: call clip_against_edge with metadata
+    d2 out_pts[MAX_INTERSECTION_VERTS];
+    ClipMetadata meta;
+    int n_out_verts = clip_against_edge_with_metadata(in_pts, n_verts, A, B, out_pts, &meta);
+    
+    // Store output
+    n_out[idx] = n_out_verts;
+    for (int i = 0; i < n_out_verts; ++i) {
+        int offset = idx * MAX_INTERSECTION_VERTS * 2 + i * 2;
+        out_pts_flat[offset] = out_pts[i].x;
+        out_pts_flat[offset + 1] = out_pts[i].y;
+    }
+    
+    // Backward pass: assume d_out = all ones
+    d2 d_out_pts[MAX_INTERSECTION_VERTS];
+    for (int i = 0; i < n_out_verts; ++i) {
+        d_out_pts[i] = make_d2(1.0, 1.0);
+    }
+    
+    d2 d_in_pts[MAX_INTERSECTION_VERTS];
+    d2 d_A, d_B;
+    backward_clip_against_edge(in_pts, n_verts, A, B, d_out_pts, &meta, d_in_pts, &d_A, &d_B);
+    
+    // Store gradients
+    for (int i = 0; i < n_verts; ++i) {
+        int offset = idx * max_n_in * 2 + i * 2;
+        d_in_pts_flat[offset] = d_in_pts[i].x;
+        d_in_pts_flat[offset + 1] = d_in_pts[i].y;
+    }
+    
+    d_edge_A_x[idx] = d_A.x;
+    d_edge_A_y[idx] = d_A.y;
+    d_edge_B_x[idx] = d_B.x;
+    d_edge_B_y[idx] = d_B.y;
+}
+
+// ============================================================================
+// TEST KERNEL: polygon_area
+// ============================================================================
+__global__ void test_polygon_area_fwd_bwd(
+    const double* verts_flat,  // shape: (batch, max_n_verts * 2) - flattened (x,y) coords
+    const int* n_verts,        // shape: (batch,) - number of vertices per polygon
+    int batch_size,
+    int max_n_verts,
+    double* areas,             // output: (batch,) - area of each polygon
+    double* d_verts_flat)      // output: (batch, max_n_verts * 2) - gradients w.r.t. vertices
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    int n = n_verts[idx];
+    
+    // Load vertices
+    d2 v[MAX_VERTS_PER_PIECE];
+    for (int i = 0; i < n; ++i) {
+        int offset = idx * max_n_verts * 2 + i * 2;
+        v[i].x = verts_flat[offset];
+        v[i].y = verts_flat[offset + 1];
+    }
+    
+    // Forward: compute area
+    double area = polygon_area(v, n);
+    areas[idx] = area;
+    
+    // Backward: assume upstream gradient d_area = 1.0
+    double d_area = 1.0;
+    d2 d_v[MAX_VERTS_PER_PIECE];
+    backward_polygon_area(v, n, d_area, d_v);
+    
+    // Store gradients
+    for (int i = 0; i < n; ++i) {
+        int offset = idx * max_n_verts * 2 + i * 2;
+        d_verts_flat[offset] = d_v[i].x;
+        d_verts_flat[offset + 1] = d_v[i].y;
+    }
+}
+
 }  // extern "C"
 """
 
@@ -104,7 +214,7 @@ def _ensure_initialized() -> None:
     - Loads compiled module and extracts kernel references
     """
     global _initialized, _raw_module
-    global _line_intersection_kernel
+    global _line_intersection_kernel, _clip_against_edge_kernel, _polygon_area_kernel
     
     if _initialized:
         return
@@ -153,6 +263,8 @@ def _ensure_initialized() -> None:
     
     # Extract kernel references
     _line_intersection_kernel = _raw_module.get_function("test_line_intersection_fwd_bwd")
+    _clip_against_edge_kernel = _raw_module.get_function("test_clip_against_edge_fwd_bwd")
+    _polygon_area_kernel = _raw_module.get_function("test_polygon_area_fwd_bwd")
     
     _initialized = True
     print("Initialization complete!")
@@ -269,8 +381,125 @@ def line_intersection_fwd_bwd(
     
     return out, (d_p1, d_p2, d_q1, d_q2)
 
+
+# ---------------------------------------------------------------------------
+# Python API: clip_against_edge
+# ---------------------------------------------------------------------------
+
+def clip_against_edge_fwd_bwd(
+    in_polygons: list[cp.ndarray],  # list of (n_i, 2) arrays - input polygons
+    edge_A: cp.ndarray,              # shape (n_batch, 2) - edge point A
+    edge_B: cp.ndarray               # shape (n_batch, 2) - edge point B
+) -> tuple[list[cp.ndarray], tuple[list[cp.ndarray], cp.ndarray, cp.ndarray]]:
+    """Clip polygons against an edge and compute gradients.
+    
+    Forward pass:
+        Clips each input polygon against the half-plane defined by edge A->B
+        (keeps points where cross(A, B, point) >= 0)
+    
+    Backward pass:
+        Computes gradients w.r.t. input vertices and edge points
+        (assuming upstream gradient = 1.0 for all output vertices)
+    
+    Parameters
+    ----------
+    in_polygons : list of cp.ndarray
+        List of input polygons, each shape (n_i, 2), dtype float64
+    edge_A : cp.ndarray, shape (n_batch, 2), dtype float64
+        First point of clipping edge for each polygon
+    edge_B : cp.ndarray, shape (n_batch, 2), dtype float64
+        Second point of clipping edge for each polygon
+    
+    Returns
+    -------
+    out_polygons : list of cp.ndarray
+        Clipped polygons, each shape (n_out_i, 2), dtype float64
+    gradients : tuple of (d_in_polygons, d_edge_A, d_edge_B)
+        d_in_polygons : list of cp.ndarray, each shape (n_i, 2) - gradients w.r.t. input vertices
+        d_edge_A : cp.ndarray, shape (n_batch, 2) - gradients w.r.t. edge A
+        d_edge_B : cp.ndarray, shape (n_batch, 2) - gradients w.r.t. edge B
+    """
+    _ensure_initialized()
+    
+    n_batch = len(in_polygons)
+    if n_batch == 0:
+        return [], ([], cp.array([], dtype=cp.float64).reshape(0, 2), 
+                    cp.array([], dtype=cp.float64).reshape(0, 2))
+    
+    # Validate inputs
+    assert edge_A.shape == (n_batch, 2) and edge_A.dtype == cp.float64
+    assert edge_B.shape == (n_batch, 2) and edge_B.dtype == cp.float64
+    
+    # Find max input size and pad
+    max_n_in = max(poly.shape[0] for poly in in_polygons)
+    
+    # Create padded input array
+    in_pts_flat = cp.zeros((n_batch, max_n_in, 2), dtype=cp.float64)
+    n_in = cp.zeros(n_batch, dtype=cp.int32)
+    
+    for i, poly in enumerate(in_polygons):
+        assert poly.ndim == 2 and poly.shape[1] == 2
+        assert poly.dtype == cp.float64
+        n_verts = poly.shape[0]
+        n_in[i] = n_verts
+        in_pts_flat[i, :n_verts, :] = poly
+    
+    in_pts_flat = in_pts_flat.reshape(n_batch, max_n_in * 2)
+    
+    # Allocate outputs
+    out_pts_flat = cp.zeros((n_batch, 8 * 2), dtype=cp.float64)  # MAX_INTERSECTION_VERTS=8
+    n_out = cp.zeros(n_batch, dtype=cp.int32)
+    d_in_pts_flat = cp.zeros((n_batch, max_n_in * 2), dtype=cp.float64)
+    d_edge_A = cp.zeros((n_batch, 2), dtype=cp.float64)
+    d_edge_B = cp.zeros((n_batch, 2), dtype=cp.float64)
+    
+    # Launch kernel
+    threads_per_block = 256
+    blocks = (n_batch + threads_per_block - 1) // threads_per_block
+    
+    _clip_against_edge_kernel(
+        (blocks,),
+        (threads_per_block,),
+        (
+            in_pts_flat.ravel(),
+            n_in,
+            edge_A[:, 0],
+            edge_A[:, 1],
+            edge_B[:, 0],
+            edge_B[:, 1],
+            np.int32(n_batch),
+            np.int32(max_n_in),
+            out_pts_flat.ravel(),
+            n_out,
+            d_in_pts_flat.ravel(),
+            d_edge_A[:, 0],
+            d_edge_A[:, 1],
+            d_edge_B[:, 0],
+            d_edge_B[:, 1],
+        )
+    )
+    
+    # Extract output polygons
+    n_out_cpu = n_out.get()
+    out_pts_flat = out_pts_flat.reshape(n_batch, 8, 2)
+    out_polygons = []
+    for i in range(n_batch):
+        n = n_out_cpu[i]
+        out_polygons.append(out_pts_flat[i, :n, :].copy())
+    
+    # Extract gradient polygons
+    d_in_pts_flat = d_in_pts_flat.reshape(n_batch, max_n_in, 2)
+    d_in_polygons = []
+    for i in range(n_batch):
+        n = n_in.get()[i]
+        d_in_polygons.append(d_in_pts_flat[i, :n, :].copy())
+    
+    return out_polygons, (d_in_polygons, d_edge_A, d_edge_B)
+
+
 def run_all_tests():
     test_line_intersection()
+    test_clip_against_edge()
 
 def test_line_intersection():
     """Test line_intersection forward and backward passes using finite differences."""
@@ -395,6 +624,310 @@ def test_line_intersection():
     
     print("\n✓ All gradients match finite differences!")
     print("✓ line_intersection test PASSED")
+
+
+def test_clip_against_edge():
+    """Test clip_against_edge forward and backward passes using finite differences."""
+    print("\n=== Testing clip_against_edge ===")
+    _ensure_initialized()
+    
+    eps = 1e-6
+    
+    # Test cases: various polygons and clipping edges
+    test_cases = [
+        # Square clipped by diagonal edge - should produce triangle
+        (np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]),
+         np.array([0.0, 0.0]), np.array([2.0, 2.0])),
+        
+        # Triangle clipped by edge
+        (np.array([[0.0, 0.0], [2.0, 0.0], [1.0, 2.0]]),
+         np.array([0.0, 1.0]), np.array([2.0, 1.0])),
+         
+        # Pentagon clipped
+        (np.array([[0.0, 0.0], [2.0, 0.0], [2.5, 1.0], [1.0, 2.0], [-0.5, 1.0]]),
+         np.array([0.5, 0.5]), np.array([1.5, 1.5])),
+    ]
+    
+    # Add random test cases
+    np.random.seed(123)
+    for _ in range(10):
+        # Random convex polygon (from circle)
+        n_verts = np.random.randint(3, 6)
+        angles = np.sort(np.random.rand(n_verts) * 2 * np.pi)
+        radius = 1.0 + np.random.rand() * 0.5
+        poly = np.column_stack([
+            np.cos(angles) * radius,
+            np.sin(angles) * radius
+        ])
+        
+        # Random edge
+        edge_A = np.random.randn(2) * 2.0
+        edge_B = edge_A + np.random.randn(2) * 2.0
+        test_cases.append((poly, edge_A, edge_B))
+    
+    print(f"Testing {len(test_cases)} cases...")
+    
+    max_error = 0.0
+    
+    for idx, (poly_np, edge_A_np, edge_B_np) in enumerate(test_cases):
+        # Convert to CuPy
+        poly = cp.array(poly_np, dtype=cp.float64)
+        edge_A = cp.array([edge_A_np], dtype=cp.float64)
+        edge_B = cp.array([edge_B_np], dtype=cp.float64)
+        
+        # Forward and backward pass
+        out_polys, (d_in_polys, d_edge_A, d_edge_B) = clip_against_edge_fwd_bwd([poly], edge_A, edge_B)
+        
+        if len(out_polys[0]) == 0:
+            # Polygon completely clipped away - skip gradient test
+            continue
+        
+        # Get gradients
+        d_poly = d_in_polys[0].get()
+        d_A = d_edge_A.get()[0]
+        d_B = d_edge_B.get()[0]
+        
+        # Test gradients with finite differences
+        # For each input vertex coordinate
+        for v_idx in range(poly_np.shape[0]):
+            for coord_idx in range(2):
+                # Perturb input
+                poly_plus = poly_np.copy()
+                poly_plus[v_idx, coord_idx] += eps
+                poly_minus = poly_np.copy()
+                poly_minus[v_idx, coord_idx] -= eps
+                
+                # Compute forward passes
+                out_plus, _ = clip_against_edge_fwd_bwd(
+                    [cp.array(poly_plus, dtype=cp.float64)],
+                    cp.array([edge_A_np], dtype=cp.float64),
+                    cp.array([edge_B_np], dtype=cp.float64)
+                )
+                out_minus, _ = clip_against_edge_fwd_bwd(
+                    [cp.array(poly_minus, dtype=cp.float64)],
+                    cp.array([edge_A_np], dtype=cp.float64),
+                    cp.array([edge_B_np], dtype=cp.float64)
+                )
+                
+                # Check if topology changed (number of vertices)
+                if len(out_plus[0]) != len(out_polys[0]) or len(out_minus[0]) != len(out_polys[0]):
+                    # Topology changed - skip this gradient test
+                    continue
+                
+                # Finite difference: sum of all output coordinates (since d_out = all ones)
+                fd_grad = (out_plus[0].get().sum() - out_minus[0].get().sum()) / (2 * eps)
+                analytical = d_poly[v_idx, coord_idx]
+                error = abs(analytical - fd_grad)
+                max_error = max(max_error, error)
+                assert error < 1e-3, f"Case {idx}, vertex {v_idx}, coord {coord_idx}: {analytical:.6f} vs {fd_grad:.6f}"
+        
+        # Test edge gradients
+        for coord_idx in range(2):
+            # Test d_edge_A
+            edge_A_plus = edge_A_np.copy()
+            edge_A_plus[coord_idx] += eps
+            edge_A_minus = edge_A_np.copy()
+            edge_A_minus[coord_idx] -= eps
+            
+            out_plus, _ = clip_against_edge_fwd_bwd(
+                [cp.array(poly_np, dtype=cp.float64)],
+                cp.array([edge_A_plus], dtype=cp.float64),
+                cp.array([edge_B_np], dtype=cp.float64)
+            )
+            out_minus, _ = clip_against_edge_fwd_bwd(
+                [cp.array(poly_np, dtype=cp.float64)],
+                cp.array([edge_A_minus], dtype=cp.float64),
+                cp.array([edge_B_np], dtype=cp.float64)
+            )
+            
+            if len(out_plus[0]) != len(out_polys[0]) or len(out_minus[0]) != len(out_polys[0]):
+                continue
+            
+            fd_grad = (out_plus[0].get().sum() - out_minus[0].get().sum()) / (2 * eps)
+            analytical = d_A[coord_idx]
+            error = abs(analytical - fd_grad)
+            max_error = max(max_error, error)
+            assert error < 1e-3, f"Case {idx}, edge_A coord {coord_idx}: {analytical:.6f} vs {fd_grad:.6f}"
+            
+            # Test d_edge_B
+            edge_B_plus = edge_B_np.copy()
+            edge_B_plus[coord_idx] += eps
+            edge_B_minus = edge_B_np.copy()
+            edge_B_minus[coord_idx] -= eps
+            
+            out_plus, _ = clip_against_edge_fwd_bwd(
+                [cp.array(poly_np, dtype=cp.float64)],
+                cp.array([edge_A_np], dtype=cp.float64),
+                cp.array([edge_B_plus], dtype=cp.float64)
+            )
+            out_minus, _ = clip_against_edge_fwd_bwd(
+                [cp.array(poly_np, dtype=cp.float64)],
+                cp.array([edge_A_np], dtype=cp.float64),
+                cp.array([edge_B_minus], dtype=cp.float64)
+            )
+            
+            if len(out_plus[0]) != len(out_polys[0]) or len(out_minus[0]) != len(out_polys[0]):
+                continue
+            
+            fd_grad = (out_plus[0].get().sum() - out_minus[0].get().sum()) / (2 * eps)
+            analytical = d_B[coord_idx]
+            error = abs(analytical - fd_grad)
+            max_error = max(max_error, error)
+            assert error < 1e-3, f"Case {idx}, edge_B coord {coord_idx}: {analytical:.6f} vs {fd_grad:.6f}"
+    
+    print(f"✓ All test cases passed, max gradient error: {max_error:.2e}")
+    print("✓ clip_against_edge test PASSED")
+
+
+# ---------------------------------------------------------------------------
+# Python API: polygon_area
+# ---------------------------------------------------------------------------
+
+def polygon_area_fwd_bwd(
+    polygons: list[cp.ndarray]  # list of (n_verts, 2) arrays
+) -> tuple[cp.ndarray, list[cp.ndarray]]:
+    """Compute polygon areas and gradients.
+    
+    Forward pass:
+        Computes signed area using shoelace formula, returns absolute value
+    
+    Backward pass:
+        Computes gradients w.r.t. all vertices (assuming upstream gradient = 1.0)
+    
+    Parameters
+    ----------
+    polygons : list of cp.ndarray
+        Each element is shape (n_verts, 2), dtype float64
+        Vertices of a convex polygon
+    
+    Returns
+    -------
+    areas : cp.ndarray, shape (batch,), dtype float64
+        Area of each polygon
+    gradients : list of cp.ndarray
+        Each element is shape (n_verts, 2) - gradient w.r.t. vertices
+    
+    Notes
+    -----
+    - All polygons must have <= MAX_VERTS_PER_PIECE vertices
+    - Gradients computed w.r.t. upstream gradient d_area = 1.0
+    """
+    _ensure_initialized()
+    
+    batch_size = len(polygons)
+    if batch_size == 0:
+        return cp.array([], dtype=cp.float64), []
+    
+    # Determine max_n_verts
+    max_n_verts = max(poly.shape[0] for poly in polygons)
+    if max_n_verts > 4:  # MAX_VERTS_PER_PIECE
+        raise ValueError(f"Polygon has {max_n_verts} vertices, max is 4")
+    
+    # Prepare inputs
+    n_verts_list = [poly.shape[0] for poly in polygons]
+    n_verts = cp.array(n_verts_list, dtype=cp.int32)
+    
+    # Flatten vertices
+    verts_flat = cp.zeros((batch_size, max_n_verts * 2), dtype=cp.float64)
+    for i, poly in enumerate(polygons):
+        n = poly.shape[0]
+        verts_flat[i, :n*2] = poly.flatten()
+    
+    # Allocate outputs
+    areas = cp.zeros(batch_size, dtype=cp.float64)
+    d_verts_flat = cp.zeros((batch_size, max_n_verts * 2), dtype=cp.float64)
+    
+    # Launch kernel
+    threads_per_block = 256
+    blocks = (batch_size + threads_per_block - 1) // threads_per_block
+    
+    _polygon_area_kernel(
+        (blocks,), (threads_per_block,),
+        (verts_flat, n_verts, batch_size, max_n_verts, areas, d_verts_flat)
+    )
+    
+    # Extract gradients
+    gradients = []
+    for i in range(batch_size):
+        n = n_verts_list[i]
+        d_verts = d_verts_flat[i, :n*2].reshape(n, 2)
+        gradients.append(d_verts)
+    
+    return areas, gradients
+
+
+# ---------------------------------------------------------------------------
+# Test Functions
+# ---------------------------------------------------------------------------
+
+def test_polygon_area():
+    """Test polygon_area and backward_polygon_area using finite differences."""
+    print("\n=== Testing polygon_area ===")
+    
+    eps = 1e-6
+    max_error = 0.0
+    
+    # Fixed test cases
+    test_cases = [
+        # Square
+        np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+        # Triangle
+        np.array([[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]),
+        # Rectangle
+        np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]]),
+    ]
+    
+    # Add random test cases
+    np.random.seed(456)
+    for _ in range(10):
+        n_verts = np.random.randint(3, 5)
+        # Generate random convex polygon by sorting angles
+        angles = np.sort(np.random.uniform(0, 2*np.pi, n_verts))
+        radii = np.random.uniform(0.5, 2.0, n_verts)
+        verts = np.column_stack([
+            radii * np.cos(angles),
+            radii * np.sin(angles)
+        ])
+        test_cases.append(verts)
+    
+    # Test each case
+    for idx, poly_np in enumerate(test_cases):
+        poly_gpu = cp.array(poly_np, dtype=cp.float64)
+        
+        # Forward + backward
+        areas, grads = polygon_area_fwd_bwd([poly_gpu])
+        area = float(areas[0])
+        d_verts = grads[0].get()
+        
+        n_verts = poly_np.shape[0]
+        
+        # Finite difference for each vertex coordinate
+        for vert_idx in range(n_verts):
+            for coord_idx in range(2):
+                poly_plus = poly_np.copy()
+                poly_plus[vert_idx, coord_idx] += eps
+                poly_minus = poly_np.copy()
+                poly_minus[vert_idx, coord_idx] -= eps
+                
+                areas_plus, _ = polygon_area_fwd_bwd([cp.array(poly_plus, dtype=cp.float64)])
+                areas_minus, _ = polygon_area_fwd_bwd([cp.array(poly_minus, dtype=cp.float64)])
+                
+                fd_grad = (float(areas_plus[0]) - float(areas_minus[0])) / (2 * eps)
+                analytical = d_verts[vert_idx, coord_idx]
+                error = abs(analytical - fd_grad)
+                max_error = max(max_error, error)
+                assert error < 1e-4, f"Case {idx}, vertex {vert_idx}, coord {coord_idx}: {analytical:.6f} vs {fd_grad:.6f}"
+    
+    print(f"✓ All {len(test_cases)} cases passed, max gradient error: {max_error:.2e}")
+    print("✓ polygon_area test PASSED")
+
+
+def run_all_tests():
+    """Run all primitive tests."""
+    test_line_intersection()
+    test_clip_against_edge()
+    test_polygon_area()
+
 
 if __name__ == "__main__":
     run_all_tests()
