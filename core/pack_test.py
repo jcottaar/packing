@@ -9,9 +9,11 @@ import pack_cost
 import pack_basics
 import pack_vis
 import pack_cuda
+import pack_cuda_primitives
 pack_cuda.USE_FLOAT32 = True
 
 def run_all_tests():
+    pack_cuda_primitives.run_all_tests()
     test_costs()
     print("All tests passed.")
 
@@ -151,3 +153,6 @@ def test_costs():
                 f"Vectorized fast bound grad mismatch for {c.__class__.__name__} tree {i}"
         
         print(f"  ✓ Vectorized results exactly match individual calls")
+
+if __name__ == "__main__":
+    run_all_tests()
