@@ -15,73 +15,66 @@ class Cost(kgs.BaseClass):
     scaling:float = field(init=True, default=1.0)
 
     @typechecked 
-    def compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+    def compute_cost_ref(self, sol:kgs.SolutionCollection):
         # xyt: (n_ensemble, n_trees, 3) array
         #bound: (n_ensemble, 1 or 3) array
-        assert(xyt.shape[2]==3)  # x, y, theta
-        N_ensembles = xyt.shape[0]
-        assert(bound.shape == (N_ensembles,1) or bound.shape == (N_ensembles,3)) # 1: square bound, 3: periodic bound      
-        cost,grad_xyt,grad_bound = self._compute_cost_ref(xyt,bound)
-        assert cost.shape == (N_ensembles,)
-        assert grad_xyt.shape == xyt.shape
-        assert grad_bound.shape == bound.shape 
+        sol.check_constraints()                
+        cost,grad_xyt,grad_bound = self._compute_cost_ref(sol)
+        assert cost.shape == (sol.N_solutions,)
+        assert grad_xyt.shape == sol.xyt.shape
+        assert grad_bound.shape == sol.h.shape 
         return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
     
-    def _compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
-        N_ensembles = xyt.shape[0]
-        cost = cp.zeros(N_ensembles)
-        grad_xyt = cp.zeros_like(xyt)
-        grad_bound = cp.zeros_like(bound)
-        for i in range(N_ensembles):
-            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(xyt[i], bound[i])
+    def _compute_cost_ref(self, sol:kgs.SolutionCollection):        
+        cost = cp.zeros(sol.N_solutions)
+        grad_xyt = cp.zeros_like(sol.xyt)
+        grad_bound = cp.zeros_like(sol.h)
+        for i in range(sol.N_solutions):
+            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(sol, sol.xyt[i], sol.h[i])
         return cost,grad_xyt,grad_bound
         
-    def compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
+    def compute_cost(self, sol:kgs.SolutionCollection):
         # Subclass can implement faster version
-        N_ensembles = xyt.shape[0]
-        cost,grad_xyt,grad_bound =  self._compute_cost(xyt, bound)
-        assert cost.shape == (N_ensembles,)
-        assert grad_xyt.shape == xyt.shape
-        assert grad_bound.shape == bound.shape 
+        cost,grad_xyt,grad_bound =  self._compute_cost(sol)
+        assert cost.shape == (sol.N_solutions,)
+        assert grad_xyt.shape == sol.xyt.shape
+        assert grad_bound.shape == sol.h.shape 
         return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
     
-    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
-        # Subclass can implement faster version
-        N_ensembles = xyt.shape[0]
-        cost = cp.zeros(N_ensembles)
-        grad_xyt = cp.zeros_like(xyt)
-        grad_bound = cp.zeros_like(bound)
-        for i in range(N_ensembles):
-            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(xyt[i], bound[i])
-        return cost,grad_xyt,grad_bound
+    def _compute_cost(self, sol:kgs.SolutionCollection):
+        # Subclass can implement faster version[0]
+        cost = cp.zeros(sol.N_solutions)
+        grad_xyt = cp.zeros_like(sol.xyt)
+        grad_bound = cp.zeros_like(sol.h)
+        for i in range(sol.N_solutions):
+            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol, sol.xyt[i], sol.h[i])
+        return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
     
-    def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
-        return self._compute_cost_single_ref(xyt, bound)
+    def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h):
+        return self._compute_cost_single_ref(sol, xyt, h)
 
 @dataclass 
 class CostCompound(Cost):
     # Compound cost: sum of multiple costs
     costs:list = field(init=True, default_factory=list)
 
-    def _compute_cost_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
-        N_ensembles = xyt.shape[0]
-        total_cost = cp.zeros(N_ensembles)
-        total_grad = cp.zeros_like(xyt)
-        total_grad_bound = cp.zeros_like(bound)
+    def _compute_cost_ref(self, sol:kgs.SolutionCollection):
+        total_cost = cp.zeros(sol.N_solutions)
+        total_grad = cp.zeros_like(sol.xyt)
+        total_grad_bound = cp.zeros_like(sol.h)
         for c in self.costs:
-            c_cost, c_grad, c_grad_bound = c.compute_cost_ref(xyt, bound)
+            c_cost, c_grad, c_grad_bound = c.compute_cost_ref(sol)
             total_cost += c_cost
             total_grad += c_grad
             total_grad_bound += c_grad_bound
         return total_cost, total_grad, total_grad_bound
 
-    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
-        N_ensembles = xyt.shape[0]
-        total_cost = cp.zeros(N_ensembles)
-        total_grad = cp.zeros_like(xyt)
-        total_grad_bound = cp.zeros_like(bound)
+    def _compute_cost(self, sol:kgs.SolutionCollection):
+        total_cost = cp.zeros(sol.N_solutions)
+        total_grad = cp.zeros_like(sol.xyt)
+        total_grad_bound = cp.zeros_like(sol.h)
         for c in self.costs:
-            c_cost, c_grad, c_grad_bound = c.compute_cost(xyt, bound)
+            c_cost, c_grad, c_grad_bound = c.compute_cost(sol)
             total_cost += c_cost
             total_grad += c_grad
             total_grad_bound += c_grad_bound
@@ -90,16 +83,15 @@ class CostCompound(Cost):
 @dataclass
 class CostDummy(Cost):
     # Dummy: always zero cost
-    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
-        return cp.array(0.0), cp.zeros_like(xyt), cp.zeros_like(bound)
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
+        return cp.array(0.0), cp.zeros_like(xyt), cp.zeros_like(h)
 
 @dataclass    
 class CollisionCost(Cost):
     
-    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
         # Compute collision cost for all pairs of trees
-        assert(xyt.shape[1]==3)  # x, y, theta
-        n_trees = xyt.shape[0]
+        n_trees = sol.N_trees
         tree_list = kgs.TreeList()
         tree_list.xyt = xyt
         trees = tree_list.get_trees()
@@ -113,7 +105,7 @@ class CollisionCost(Cost):
             this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees)        
             total_cost += this_cost/2
             total_grad[i] += this_grads
-        return total_cost, total_grad, cp.zeros_like(bound)
+        return total_cost, total_grad, cp.zeros_like(h)
     
 class CollisionCostOverlappingArea(CollisionCost):
     # Collision cost based on overlapping area of two trees
@@ -136,24 +128,22 @@ class CollisionCostOverlappingArea(CollisionCost):
                 grad[j] = cp.array((area_plus - area_minus) / (2 * epsilon))
         return area, grad
 
-    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
-        cost,grad = pack_cuda.overlap_multi_ensemble(xyt, xyt)
-        return cost,cp.array(grad),cp.zeros_like(bound)
+    def _compute_cost(self, sol:kgs.SolutionCollection):
+        cost,grad = pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt)
+        return cost,cp.array(grad),cp.zeros_like(sol.h)
     
 
 @dataclass
 class BoundaryCost(Cost):
     # Cost for trees being out of bounds
-    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
-        assert(bound.shape[0]==1) #other case todo
-        # xyt is (n_trees, 3), bound is (1,); compute area outside square using union of all tree geometries
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):        
         # Use TreeList.get_trees() to build geometries and perform a single difference against the square (vectorized).
-        b = float(bound[0].get().item())
+        b = float(h[0].get().item())
         half = b / 2.0
         square = Polygon([(-half, -half), (half, -half), (half, half), (-half, half)])
 
         tree_list = kgs.TreeList()
-        tree_list.xyt = xyt
+        tree_list.xyt = xyt.get()
         trees = tree_list.get_trees()
 
         n_trees = xyt.shape[0]
@@ -192,7 +182,7 @@ class BoundaryCost(Cost):
                 grad[i, j] = cp.array(grad_val)
 
         # Compute gradient w.r.t. bound using finite differences
-        grad_bound = cp.zeros_like(bound)
+        grad_bound = cp.zeros_like(h)
         b_plus = b + epsilon
         b_minus = b - epsilon
         half_plus = b_plus / 2.0
@@ -206,37 +196,35 @@ class BoundaryCost(Cost):
 
         return cp.array(area), grad, grad_bound
     
-    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
-        cost,grad,grad_h = pack_cuda.boundary_multi_ensemble(xyt, bound[:,0], compute_grad=True)
+    def _compute_cost(self, sol:kgs.SolutionCollection):
+        cost,grad,grad_h = pack_cuda.boundary_multi_ensemble(sol.xyt, sol.h[:,0], compute_grad=True)
         return cost,grad,grad_h[:,None]
 
 @dataclass 
 class AreaCost(Cost):
-    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
-        assert(bound.shape[0]==1) #other case todo
-        cost = bound[0]**2
-        grad_bound = cp.array([2.0*bound[0]])
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
+        cost = h[0]**2
+        grad_bound = cp.array([2.0*h[0]])
         return cost, cp.zeros_like(xyt), grad_bound
     
-    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
-        cost = bound[:,0]**2
-        grad_bound = cp.zeros_like(bound)
-        grad_bound[:,0] = 2.0*bound[:,0]
-        return cost, cp.zeros_like(xyt), grad_bound
+    def _compute_cost(self, sol:kgs.SolutionCollection):
+        cost = sol.h[:,0]**2
+        grad_bound = cp.zeros_like(sol.h)
+        grad_bound[:,0] = 2.0*sol.h[:,0]
+        return cost, cp.zeros_like(sol.xyt), grad_bound
 
 @dataclass
 class BoundaryDistanceCost(Cost):
     use_kernel : bool = field(init=True, default=True)
     # Cost based on squared distance of vertices outside the square boundary
     # Per tree, use only the vertex with the maximum distance
-    def _compute_cost_single_ref(self, xyt:cp.ndarray, bound:cp.ndarray):
-        assert(bound.shape[0]==1) #other case todo
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt,h):
         # xyt is (n_trees, 3), bound is (1,); compute squared distance for each vertex outside square
-        b = float(bound[0].get().item())
+        b = float(h[0].get().item())
         half = b / 2.0
         
         tree_list = kgs.TreeList()
-        tree_list.xyt = xyt
+        tree_list.xyt = xyt.get()
         trees = tree_list.get_trees()
         
         n_trees = xyt.shape[0]
@@ -308,7 +296,7 @@ class BoundaryDistanceCost(Cost):
                 grad[i, j] = cp.array(grad_val)
         
         # Compute gradient w.r.t. bound using finite differences
-        grad_bound = cp.zeros_like(bound)
+        grad_bound = cp.zeros_like(h)
         b_plus = b + epsilon
         b_minus = b - epsilon
         half_plus = b_plus / 2.0
@@ -343,18 +331,18 @@ class BoundaryDistanceCost(Cost):
         
         return cp.array(total_cost), grad, grad_bound
     
-    def _compute_cost(self, xyt:cp.ndarray, bound:cp.ndarray):
+    def _compute_cost(self, sol:kgs.SolutionCollection):
         if self.use_kernel:
-            cost,grad,grad_h = pack_cuda.boundary_distance_multi_ensemble(xyt, bound[:,0], compute_grad=True)
+            cost,grad,grad_h = pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h[:,0], compute_grad=True)
             return cost,grad,grad_h[:,None]
         else:
-            return super()._compute_cost(xyt, bound)
+            return super()._compute_cost(sol)
             
-    def _compute_cost_single(self, xyt:cp.ndarray, bound:cp.ndarray):
-        assert(bound.shape[0]==1) #other case todo
+    def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h):
         # xyt is (n_trees, 3), bound is (1,)
         # Use kgs.tree_vertices (precomputed center tree vertices) for efficient vectorized computation
-        b = float(bound[0].get().item())
+    
+        b = float(h[0].get().item())
         half = b / 2.0
         
         n_trees = xyt.shape[0]

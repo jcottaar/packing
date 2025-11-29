@@ -325,4 +325,30 @@ class TreeList(BaseClass):
         return trees
     
 '''Metric'''
+@dataclass
+class SolutionCollection(BaseClass):
+    xyt: cp.ndarray = field(default=None)  # (N,3) array of tree positions and angles
+    h: cp.ndarray = field(default=None)      # size of the trees
 
+    # add N_solutions and N_trees properties
+    @property
+    def N_solutions(self) -> int:
+        """Number of solution rows in xyt (N_solutions)."""
+        if self.xyt is None:
+            return 0
+        arr = to_cpu(self.xyt)
+        return int(np.asarray(arr).shape[0])
+
+    @property
+    def N_trees(self) -> int:
+        """Number of trees per solution (N_trees)."""
+        if self.xyt is None:
+            return 0
+        arr = to_cpu(self.xyt)
+        return int(np.asarray(arr).shape[1])
+
+
+    def _check_constraints(self):
+        if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
+            raise ValueError("Solution: xyt must be an array with shape (N_solutions, N_trees, 3)")
+        assert self.h.shape == (self.xyt.shape[0],1)

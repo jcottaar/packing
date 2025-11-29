@@ -43,14 +43,20 @@ def test_costs():
         for t, b in zip(tree_list, bounds):
             xyt_single = cp.array(t.xyt[None])
             b_single = b[None]
+            sol_single = kgs.SolutionCollection()
+            sol_single.xyt = xyt_single
+            sol_single.h = b_single
             
             # Store for vectorized check
             all_xyt.append(xyt_single)
             all_bounds.append(b_single)
             
-            # First, check that compute_cost and compute_cost_ref agree
-            cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(xyt_single, b_single)
-            cost_fast, grad_fast, grad_bound_fast = c.compute_cost(cp.array(xyt_single,dtype=cp.float32), cp.array(b_single,dtype=cp.float32))
+            # First, check that compute_cost and compute_cost_ref agree (new API: accept SolutionCollection)
+            cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(sol_single)
+            sol_fast = kgs.SolutionCollection()
+            sol_fast.xyt = cp.array(xyt_single,dtype=cp.float32)
+            sol_fast.h = cp.array(b_single,dtype=cp.float32)
+            cost_fast, grad_fast, grad_bound_fast = c.compute_cost(sol_fast)
             
             # Store all outputs
             all_ref_outputs.append((cost_ref, grad_ref, grad_bound_ref))
@@ -68,7 +74,10 @@ def test_costs():
 
             # Now check gradients via finite differences
             def _get_cost(obj, xyt_arr):
-                return obj.compute_cost_ref(cp.array(xyt_arr[None]), b_single)[0]
+                sol_tmp = kgs.SolutionCollection()
+                sol_tmp.xyt = cp.array(xyt_arr[None])
+                sol_tmp.h = b_single
+                return obj.compute_cost_ref(sol_tmp)[0]
 
             x0 = t.xyt.copy()
             shape = x0.shape
@@ -93,7 +102,10 @@ def test_costs():
 
             # Check bound gradient via finite differences
             def _get_cost_bound(obj, bound_arr):
-                return obj.compute_cost_ref(xyt_single, cp.array(bound_arr[None]))[0]
+                sol_tmp = kgs.SolutionCollection()
+                sol_tmp.xyt = xyt_single
+                sol_tmp.h = cp.array(bound_arr[None])
+                return obj.compute_cost_ref(sol_tmp)[0]
 
             b0 = b.copy()
             bound_shape = b0.shape
@@ -119,10 +131,17 @@ def test_costs():
         print(f"  Vectorized check for {c.__class__.__name__}")
         full_xyt = cp.concatenate(all_xyt, axis=0)
         full_bounds = cp.concatenate(all_bounds, axis=0)
-        
-        # Compute vectorized results
-        vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_xyt, full_bounds)
-        vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost(cp.array(full_xyt,dtype=cp.float32), cp.array(full_bounds,dtype=cp.float32))
+        print(full_bounds)
+
+        # Compute vectorized results using kgs.SolutionCollection
+        full_sol = kgs.SolutionCollection()
+        full_sol.xyt = full_xyt
+        full_sol.h = full_bounds
+        vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_sol)
+        full_sol_fast = kgs.SolutionCollection()
+        full_sol_fast.xyt = cp.array(full_xyt,dtype=cp.float32)
+        full_sol_fast.h = cp.array(full_bounds,dtype=cp.float32)
+        vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost(full_sol_fast)
         
         # Check each tree's results
         for i in range(len(tree_list)):
