@@ -158,34 +158,47 @@ class CollisionCostSeparation(CollisionCost):
     # Only overlapping pairs contribute (separated pairs have zero cost)
     # Separation distance = minimum distance trees must move to no longer overlap
     
-    def _compute_separation_distance_with_grad(self, poly1: Polygon, poly2: Polygon):
+
+    def _compute_separation_distance_with_vertex_grads(self, poly1: Polygon, poly2: Polygon):
         """
-        Compute minimum separation distance (penetration depth) and its gradient.
-        Returns: (separation_distance, grad_direction)
-        
-        For two overlapping polygons, finds the minimum distance one must move to separate.
-        Uses Separating Axis Theorem (SAT): minimum penetration across all edge normals.
-        
-        The gradient direction is the negative of the MTV (since moving poly1 in that 
-        direction INCREASES separation, which DECREASES penetration/cost).
+        Compute minimum separation distance (penetration depth) and its gradients
+        w.r.t. the vertices of poly1.
+
+        Returns:
+            penetration: float
+                Minimum penetration depth (0 if no overlap).
+            grads: np.ndarray or None, shape (N, 2)
+                Derivatives d(penetration) / d(vertex_coords) for poly1.
+                N is the number of vertices of poly1 (excluding the closing vertex).
+                Will be all zeros if there is no penetration.
         """
+        # Early exit: no overlap => zero cost, zero gradient
         if not poly1.intersects(poly2):
-            return 0.0, None
-        
+            coords1 = np.array(poly1.exterior.coords[:-1])
+            grads = np.zeros_like(coords1, dtype=float)
+            return 0.0, grads
+
         overlap = poly1.intersection(poly2)
         if overlap.is_empty or overlap.area < 1e-10:
-            return 0.0, None
-        
+            coords1 = np.array(poly1.exterior.coords[:-1])
+            grads = np.zeros_like(coords1, dtype=float)
+            return 0.0, grads
+
         # Get vertices of both polygons
         coords1 = np.array(poly1.exterior.coords[:-1])  # Exclude closing vertex
         coords2 = np.array(poly2.exterior.coords[:-1])
-        
+
         if len(coords1) < 3 or len(coords2) < 3:
-            return 0.0, None
-        
+            grads = np.zeros_like(coords1, dtype=float)
+            return 0.0, grads
+
         min_penetration = np.inf
-        best_grad_direction = None
-        
+
+        # Data for the "active" axis / configuration that gives the minimum penetration
+        best_normal = None        # unit normal (axis)
+        best_case = None          # "pen1" or "pen2"
+        best_indices = None       # indices of critical vertices in poly1
+
         # Check all edge normals from both polygons
         for coords in [coords1, coords2]:
             for i in range(len(coords)):
@@ -193,47 +206,80 @@ class CollisionCostSeparation(CollisionCost):
                 p1 = coords[i]
                 p2 = coords[(i + 1) % len(coords)]
                 edge = p2 - p1
-                
+
                 # Get perpendicular (normal)
-                normal = np.array([-edge[1], edge[0]])
+                normal = np.array([-edge[1], edge[0]], dtype=float)
                 norm_length = np.linalg.norm(normal)
                 if norm_length < 1e-10:
                     continue
-                normal = normal / norm_length
-                
+                normal = normal / norm_length  # unit axis
+
                 # Project both polygons onto this axis
                 proj1 = coords1 @ normal
                 proj2 = coords2 @ normal
-                
+
                 min1, max1 = proj1.min(), proj1.max()
                 min2, max2 = proj2.min(), proj2.max()
-                
-                # Check for separation
+
+                # Check for separation on this axis (no overlap in 1D)
                 if max1 < min2 or max2 < min1:
                     continue
-                
-                # Compute penetration along this axis
-                # penetration = overlap amount on this axis
-                penetration = min(max1 - min2, max2 - min1)
-                
+
+                # 1D penetration candidates on this axis:
+                # Option 1: move poly1 along -normal until max1 <= min2
+                pen1 = max1 - min2  # translation magnitude along -normal
+                # Option 2: move poly1 along +normal until min1 >= max2
+                pen2 = max2 - min1  # translation magnitude along +normal
+
+                penetration = min(pen1, pen2)
+
                 if penetration < min_penetration:
                     min_penetration = penetration
-                    
-                    # Determine gradient direction for poly1
-                    # We want d(separation)/d(poly1_position)
-                    # Moving poly1 in direction that increases its max projection
-                    # on the axis where it has the smaller max decreases overlap
-                    if max1 < max2:
-                        # poly1's max is limiting, move in positive normal direction
-                        best_grad_direction = normal.copy()
+
+                    # Determine which case is active and which vertices in poly1 are critical
+                    # (ties handled by sharing gradient among all extremal vertices)
+                    eps = 1e-12  # tolerance to catch ties due to floating point
+
+                    if pen1 <= pen2:
+                        # Active configuration: penetration governed by max1 vs min2
+                        best_case = "pen1"
+                        best_normal = normal.copy()
+                        max1_val = max1
+                        # indices of vertices achieving max projection
+                        best_indices = np.where(np.abs(proj1 - max1_val) <= eps)[0]
                     else:
-                        # poly2's max is limiting (or poly1's min), move in negative direction
-                        best_grad_direction = -normal.copy()
-        
-        if min_penetration == np.inf:
-            return 0.0, None
-        
-        return float(min_penetration), best_grad_direction
+                        # Active configuration: penetration governed by max2 vs min1
+                        best_case = "pen2"
+                        best_normal = normal.copy()
+                        min1_val = min1
+                        # indices of vertices achieving min projection
+                        best_indices = np.where(np.abs(proj1 - min1_val) <= eps)[0]
+
+        # If no finite penetration was found (shouldn't happen if they overlap, but be safe)
+        if not np.isfinite(min_penetration) or best_normal is None or best_case is None:
+            grads = np.zeros_like(coords1, dtype=float)
+            return 0.0, grads
+
+        # Build per-vertex gradients: d(penetration)/d vertex_coords for poly1
+        grads = np.zeros_like(coords1, dtype=float)
+
+        # We share the gradient among all vertices that are extremal along the active axis
+        if best_indices is not None and len(best_indices) > 0:
+            share = 1.0 / float(len(best_indices))
+
+            if best_case == "pen1":
+                # penetration = pen1 = max1 - min2
+                # d(penetration)/dv_i = normal for vertices at max1, 0 otherwise
+                contrib = best_normal * share
+            else:  # best_case == "pen2"
+                # penetration = pen2 = max2 - min1
+                # d(penetration)/dv_i = -normal for vertices at min1, 0 otherwise
+                contrib = -best_normal * share
+
+            for idx in best_indices:
+                grads[idx] = contrib
+
+        return float(min_penetration), grads
     
     def _compute_separation_distance(self, poly1: Polygon, poly2: Polygon) -> float:
         """Backward compatible version that only returns the distance."""
@@ -252,30 +298,42 @@ class CollisionCostSeparation(CollisionCost):
         for other_tree in tree2:
             # Check if overlapping
             if tree1.intersects(other_tree):
-                separation = self._compute_separation_distance(tree1, other_tree)
-                sep_squared = separation ** 2
+                # Use analytical vertex gradients returned by
+                # `_compute_separation_distance_with_vertex_grads` for X and Y.
+                sep, vertex_grads = self._compute_separation_distance_with_vertex_grads(tree1, other_tree)
+                sep_squared = sep ** 2
                 total_sep_squared += sep_squared
-                
-                # Compute gradient via finite differences
+
+                # Build gradient array: use vertex-derived analytical gradients for x and y,
+                # and retain finite-difference for theta.
                 grad = cp.zeros_like(xyt1)
+
+                # d(sep)/dx is sum over vertex d(sep)/d(vertex_x)
+                dsep_dx = float(np.sum(vertex_grads[:, 0]))
+                dsep_dy = float(np.sum(vertex_grads[:, 1]))
+
+                # d(sep^2)/dx = 2 * sep * dsep/dx  (and similarly for y)
+                grad[0] = cp.array(2.0 * sep * dsep_dx)
+                grad[1] = cp.array(2.0 * sep * dsep_dy)
+
+                # Finite-difference for theta only
                 epsilon = 1e-4
-                for j in range(3):  # x, y, theta
-                    xyt1_plus = xyt1.copy()
-                    xyt1_minus = xyt1.copy()
-                    xyt1_plus[j] += epsilon
-                    xyt1_minus[j] -= epsilon
-                    tree1_plus = kgs.create_tree(xyt1_plus[0].get().item(), xyt1_plus[1].get().item(), xyt1_plus[2].get().item()*360/2/np.pi)
-                    tree1_minus = kgs.create_tree(xyt1_minus[0].get().item(), xyt1_minus[1].get().item(), xyt1_minus[2].get().item()*360/2/np.pi)
-                    
-                    # Cost for plus perturbation
-                    sep_plus = self._compute_separation_distance(tree1_plus, other_tree)
-                    sep_squared_plus = sep_plus ** 2
-                    
-                    # Cost for minus perturbation
-                    sep_minus = self._compute_separation_distance(tree1_minus, other_tree)
-                    sep_squared_minus = sep_minus ** 2
-                    
-                    grad[j] = cp.array((sep_squared_plus - sep_squared_minus) / (2 * epsilon))
+                # perturb theta (index 2)
+                xyt1_plus = xyt1.copy()
+                xyt1_minus = xyt1.copy()
+                xyt1_plus[2] += epsilon
+                xyt1_minus[2] -= epsilon
+                tree1_plus = kgs.create_tree(xyt1_plus[0].get().item(), xyt1_plus[1].get().item(), xyt1_plus[2].get().item()*360/2/np.pi)
+                tree1_minus = kgs.create_tree(xyt1_minus[0].get().item(), xyt1_minus[1].get().item(), xyt1_minus[2].get().item()*360/2/np.pi)
+
+                # Use the vertex-graded separation function to compute scalar separations
+                sep_plus, _ = self._compute_separation_distance_with_vertex_grads(tree1_plus, other_tree)
+                sep_minus, _ = self._compute_separation_distance_with_vertex_grads(tree1_minus, other_tree)
+
+                sep_sq_plus = sep_plus ** 2
+                sep_sq_minus = sep_minus ** 2
+                grad[2] = cp.array((sep_sq_plus - sep_sq_minus) / (2 * epsilon))
+
                 total_grad += grad
             # Separated trees contribute zero cost, so we skip them
         
