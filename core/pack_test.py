@@ -10,8 +10,7 @@ import pack_basics
 import pack_vis
 import pack_cuda
 import pack_cuda_primitives_test
-pack_cuda.USE_FLOAT32 = False
-print('Back to 64!')
+pack_cuda.USE_FLOAT32 = True
 
 def run_all_tests():
     kgs.debugging_mode = 2
@@ -57,8 +56,8 @@ def test_costs():
             # First, check that compute_cost and compute_cost_ref agree (new API: accept SolutionCollection)
             cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(sol_single)
             sol_fast = kgs.SolutionCollection()
-            sol_fast.xyt = cp.array(xyt_single,dtype=cp.float64)
-            sol_fast.h = cp.array(b_single,dtype=cp.float64)
+            sol_fast.xyt = cp.array(xyt_single,dtype=cp.float32)
+            sol_fast.h = cp.array(b_single,dtype=cp.float32)
             cost_fast, grad_fast, grad_bound_fast = c.compute_cost_allocate(sol_fast)
             
             # Store all outputs
@@ -101,7 +100,6 @@ def test_costs():
 
             grad_fast_flat = cp.asarray(grad_fast).ravel()
             max_diff = cp.max(cp.abs(grad_num - grad_fast_flat)).get().item()
-            print(grad_num, grad_fast_flat)
             assert cp.allclose(grad_num, grad_fast_flat, rtol=1e-2, atol=1e-2), f"Finite-diff gradient mismatch (max diff {max_diff})"
 
             # Check bound gradient via finite differences
@@ -109,7 +107,7 @@ def test_costs():
                 sol_tmp = kgs.SolutionCollection()
                 sol_tmp.xyt = xyt_single
                 sol_tmp.h = cp.array(bound_arr[None])
-                return obj.compute_cost_allocate(sol_tmp)[0]
+                return obj.compute_cost_ref(sol_tmp)[0]
 
             b0 = b.copy()
             bound_shape = b0.shape
@@ -143,8 +141,8 @@ def test_costs():
         full_sol.h = full_bounds
         vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_sol)
         full_sol_fast = kgs.SolutionCollection()
-        full_sol_fast.xyt = cp.array(full_xyt,dtype=cp.float64)
-        full_sol_fast.h = cp.array(full_bounds,dtype=cp.float64)
+        full_sol_fast.xyt = cp.array(full_xyt,dtype=cp.float32)
+        full_sol_fast.h = cp.array(full_bounds,dtype=cp.float32)
         vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)
         
         # Check each tree's results
