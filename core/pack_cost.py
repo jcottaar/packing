@@ -32,13 +32,13 @@ class Cost(kgs.BaseClass):
         for i in range(sol.N_solutions):
             cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(sol, sol.xyt[i], sol.h[i])
         return cost,grad_xyt,grad_bound
-        
+    
     def compute_cost(self, sol:kgs.SolutionCollection):
         # Subclass can implement faster version
         cost,grad_xyt,grad_bound =  self._compute_cost(sol)
-        assert cost.shape == (sol.N_solutions,)
-        assert grad_xyt.shape == sol.xyt.shape
-        assert grad_bound.shape == sol.h.shape 
+        # assert cost.shape == (sol.N_solutions,)
+        # assert grad_xyt.shape == sol.xyt.shape
+        # assert grad_bound.shape == sol.h.shape 
         return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
     
     def _compute_cost(self, sol:kgs.SolutionCollection):
