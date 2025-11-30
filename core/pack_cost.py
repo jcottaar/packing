@@ -151,12 +151,14 @@ class CollisionCostOverlappingArea(CollisionCost):
         pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, out_cost=cost, out_grads=grad_xyt)
         grad_bound[:] = 0
 
-
+@dataclass
 class CollisionCostSeparation(CollisionCost):
     # Collision cost based on minimum separation distance between trees
     # Cost = sum(separation_distance^2) over all pairwise overlaps
     # Only overlapping pairs contribute (separated pairs have zero cost)
     # Separation distance = minimum distance trees must move to no longer overlap
+
+    use_max:bool = field(init=True, default=True)
     
     def _compute_separation_distance_with_critical_vertex_grad(
         self,
@@ -197,30 +199,24 @@ class CollisionCostSeparation(CollisionCost):
             Derivative of sep wrt rotation th1 of poly1.
         """
 
-        # Early exit: no overlap => zero cost, zero gradient
-        if not poly1_world.intersects(poly2_world):
-            return 0.0, 0.0, 0.0, 0.0
-
         overlap = poly1_world.intersection(poly2_world)
         if overlap.is_empty or overlap.area < 1e-10:
             return 0.0, 0.0, 0.0, 0.0
 
         # Recompute world coords of poly1 piece from local coords and pose, to avoid
         # any reordering Shapely might do.
-        c = np.cos(th1)
-        s = np.sin(th1)
-        R = np.array([[c, -s],
-                    [s,  c]], dtype=float)
-        offset = np.array([x1, y1], dtype=float)
+        #c = np.cos(th1)
+        #s = np.sin(th1)
+        # R = np.array([[c, -s],
+        #             [s,  c]], dtype=float)
+        # offset = np.array([x1, y1], dtype=float)
 
-        world_coords1 = local_coords1 @ R.T + offset  # (N1, 2)
-        if world_coords1.shape[0] < 3:
-            return 0.0, 0.0, 0.0, 0.0
+        # world_coords1 = local_coords1 @ R.T + offset  # (N1, 2)
+        # if world_coords1.shape[0] < 3:
+        #     return 0.0, 0.0, 0.0, 0.0
 
-        # For poly2 we only need world coordinates; we don't need its local frame.
+        world_coords1 = np.array(poly1_world.exterior.coords[:-1])  # (N1, 2)
         coords2 = np.array(poly2_world.exterior.coords[:-1])  # (N2, 2)
-        if coords2.shape[0] < 3:
-            return 0.0, 0.0, 0.0, 0.0
 
         min_penetration = np.inf
 
@@ -447,25 +443,39 @@ class CollisionCostSeparation(CollisionCost):
                             th1=th1,
                         )
 
-                    if sep > max_sep:
-                        max_sep = sep
-                        best_dsep_dx = dsep_dx
-                        best_dsep_dy = dsep_dy
-                        best_dsep_dtheta = dsep_dtheta
+                    if self.use_max:
+                        if sep > max_sep:
+                            max_sep = sep
+                            best_dsep_dx = dsep_dx
+                            best_dsep_dy = dsep_dy
+                            best_dsep_dtheta = dsep_dtheta
+                    else:
+                        # Sum contributions over all piece-pairs instead of taking the max.
+                        if sep <= 0.0:
+                            continue
+                        # Add sep^2 contribution and its gradient 2*sep*dsep
+                        total_sep_squared += sep ** 2
+                        grad = cp.zeros_like(xyt1)
+                        grad[0] = 2.0 * sep * float(dsep_dx)
+                        grad[1] = 2.0 * sep * float(dsep_dy)
+                        grad[2] = 2.0 * sep * float(dsep_dtheta)
+                        total_grad += grad
 
-            if max_sep <= 0.0:
-                continue
+            # If using max behavior, handle the accumulated max for this other-tree.
+            if self.use_max:
+                if max_sep <= 0.0:
+                    continue
 
-            # Cost contribution: sep^2
-            total_sep_squared += max_sep ** 2
+                # Cost contribution: sep^2
+                total_sep_squared += max_sep ** 2
 
-            # Gradient of sep^2: 2 * sep * dsep/dparam
-            grad = cp.zeros_like(xyt1)
-            grad[0] = 2.0 * max_sep * best_dsep_dx
-            grad[1] = 2.0 * max_sep * best_dsep_dy
-            grad[2] = 2.0 * max_sep * best_dsep_dtheta
+                # Gradient of sep^2: 2 * sep * dsep/dparam
+                grad = cp.zeros_like(xyt1)
+                grad[0] = 2.0 * max_sep * float(best_dsep_dx)
+                grad[1] = 2.0 * max_sep * float(best_dsep_dy)
+                grad[2] = 2.0 * max_sep * float(best_dsep_dtheta)
 
-            total_grad += grad
+                total_grad += grad
 
         return cp.array(total_sep_squared), total_grad
     
