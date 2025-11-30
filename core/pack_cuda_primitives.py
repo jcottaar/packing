@@ -436,4 +436,305 @@ __device__ double convex_intersection_area(
     
     return area;
 }
+
+// Small helper for dot product
+__device__ inline double dot2(const double2& a, const double2& b) {
+    return a.x * b.x + a.y * b.y;
+}
+
+// Compute SAT penetration and gradients with respect to the pose (x,y,theta)
+// of polygon 1. Runs in a single thread.
+//
+// verts1_local: vertices of poly1 in local (tree) coords, length n1
+// verts2_world: vertices of poly2 in world coords, length n2
+// x1, y1, cos_th1, sin_th1: pose of poly1
+// Outputs: sep, dsep_dx, dsep_dy, dsep_dtheta
+__device__ void sat_separation_with_grad_pose(
+    const double2* __restrict__ verts1_local,
+    int n1,
+    const double2* __restrict__ verts2_world,
+    int n2,
+    double x1,
+    double y1,
+    double cos_th1,
+    double sin_th1,
+    double* sep,
+    double* dsep_dx,
+    double* dsep_dy,
+    double* dsep_dtheta
+)
+{
+    // Default outputs: no penetration
+    *sep         = 0.0;
+    *dsep_dx     = 0.0;
+    *dsep_dy     = 0.0;
+    *dsep_dtheta = 0.0;
+
+    if (n1 < 3 || n2 < 3) {
+        return;
+    }
+    if (n1 > MAX_VERTS_PER_PIECE || n2 > MAX_VERTS_PER_PIECE) {
+        // Out of bounds for our static buffers; optionally handle as error.
+        return;
+    }
+
+    // Precompute world-space coords for poly1 from local coords + pose.
+    double2 world1[MAX_VERTS_PER_PIECE];
+    for (int i = 0; i < n1; ++i) {
+        double lx = verts1_local[i].x;
+        double ly = verts1_local[i].y;
+        double wx =  cos_th1 * lx - sin_th1 * ly + x1;
+        double wy =  sin_th1 * lx + cos_th1 * ly + y1;
+        world1[i] = make_double2(wx, wy);
+    }
+
+    const double INF = 1.0e30;
+
+    double min_penetration = INF;
+    bool   found_axis      = false;
+
+    // Data for the active axis
+    double2 best_normal     = make_double2(0.0, 0.0); // unit normal n
+    int     best_case       = -1;  // 1 = pen1, 2 = pen2
+    int     best_v_idx      = -1;  // index of critical vertex in poly1
+    double2 best_w_world    = make_double2(0.0, 0.0); // opposing vertex in poly2
+    bool    axis_from_poly1 = false;
+
+    double proj1[MAX_VERTS_PER_PIECE];
+    double proj2[MAX_VERTS_PER_PIECE];
+
+    // ---- Test axes from poly1 edges ----
+    for (int i = 0; i < n1; ++i) {
+        double2 p1 = world1[i];
+        double2 p2 = world1[(i + 1) % n1];
+        double2 edge = make_double2(p2.x - p1.x, p2.y - p1.y);
+
+        // Perpendicular (normal)
+        double2 normal = make_double2(-edge.y, edge.x);
+        double len = sqrt(normal.x * normal.x + normal.y * normal.y);
+        if (len < 1.0e-12) {
+            continue;
+        }
+        normal.x /= len;
+        normal.y /= len;
+
+        // Project both polygons onto this axis
+        for (int k = 0; k < n1; ++k) {
+            proj1[k] = dot2(world1[k], normal);
+        }
+        for (int k = 0; k < n2; ++k) {
+            proj2[k] = dot2(verts2_world[k], normal);
+        }
+
+        // Compute intervals
+        double min1 = proj1[0], max1 = proj1[0];
+        for (int k = 1; k < n1; ++k) {
+            if (proj1[k] < min1) min1 = proj1[k];
+            if (proj1[k] > max1) max1 = proj1[k];
+        }
+        double min2 = proj2[0], max2 = proj2[0];
+        for (int k = 1; k < n2; ++k) {
+            if (proj2[k] < min2) min2 = proj2[k];
+            if (proj2[k] > max2) max2 = proj2[k];
+        }
+
+        // Check for separation on this axis
+        if (max1 < min2 || max2 < min1) {
+            continue;
+        }
+
+        // 1D penetration candidates on this axis
+        double pen1 = max1 - min2;  // move poly1 along -normal
+        double pen2 = max2 - min1;  // move poly1 along +normal
+        double penetration = (pen1 < pen2 ? pen1 : pen2);
+
+        if (penetration < min_penetration) {
+            min_penetration = penetration;
+            best_normal     = normal;
+            axis_from_poly1 = true;
+            found_axis      = true;
+
+            if (pen1 <= pen2) {
+                best_case = 1; // pen1
+                // critical vertex in poly1: max1
+                int idx_v = 0;
+                for (int k = 1; k < n1; ++k) {
+                    if (proj1[k] > proj1[idx_v]) {
+                        idx_v = k;
+                    }
+                }
+                best_v_idx = idx_v;
+                // opposing vertex in poly2: min2
+                int idx_w = 0;
+                for (int k = 1; k < n2; ++k) {
+                    if (proj2[k] < proj2[idx_w]) {
+                        idx_w = k;
+                    }
+                }
+                best_w_world = verts2_world[idx_w];
+            } else {
+                best_case = 2; // pen2
+                // critical vertex in poly1: min1
+                int idx_v = 0;
+                for (int k = 1; k < n1; ++k) {
+                    if (proj1[k] < proj1[idx_v]) {
+                        idx_v = k;
+                    }
+                }
+                best_v_idx = idx_v;
+                // opposing vertex in poly2: max2
+                int idx_w = 0;
+                for (int k = 1; k < n2; ++k) {
+                    if (proj2[k] > proj2[idx_w]) {
+                        idx_w = k;
+                    }
+                }
+                best_w_world = verts2_world[idx_w];
+            }
+        }
+    }
+
+    // ---- Test axes from poly2 edges ----
+    for (int i = 0; i < n2; ++i) {
+        double2 p1 = verts2_world[i];
+        double2 p2 = verts2_world[(i + 1) % n2];
+        double2 edge = make_double2(p2.x - p1.x, p2.y - p1.y);
+
+        double2 normal = make_double2(-edge.y, edge.x);
+        double len = sqrt(normal.x * normal.x + normal.y * normal.y);
+        if (len < 1.0e-12) {
+            continue;
+        }
+        normal.x /= len;
+        normal.y /= len;
+
+        // Project both polygons onto this axis
+        for (int k = 0; k < n1; ++k) {
+            proj1[k] = dot2(world1[k], normal);
+        }
+        for (int k = 0; k < n2; ++k) {
+            proj2[k] = dot2(verts2_world[k], normal);
+        }
+
+        double min1 = proj1[0], max1 = proj1[0];
+        for (int k = 1; k < n1; ++k) {
+            if (proj1[k] < min1) min1 = proj1[k];
+            if (proj1[k] > max1) max1 = proj1[k];
+        }
+        double min2 = proj2[0], max2 = proj2[0];
+        for (int k = 1; k < n2; ++k) {
+            if (proj2[k] < min2) min2 = proj2[k];
+            if (proj2[k] > max2) max2 = proj2[k];
+        }
+
+        if (max1 < min2 || max2 < min1) {
+            continue;
+        }
+
+        double pen1 = max1 - min2;
+        double pen2 = max2 - min1;
+        double penetration = (pen1 < pen2 ? pen1 : pen2);
+
+        if (penetration < min_penetration) {
+            min_penetration = penetration;
+            best_normal     = normal;
+            axis_from_poly1 = false;
+            found_axis      = true;
+
+            if (pen1 <= pen2) {
+                best_case = 1; // pen1
+                int idx_v = 0;
+                for (int k = 1; k < n1; ++k) {
+                    if (proj1[k] > proj1[idx_v]) {
+                        idx_v = k;
+                    }
+                }
+                best_v_idx = idx_v;
+                int idx_w = 0;
+                for (int k = 1; k < n2; ++k) {
+                    if (proj2[k] < proj2[idx_w]) {
+                        idx_w = k;
+                    }
+                }
+                best_w_world = verts2_world[idx_w];
+            } else {
+                best_case = 2; // pen2
+                int idx_v = 0;
+                for (int k = 1; k < n1; ++k) {
+                    if (proj1[k] < proj1[idx_v]) {
+                        idx_v = k;
+                    }
+                }
+                best_v_idx = idx_v;
+                int idx_w = 0;
+                for (int k = 1; k < n2; ++k) {
+                    if (proj2[k] > proj2[idx_w]) {
+                        idx_w = k;
+                    }
+                }
+                best_w_world = verts2_world[idx_w];
+            }
+        }
+    }
+
+    // No axis with overlap => polygons are separated
+    if (!found_axis || min_penetration <= 1.0e-12) {
+        return;
+    }
+
+    double sep_val = min_penetration;
+
+    // Gradient wrt critical vertex v (with axis fixed): grad_v = ±n
+    double2 grad_v;
+    if (best_case == 1) {
+        // p = max1 - min2 => ∂p/∂v = +n at max1
+        grad_v = best_normal;
+    } else { // best_case == 2
+        // p = max2 - min1 => ∂p/∂v = -n at min1
+        grad_v = make_double2(-best_normal.x, -best_normal.y);
+    }
+
+    // dsep/dx, dsep/dy (translation)
+    double d_dx = grad_v.x;  // dv/dx = [1, 0]
+    double d_dy = grad_v.y;  // dv/dy = [0, 1]
+
+    // dsep/dtheta: vertex motion + axis rotation (if axis from poly1)
+    double vx0 = verts1_local[best_v_idx].x;
+    double vy0 = verts1_local[best_v_idx].y;
+
+    double dvx_dt = -sin_th1 * vx0 - cos_th1 * vy0;
+    double dvy_dt =  cos_th1 * vx0 - sin_th1 * vy0;
+
+    double term_vertex = grad_v.x * dvx_dt + grad_v.y * dvy_dt;
+
+    double term_axis = 0.0;
+    if (axis_from_poly1) {
+        double2 v_world = world1[best_v_idx];
+        double2 w_world = best_w_world;
+
+        double2 grad_n;
+        if (best_case == 1) {
+            // p = (v - w)·n
+            grad_n = make_double2(v_world.x - w_world.x,
+                                  v_world.y - w_world.y);
+        } else {
+            // p = (w - v)·n
+            grad_n = make_double2(w_world.x - v_world.x,
+                                  w_world.y - v_world.y);
+        }
+
+        // dn/dtheta = J n,  J = [[0,-1],[1,0]]
+        double2 dn_dt = make_double2(-best_normal.y, best_normal.x);
+
+        term_axis = grad_n.x * dn_dt.x + grad_n.y * dn_dt.y;
+    }
+
+    double d_dtheta = term_vertex + term_axis;
+
+    // Write outputs
+    *sep         = sep_val;
+    *dsep_dx     = d_dx;
+    *dsep_dy     = d_dy;
+    *dsep_dtheta = d_dtheta;
+}
 """

@@ -32,6 +32,7 @@ _initialized: bool = False
 _line_intersection_kernel: cp.RawKernel | None = None
 _clip_against_edge_kernel: cp.RawKernel | None = None
 _polygon_area_kernel: cp.RawKernel | None = None
+_sat_separation_kernel: cp.RawKernel | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +91,47 @@ __global__ void test_line_intersection_fwd_bwd(
         d_q2_x[idx] = d_q2.x;
         d_q2_y[idx] = d_q2.y;
     }
+}
+
+// ============================================================================
+// TEST KERNEL: sat_separation_with_grad_pose (single instance)
+// ============================================================================
+__global__ void test_sat_separation_fwd_bwd(
+    const double* verts1_flat, const int n1,
+    const double* verts2_flat, const int n2,
+    const double x1, const double y1,
+    const double cos_th1, const double sin_th1,
+    const int compute_gradients,
+    double* out_sep,
+    double* out_dsep_dx, double* out_dsep_dy, double* out_dsep_dtheta)
+{
+    // Single-threaded invocation: only thread 0 performs work
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx != 0) return;
+
+    d2 verts1_local[MAX_VERTS_PER_PIECE];
+    for (int i = 0; i < n1; ++i) {
+        int offset = i * 2;
+        verts1_local[i] = make_double2(verts1_flat[offset], verts1_flat[offset + 1]);
+    }
+
+    d2 verts2_world[MAX_VERTS_PER_PIECE];
+    for (int i = 0; i < n2; ++i) {
+        int offset = i * 2;
+        verts2_world[i] = make_double2(verts2_flat[offset], verts2_flat[offset + 1]);
+    }
+
+    double sep_val = 0.0;
+    double dsep_dx = 0.0, dsep_dy = 0.0, dsep_dtheta = 0.0;
+
+    sat_separation_with_grad_pose(verts1_local, n1, verts2_world, n2,
+                                  x1, y1, cos_th1, sin_th1,
+                                  &sep_val, &dsep_dx, &dsep_dy, &dsep_dtheta);
+
+    out_sep[0] = sep_val;
+    out_dsep_dx[0] = dsep_dx;
+    out_dsep_dy[0] = dsep_dy;
+    out_dsep_dtheta[0] = dsep_dtheta;
 }
 
 // ============================================================================
@@ -220,7 +262,7 @@ def _ensure_initialized() -> None:
     - Loads compiled module and extracts kernel references
     """
     global _initialized, _raw_module
-    global _line_intersection_kernel, _clip_against_edge_kernel, _polygon_area_kernel
+    global _line_intersection_kernel, _clip_against_edge_kernel, _polygon_area_kernel, _sat_separation_kernel
     
     if _initialized:
         return
@@ -271,6 +313,7 @@ def _ensure_initialized() -> None:
     _line_intersection_kernel = _raw_module.get_function("test_line_intersection_fwd_bwd")
     _clip_against_edge_kernel = _raw_module.get_function("test_clip_against_edge_fwd_bwd")
     _polygon_area_kernel = _raw_module.get_function("test_polygon_area_fwd_bwd")
+    _sat_separation_kernel = _raw_module.get_function("test_sat_separation_fwd_bwd")    
     
     _initialized = True
     print("Initialization complete!")
@@ -948,6 +991,54 @@ def polygon_area_fwd_bwd(
         return areas, None
 
 
+def sat_separation_with_grad_pose_fwd_bwd(
+    verts1: cp.ndarray,  # shape (n1, 2)
+    verts2: cp.ndarray,  # shape (n2, 2)
+    x1: float, y1: float, cos_th1: float, sin_th1: float,
+    compute_gradients: bool = True
+):
+    """Expose sat_separation_with_grad_pose via a single-thread test kernel.
+
+    Minimal wrapper (no input validation). Allocates outputs.
+    """
+    _ensure_initialized()
+
+    n1 = int(verts1.shape[0])
+    n2 = int(verts2.shape[0])
+
+    verts1_flat = cp.zeros((n1 * 2,), dtype=cp.float64)
+    verts1_flat[:n1*2] = verts1.flatten()
+
+    verts2_flat = cp.zeros((n2 * 2,), dtype=cp.float64)
+    verts2_flat[:n2*2] = verts2.flatten()
+
+    out_sep = cp.zeros((1,), dtype=cp.float64)
+    if compute_gradients:
+        out_dx = cp.zeros((1,), dtype=cp.float64)
+        out_dy = cp.zeros((1,), dtype=cp.float64)
+        out_dtheta = cp.zeros((1,), dtype=cp.float64)
+    else:
+        out_dx = out_dy = out_dtheta = cp.zeros((1,), dtype=cp.float64)
+
+    # Launch single-thread kernel
+    _sat_separation_kernel(
+        (1,), (1,),
+        (
+            verts1_flat, np.int32(n1),
+            verts2_flat, np.int32(n2),
+            float(x1), float(y1), float(cos_th1), float(sin_th1),
+            np.int32(1 if compute_gradients else 0),
+            out_sep,
+            out_dx, out_dy, out_dtheta,
+        )
+    )
+
+    if compute_gradients:
+        return out_sep[0], (out_dx[0], out_dy[0], out_dtheta[0])
+    else:
+        return out_sep[0], None
+
+
 # ---------------------------------------------------------------------------
 # Test Functions
 # ---------------------------------------------------------------------------
@@ -1030,6 +1121,7 @@ def run_all_tests():
     test_line_intersection()
     test_clip_against_edge()
     test_polygon_area()
+    print('KERNEL', _sat_separation_kernel)
     # No all tests passed message -> intentional
 
 

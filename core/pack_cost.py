@@ -159,8 +159,9 @@ class CollisionCostSeparation(CollisionCost):
     # Separation distance = minimum distance trees must move to no longer overlap
 
     use_max:bool = field(init=True, default=True)
+    TEMP_use_kernel:bool = field(init=True, default=False)
     
-    def _compute_separation_distance_with_critical_vertex_grad(
+    def _compute_separation_distance(
         self,
         poly1_world: Polygon,
         poly2_world: Polygon,
@@ -201,19 +202,7 @@ class CollisionCostSeparation(CollisionCost):
 
         overlap = poly1_world.intersection(poly2_world)
         if overlap.is_empty or overlap.area < 1e-10:
-            return 0.0, 0.0, 0.0, 0.0
-
-        # Recompute world coords of poly1 piece from local coords and pose, to avoid
-        # any reordering Shapely might do.
-        #c = np.cos(th1)
-        #s = np.sin(th1)
-        # R = np.array([[c, -s],
-        #             [s,  c]], dtype=float)
-        # offset = np.array([x1, y1], dtype=float)
-
-        # world_coords1 = local_coords1 @ R.T + offset  # (N1, 2)
-        # if world_coords1.shape[0] < 3:
-        #     return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0        
 
         world_coords1 = np.array(poly1_world.exterior.coords[:-1])  # (N1, 2)
         coords2 = np.array(poly2_world.exterior.coords[:-1])  # (N2, 2)
@@ -412,7 +401,7 @@ class CollisionCostSeparation(CollisionCost):
                 local_coords = np.array(poly.exterior.coords[:-1])        # not used for grads
                 world_coords = local_coords @ R.T + offset
                 poly_world = Polygon(world_coords)
-                pieces.append(poly_world)
+                pieces.append((poly_world, world_coords))
             return pieces
 
         pieces_a = transformed_pieces_for_tree1(x1, y1, th1)
@@ -432,16 +421,36 @@ class CollisionCostSeparation(CollisionCost):
             best_dsep_dtheta = 0.0
 
             for (pa_world, pa_local) in pieces_a:
-                for pb_world in pieces_b:
-                    sep, dsep_dx, dsep_dy, dsep_dtheta = \
-                        self._compute_separation_distance_with_critical_vertex_grad(
-                            poly1_world=pa_world,
-                            poly2_world=pb_world,
-                            local_coords1=pa_local,
-                            x1=x1,
-                            y1=y1,
-                            th1=th1,
+                for (pb_world, pb_world2) in pieces_b:
+                    if self.TEMP_use_kernel:
+                        import pack_cuda_primitives_test
+                        sep, grad = pack_cuda_primitives_test.sat_separation_with_grad_pose_fwd_bwd(
+                            cp.array(pa_local),
+                            cp.array(pb_world2),
+                            x1, y1, np.cos(th1), np.sin(th1),
+                            compute_gradients=True
                         )
+                        dsep_dx, dsep_dy, dsep_dtheta = grad
+                    else:
+                        sep, dsep_dx, dsep_dy, dsep_dtheta = \
+                            self._compute_separation_distance(
+                                poly1_world=pa_world,
+                                poly2_world=pb_world,
+                                local_coords1=pa_local,
+                                x1=x1,
+                                y1=y1,
+                                th1=th1,
+                            )
+                        import pack_cuda_primitives_test
+                        sep2, grad2 = pack_cuda_primitives_test.sat_separation_with_grad_pose_fwd_bwd(
+                            cp.array(pa_local),
+                            cp.array(pb_world2),
+                            x1, y1, np.cos(th1), np.sin(th1),
+                            compute_gradients=True
+                        )
+                        print(sep, sep2.get().item())
+                        print(grad2, (dsep_dx, dsep_dy, dsep_dtheta))
+                        print('')
 
                     if self.use_max:
                         if sep > max_sep:
