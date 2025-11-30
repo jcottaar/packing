@@ -10,7 +10,8 @@ import pack_basics
 import pack_vis
 import pack_cuda
 import pack_cuda_primitives_test
-pack_cuda.USE_FLOAT32 = True
+pack_cuda.USE_FLOAT32 = False
+print('Back to 64!')
 
 def run_all_tests():
     kgs.debugging_mode = 2
@@ -20,13 +21,13 @@ def run_all_tests():
 
 def test_costs():
     print('Testing cost computation and gradients')
-    costs_to_test = [pack_cost.CostDummy(), pack_cost.AreaCost(scaling = 2.), 
+    costs_to_test = [pack_cost.CostDummy(), pack_cost.CollisionCostSeparation(), pack_cost.AreaCost(scaling = 2.), 
                      pack_cost.BoundaryDistanceCost(use_kernel=False), pack_cost.BoundaryDistanceCost(use_kernel=True, scaling=5.), pack_cost.CollisionCostOverlappingArea(scaling=3.), 
                      pack_cost.CostCompound(scaling = 1.5, costs=[pack_cost.AreaCost(), pack_cost.BoundaryDistanceCost()])]
 
     tree_list = []
     tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=0)))
-    tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=1)))
+    tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=2)))
     pack_vis.visualize_tree_list(tree_list[0])
     pack_vis.visualize_tree_list(tree_list[1])
 
@@ -56,8 +57,8 @@ def test_costs():
             # First, check that compute_cost and compute_cost_ref agree (new API: accept SolutionCollection)
             cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(sol_single)
             sol_fast = kgs.SolutionCollection()
-            sol_fast.xyt = cp.array(xyt_single,dtype=cp.float32)
-            sol_fast.h = cp.array(b_single,dtype=cp.float32)
+            sol_fast.xyt = cp.array(xyt_single,dtype=cp.float64)
+            sol_fast.h = cp.array(b_single,dtype=cp.float64)
             cost_fast, grad_fast, grad_bound_fast = c.compute_cost_allocate(sol_fast)
             
             # Store all outputs
@@ -107,7 +108,7 @@ def test_costs():
                 sol_tmp = kgs.SolutionCollection()
                 sol_tmp.xyt = xyt_single
                 sol_tmp.h = cp.array(bound_arr[None])
-                return obj.compute_cost_ref(sol_tmp)[0]
+                return obj.compute_cost_allocate(sol_tmp)[0]
 
             b0 = b.copy()
             bound_shape = b0.shape
@@ -141,8 +142,8 @@ def test_costs():
         full_sol.h = full_bounds
         vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_sol)
         full_sol_fast = kgs.SolutionCollection()
-        full_sol_fast.xyt = cp.array(full_xyt,dtype=cp.float32)
-        full_sol_fast.h = cp.array(full_bounds,dtype=cp.float32)
+        full_sol_fast.xyt = cp.array(full_xyt,dtype=cp.float64)
+        full_sol_fast.h = cp.array(full_bounds,dtype=cp.float64)
         vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)
         
         # Check each tree's results

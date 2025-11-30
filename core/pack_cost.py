@@ -150,6 +150,136 @@ class CollisionCostOverlappingArea(CollisionCost):
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
         pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, out_cost=cost, out_grads=grad_xyt)
         grad_bound[:] = 0
+
+
+class CollisionCostSeparation(CollisionCost):
+    # Collision cost based on minimum separation distance between trees
+    # Cost = sum(separation_distance^2) over all pairwise overlaps
+    # Only overlapping pairs contribute (separated pairs have zero cost)
+    # Separation distance = minimum distance trees must move to no longer overlap
+    
+    def _compute_separation_distance_with_grad(self, poly1: Polygon, poly2: Polygon):
+        """
+        Compute minimum separation distance (penetration depth) and its gradient.
+        Returns: (separation_distance, grad_direction)
+        
+        For two overlapping polygons, finds the minimum distance one must move to separate.
+        Uses Separating Axis Theorem (SAT): minimum penetration across all edge normals.
+        
+        The gradient direction is the negative of the MTV (since moving poly1 in that 
+        direction INCREASES separation, which DECREASES penetration/cost).
+        """
+        if not poly1.intersects(poly2):
+            return 0.0, None
+        
+        overlap = poly1.intersection(poly2)
+        if overlap.is_empty or overlap.area < 1e-10:
+            return 0.0, None
+        
+        # Get vertices of both polygons
+        coords1 = np.array(poly1.exterior.coords[:-1])  # Exclude closing vertex
+        coords2 = np.array(poly2.exterior.coords[:-1])
+        
+        if len(coords1) < 3 or len(coords2) < 3:
+            return 0.0, None
+        
+        min_penetration = np.inf
+        best_grad_direction = None
+        
+        # Check all edge normals from both polygons
+        for coords in [coords1, coords2]:
+            for i in range(len(coords)):
+                # Get edge
+                p1 = coords[i]
+                p2 = coords[(i + 1) % len(coords)]
+                edge = p2 - p1
+                
+                # Get perpendicular (normal)
+                normal = np.array([-edge[1], edge[0]])
+                norm_length = np.linalg.norm(normal)
+                if norm_length < 1e-10:
+                    continue
+                normal = normal / norm_length
+                
+                # Project both polygons onto this axis
+                proj1 = coords1 @ normal
+                proj2 = coords2 @ normal
+                
+                min1, max1 = proj1.min(), proj1.max()
+                min2, max2 = proj2.min(), proj2.max()
+                
+                # Check for separation
+                if max1 < min2 or max2 < min1:
+                    continue
+                
+                # Compute penetration along this axis
+                # penetration = overlap amount on this axis
+                penetration = min(max1 - min2, max2 - min1)
+                
+                if penetration < min_penetration:
+                    min_penetration = penetration
+                    
+                    # Determine gradient direction for poly1
+                    # We want d(separation)/d(poly1_position)
+                    # Moving poly1 in direction that increases its max projection
+                    # on the axis where it has the smaller max decreases overlap
+                    if max1 < max2:
+                        # poly1's max is limiting, move in positive normal direction
+                        best_grad_direction = normal.copy()
+                    else:
+                        # poly2's max is limiting (or poly1's min), move in negative direction
+                        best_grad_direction = -normal.copy()
+        
+        if min_penetration == np.inf:
+            return 0.0, None
+        
+        return float(min_penetration), best_grad_direction
+    
+    def _compute_separation_distance(self, poly1: Polygon, poly2: Polygon) -> float:
+        """Backward compatible version that only returns the distance."""
+        sep, _ = self._compute_separation_distance_with_grad(poly1, poly2)
+        return sep
+    
+    def _compute_cost_one_tree_ref(self, xyt1:cp.ndarray, xyt2:cp.ndarray, tree1:Polygon, tree2:list):
+        # Sum squared separation distance over all overlapping tree pairs
+        # Use finite differences for gradients (analytical gradients have issues
+        # when the separating axis changes discontinuously with rotation)
+        
+        total_sep_squared = 0.0
+        total_grad = cp.zeros_like(xyt1)
+        
+        # Check each tree in tree2 list
+        for other_tree in tree2:
+            # Check if overlapping
+            if tree1.intersects(other_tree):
+                separation = self._compute_separation_distance(tree1, other_tree)
+                sep_squared = separation ** 2
+                total_sep_squared += sep_squared
+                
+                # Compute gradient via finite differences
+                grad = cp.zeros_like(xyt1)
+                epsilon = 1e-4
+                for j in range(3):  # x, y, theta
+                    xyt1_plus = xyt1.copy()
+                    xyt1_minus = xyt1.copy()
+                    xyt1_plus[j] += epsilon
+                    xyt1_minus[j] -= epsilon
+                    tree1_plus = kgs.create_tree(xyt1_plus[0].get().item(), xyt1_plus[1].get().item(), xyt1_plus[2].get().item()*360/2/np.pi)
+                    tree1_minus = kgs.create_tree(xyt1_minus[0].get().item(), xyt1_minus[1].get().item(), xyt1_minus[2].get().item()*360/2/np.pi)
+                    
+                    # Cost for plus perturbation
+                    sep_plus = self._compute_separation_distance(tree1_plus, other_tree)
+                    sep_squared_plus = sep_plus ** 2
+                    
+                    # Cost for minus perturbation
+                    sep_minus = self._compute_separation_distance(tree1_minus, other_tree)
+                    sep_squared_minus = sep_minus ** 2
+                    
+                    grad[j] = cp.array((sep_squared_plus - sep_squared_minus) / (2 * epsilon))
+                total_grad += grad
+            # Separated trees contribute zero cost, so we skip them
+        
+        return cp.array(total_sep_squared), total_grad
     
 
 @dataclass
