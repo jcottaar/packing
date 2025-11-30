@@ -33,22 +33,25 @@ class Cost(kgs.BaseClass):
             cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(sol, sol.xyt[i], sol.h[i])
         return cost,grad_xyt,grad_bound
     
-    def compute_cost(self, sol:kgs.SolutionCollection):
-        # Subclass can implement faster version
-        cost,grad_xyt,grad_bound =  self._compute_cost(sol)
-        # assert cost.shape == (sol.N_solutions,)
-        # assert grad_xyt.shape == sol.xyt.shape
-        # assert grad_bound.shape == sol.h.shape 
-        return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
-    
-    def _compute_cost(self, sol:kgs.SolutionCollection):
-        # Subclass can implement faster version[0]
+    def compute_cost_allocate(self, sol:kgs.SolutionCollection):
+        # Allocates gradient arrays and calls compute_cost
         cost = cp.zeros(sol.N_solutions)
         grad_xyt = cp.zeros_like(sol.xyt)
         grad_bound = cp.zeros_like(sol.h)
+        self.compute_cost(sol, cost, grad_xyt, grad_bound)
+        return cost, grad_xyt, grad_bound
+    
+    def compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+        # Subclass can implement faster version with preallocated gradients
+        self._compute_cost(sol, cost, grad_xyt, grad_bound)
+        cost *= self.scaling
+        grad_xyt *= self.scaling
+        grad_bound *= self.scaling
+    
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+        # Subclass can implement faster version with preallocated gradients
         for i in range(sol.N_solutions):
             cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol, sol.xyt[i], sol.h[i])
-        return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
     
     def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h):
         return self._compute_cost_single_ref(sol, xyt, h)
@@ -57,6 +60,10 @@ class Cost(kgs.BaseClass):
 class CostCompound(Cost):
     # Compound cost: sum of multiple costs
     costs:list = field(init=True, default_factory=list)
+    _temp_cost: cp.ndarray = field(init=False, default=None, repr=False)
+    _temp_grad_xyt: cp.ndarray = field(init=False, default=None, repr=False)
+    _temp_grad_bound: cp.ndarray = field(init=False, default=None, repr=False)
+    _temp_shape: tuple = field(init=False, default=None, repr=False)
 
     def _compute_cost_ref(self, sol:kgs.SolutionCollection):
         total_cost = cp.zeros(sol.N_solutions)
@@ -69,16 +76,27 @@ class CostCompound(Cost):
             total_grad_bound += c_grad_bound
         return total_cost, total_grad, total_grad_bound
 
-    def _compute_cost(self, sol:kgs.SolutionCollection):
-        total_cost = cp.zeros(sol.N_solutions)
-        total_grad = cp.zeros_like(sol.xyt)
-        total_grad_bound = cp.zeros_like(sol.h)
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+        cost[:] = 0
+        grad_xyt[:] = 0
+        grad_bound[:] = 0
+        
+        # Check if we need to allocate or reallocate temporary arrays
+        current_shape = (sol.N_solutions, sol.xyt.shape, sol.h.shape)
+        if self._temp_shape != current_shape:
+            self._temp_cost = cp.zeros(sol.N_solutions)
+            self._temp_grad_xyt = cp.zeros_like(sol.xyt)
+            self._temp_grad_bound = cp.zeros_like(sol.h)
+            self._temp_shape = current_shape
+        
         for c in self.costs:
-            c_cost, c_grad, c_grad_bound = c.compute_cost(sol)
-            total_cost += c_cost
-            total_grad += c_grad
-            total_grad_bound += c_grad_bound
-        return total_cost, total_grad, total_grad_bound
+            self._temp_cost[:] = 0
+            self._temp_grad_xyt[:] = 0
+            self._temp_grad_bound[:] = 0
+            c.compute_cost(sol, self._temp_cost, self._temp_grad_xyt, self._temp_grad_bound)
+            cost += self._temp_cost
+            grad_xyt += self._temp_grad_xyt
+            grad_bound += self._temp_grad_bound
 
 @dataclass
 class CostDummy(Cost):
@@ -128,9 +146,11 @@ class CollisionCostOverlappingArea(CollisionCost):
                 grad[j] = cp.array((area_plus - area_minus) / (2 * epsilon))
         return area, grad
 
-    def _compute_cost(self, sol:kgs.SolutionCollection):
-        cost,grad = pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt)
-        return cost,cp.array(grad),cp.zeros_like(sol.h)
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+        result_cost,result_grad = pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt)
+        cost[:] = result_cost
+        grad_xyt[:] = result_grad
+        grad_bound[:] = 0
     
 
 @dataclass
@@ -197,10 +217,12 @@ class BoundaryCost(Cost):
 
         return cp.array(area), grad, grad_bound
     
-    def _compute_cost(self, sol:kgs.SolutionCollection):
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
         raise Error('TODO: deal with square offsets')
-        cost,grad,grad_h = pack_cuda.boundary_multi_ensemble(sol.xyt, sol.h[:,0], compute_grad=True)
-        return cost,grad,grad_h[:,None]
+        result_cost,result_grad,result_grad_h = pack_cuda.boundary_multi_ensemble(sol.xyt, sol.h[:,0], compute_grad=True)
+        cost[:] = result_cost
+        grad_xyt[:] = result_grad
+        grad_bound[:,0] = result_grad_h
 
 @dataclass 
 class AreaCost(Cost):
@@ -213,11 +235,11 @@ class AreaCost(Cost):
         grad_bound[2] = 0
         return cost, cp.zeros_like(xyt), grad_bound
     
-    def _compute_cost(self, sol:kgs.SolutionCollection):
-        cost = sol.h[:,0]**2
-        grad_bound = cp.zeros_like(sol.h)
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+        cost[:] = sol.h[:,0]**2
+        grad_xyt[:] = 0
+        grad_bound[:] = 0
         grad_bound[:,0] = 2.0*sol.h[:,0]
-        return cost, cp.zeros_like(sol.xyt), grad_bound
 
 @dataclass
 class BoundaryDistanceCost(Cost):
@@ -348,12 +370,14 @@ class BoundaryDistanceCost(Cost):
         
         return cp.array(total_cost), grad, grad_bound
     
-    def _compute_cost(self, sol:kgs.SolutionCollection):
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
         if self.use_kernel:
-            cost,grad,grad_h = pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, compute_grad=True)
-            return cost,grad,grad_h
+            result_cost,result_grad,result_grad_h = pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, compute_grad=True)
+            cost[:] = result_cost
+            grad_xyt[:] = result_grad
+            grad_bound[:] = result_grad_h
         else:
-            return super()._compute_cost(sol)
+            super()._compute_cost(sol, cost, grad_xyt, grad_bound)
             
     def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h):
         # xyt is (n_trees, 3), h is (3,): [square_size, x_offset, y_offset]

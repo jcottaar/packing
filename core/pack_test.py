@@ -57,7 +57,7 @@ def test_costs():
             sol_fast = kgs.SolutionCollection()
             sol_fast.xyt = cp.array(xyt_single,dtype=cp.float32)
             sol_fast.h = cp.array(b_single,dtype=cp.float32)
-            cost_fast, grad_fast, grad_bound_fast = c.compute_cost(sol_fast)
+            cost_fast, grad_fast, grad_bound_fast = c.compute_cost_allocate(sol_fast)
             
             # Store all outputs
             all_ref_outputs.append((cost_ref, grad_ref, grad_bound_ref))
@@ -142,7 +142,7 @@ def test_costs():
         full_sol_fast = kgs.SolutionCollection()
         full_sol_fast.xyt = cp.array(full_xyt,dtype=cp.float32)
         full_sol_fast.h = cp.array(full_bounds,dtype=cp.float32)
-        vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost(full_sol_fast)
+        vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)
         
         # Check each tree's results
         for i in range(len(tree_list)):
