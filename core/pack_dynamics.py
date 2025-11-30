@@ -104,6 +104,9 @@ class Dynamics(kgs.BaseClass):
         sol.check_constraints()
         sol = copy.deepcopy(sol)
 
+        cost0 = copy.deepcopy(self.cost0)
+        cost1 = copy.deepcopy(self.cost1)
+
         n_ensembles = sol.xyt.shape[0]
         n_trees = sol.xyt.shape[1]
         assert self.dt_list.shape == self.friction_list.shape == self.cost_0_scaling_list.shape
@@ -125,8 +128,8 @@ class Dynamics(kgs.BaseClass):
             if cost_0_scaling[0]>0 and prev_cost_0_scaling[0] == 0.: # assuming this applies to all...
                 sol.snap()
             prev_cost_0_scaling = cost_0_scaling        
-            total_cost0, total_grad0, bound_grad0 = self.cost0.compute_cost_allocate(sol)
-            total_cost1, total_grad1, bound_grad1 = self.cost1.compute_cost_allocate(sol)
+            total_cost0, total_grad0, bound_grad0 = cost0.compute_cost_allocate(sol)
+            total_cost1, total_grad1, bound_grad1 = cost1.compute_cost_allocate(sol)
             total_cost = total_cost0 * cost_0_scaling + total_cost1
             total_grad = total_grad0 * cost_0_scaling[:, None, None] + total_grad1
             bound_grad = bound_grad0 * cost_0_scaling[:, None] + bound_grad1
@@ -219,4 +222,7 @@ class DynamicsInitialize(Dynamics):
         self.cost_0_scaling_list = cp.array(self.cost_0_scaling_list)
         self.cost_0_scaling_list = cp.tile(self.cost_0_scaling_list[None, :], (n_ensembles, 1))
         sol = super().run_simulation(sol)
+        self.dt_list = None
+        self.friction_list = None
+        self.cost_0_scaling_list = None
         return sol
