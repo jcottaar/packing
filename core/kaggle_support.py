@@ -264,6 +264,7 @@ center_tree, convex_breakdown, tree_max_radius = create_center_tree()
 center_tree_prepped = prep(center_tree)
 tree_area = center_tree.area
 tree_vertices = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float64)
+tree_vertices32 = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float32)
 
 
 @typechecked
@@ -328,7 +329,7 @@ class TreeList(BaseClass):
 @dataclass
 class SolutionCollection(BaseClass):
     xyt: cp.ndarray = field(default=None)  # (N,3) array of tree positions and angles
-    h: cp.ndarray = field(default=None)      # size of the trees
+    h: cp.ndarray = field(default=None)      # (N,3) array; first column is square size, next two are offset
 
     # add N_solutions and N_trees properties
     @property
@@ -351,4 +352,60 @@ class SolutionCollection(BaseClass):
     def _check_constraints(self):
         if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
             raise ValueError("Solution: xyt must be an array with shape (N_solutions, N_trees, 3)")
-        assert self.h.shape == (self.xyt.shape[0],1)
+        assert self.h.shape == (self.xyt.shape[0],3)
+
+    def snap(self):
+        """Set h such that for each solution it's the smallest possible square containing all trees.
+        Vectorized implementation using tree_vertices32.
+        Assumes xyt is cp.float32.
+        """
+        # xyt shape: (n_solutions, n_trees, 3)
+        # tree_vertices32 shape: (n_vertices, 2)
+        
+        n_solutions = self.xyt.shape[0]
+        n_trees = self.xyt.shape[1]
+        n_vertices = tree_vertices32.shape[0]
+        
+        # Extract pose components
+        x = self.xyt[:, :, 0:1]  # (n_solutions, n_trees, 1)
+        y = self.xyt[:, :, 1:2]  # (n_solutions, n_trees, 1)
+        theta = self.xyt[:, :, 2:3]  # (n_solutions, n_trees, 1)
+        
+        # Precompute rotation matrices
+        cos_t = cp.cos(theta)  # (n_solutions, n_trees, 1)
+        sin_t = cp.sin(theta)  # (n_solutions, n_trees, 1)
+        
+        # Get local vertices (n_vertices, 2)
+        vx_local = tree_vertices32[:, 0]  # (n_vertices,)
+        vy_local = tree_vertices32[:, 1]  # (n_vertices,)
+        
+        # Apply rotation and translation for all trees
+        # Broadcast: (n_solutions, n_trees, 1) * (n_vertices,) -> (n_solutions, n_trees, n_vertices)
+        vx_rot = cos_t * vx_local - sin_t * vy_local  # (n_solutions, n_trees, n_vertices)
+        vy_rot = sin_t * vx_local + cos_t * vy_local  # (n_solutions, n_trees, n_vertices)
+        
+        # Translate by tree position
+        vx_global = vx_rot + x  # (n_solutions, n_trees, n_vertices)
+        vy_global = vy_rot + y  # (n_solutions, n_trees, n_vertices)
+        
+        # Find min/max across all trees and vertices for each solution
+        # Reshape to (n_solutions, n_trees * n_vertices) for min/max along all trees+vertices
+        vx_flat = vx_global.reshape(n_solutions, -1)  # (n_solutions, n_trees * n_vertices)
+        vy_flat = vy_global.reshape(n_solutions, -1)  # (n_solutions, n_trees * n_vertices)
+        
+        x_min = cp.min(vx_flat, axis=1)  # (n_solutions,)
+        x_max = cp.max(vx_flat, axis=1)  # (n_solutions,)
+        y_min = cp.min(vy_flat, axis=1)  # (n_solutions,)
+        y_max = cp.max(vy_flat, axis=1)  # (n_solutions,)
+        
+        # Compute center and size of bounding square
+        x_center = (x_min + x_max) / 2.0  # (n_solutions,)
+        y_center = (y_min + y_max) / 2.0  # (n_solutions,)
+        
+        # Size is max of width and height
+        width = x_max - x_min  # (n_solutions,)
+        height = y_max - y_min  # (n_solutions,)
+        size = cp.maximum(width, height)  # (n_solutions,)
+        
+        # Update h: [size, x_offset, y_offset]
+        self.h = cp.stack([size, x_center, y_center], axis=1)  # (n_solutions, 3)

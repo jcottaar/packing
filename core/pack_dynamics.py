@@ -17,7 +17,74 @@ from scipy import stats
 from typeguard import typechecked
 
 @dataclass
+class Optimizer(kgs.BaseClass):
+    # Minimizes the cost, not physics-based
+
+    # Configuration    
+    plot_interval = None
+
+    # Hyperparameters
+    cost = None
+    dt = 0.1
+    n_iterations = 100
+    max_grad_norm = 10.0  # Clip gradients to prevent violent repulsion
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-3), 
+                                        pack_cost.BoundaryDistanceCost(scaling=1.), 
+                                        pack_cost.CollisionCostOverlappingArea(scaling=1.)])
+
+    @typechecked
+    def run_simulation(self, sol:kgs.SolutionCollection):
+        # Initial configuration
+
+        sol.check_constraints()
+        sol = copy.deepcopy(sol)
+        sol.snap()
+
+        xyt = sol.xyt
+        h = sol.h        
+        
+        n_ensembles = xyt.shape[0]
+        n_trees = xyt.shape[1] 
+
+        if self.plot_interval is not None:          
+            fig, ax = plt.subplots(figsize=(8, 8))
+            tree_list = kgs.TreeList()
+
+        t_total0 = np.float32(0.)   
+        t_last_plot = np.float32(-np.inf)     
+        for i_iteration in range(self.n_iterations):
+            dt = self.dt        
+            total_cost, total_grad, bound_grad = self.cost.compute_cost(sol)
+            
+            # Clip gradients per tree to prevent violent repulsion
+            if self.max_grad_norm is not None:
+                grad_norms = cp.sqrt(cp.sum(total_grad**2, axis=2))  # (n_ensembles, n_trees)
+                grad_norms = cp.maximum(grad_norms, 1e-8)  # Avoid division by zero
+                clip_factor = cp.minimum(1.0, self.max_grad_norm / grad_norms)  # (n_ensembles, n_trees)
+                total_grad = total_grad * clip_factor[:, :, None]  # Apply to each component
+            
+            xyt -= dt * total_grad
+            h -= dt * bound_grad
+            t_total0 += dt
+            
+            if self.plot_interval is not None and t_total0 - t_last_plot >= self.plot_interval*0.999:
+                t_last_plot = t_total0+0               
+                ax.clear()
+                ax.set_aspect('equal', adjustable='box')
+                tree_list.xyt = cp.asnumpy(xyt[0])
+                pack_vis.visualize_tree_list(tree_list, ax=ax, h=cp.asnumpy(h[0]))
+                ax.set_title(f'Time: {t_total0:.2f}')
+                display(fig)
+                clear_output(wait=True)       
+        return sol
+
+@dataclass
 class Dynamics(kgs.BaseClass):
+    # Physics-based dynamics
+
     # Configuration    
     plot_interval = None
 
@@ -32,51 +99,48 @@ class Dynamics(kgs.BaseClass):
     def run_simulation(self, sol:kgs.SolutionCollection):
         # Initial configuration
 
+        sol.check_constraints()
         sol = copy.deepcopy(sol)
-        xyt = sol.xyt
-        h = sol.h
 
-        assert len(xyt.shape)==3 and xyt.shape[2]==3
-        n_ensembles = xyt.shape[0]
-        n_trees = xyt.shape[1]
-        assert h.shape == (n_ensembles, 1)
+        n_ensembles = sol.xyt.shape[0]
+        n_trees = sol.xyt.shape[1]
         assert self.dt_list.shape == self.friction_list.shape == self.cost_0_scaling_list.shape
         assert self.dt_list.shape[0] == n_ensembles
 
-        #plt.ioff()
         if self.plot_interval is not None:
-            #plt.ion()
-            raise 'fix'
             fig, ax = plt.subplots(figsize=(8, 8))
             tree_list = kgs.TreeList()
 
-        t_total0 = np.float32(0.)        
-        velocity_xyt = cp.zeros_like(xyt)
-        velocity_h = cp.zeros_like(h)
+        t_total0 = np.float32(0.)      
+        t_last_plot = np.float32(-np.inf)  
+        velocity_xyt = cp.zeros_like(sol.xyt)
+        velocity_h = cp.zeros_like(sol.h)
+        prev_cost_0_scaling = 0.
         for i_iteration in range(self.dt_list.shape[1]):
             dt = self.dt_list[:, i_iteration]
             friction = self.friction_list[:, i_iteration]
-            cost_0_scaling = self.cost_0_scaling_list[:, i_iteration]          
+            cost_0_scaling = self.cost_0_scaling_list[:, i_iteration]  
+            if cost_0_scaling[0]>0 and prev_cost_0_scaling[0] == 0.: # assuming this applies to all...
+                sol.snap()
+            prev_cost_0_scaling = cost_0_scaling        
             total_cost0, total_grad0, bound_grad0 = self.cost0.compute_cost(sol)
             total_cost1, total_grad1, bound_grad1 = self.cost1.compute_cost(sol)
             total_cost = total_cost0 * cost_0_scaling + total_cost1
             total_grad = total_grad0 * cost_0_scaling[:, None, None] + total_grad1
             bound_grad = bound_grad0 * cost_0_scaling[:, None] + bound_grad1
-            #total_grad *= 10
-            #bound_grad *= 10
-            #print(t_total0, total_cost)
             velocity_xyt += -dt[:,None,None]*friction[:,None,None]*velocity_xyt - dt[:,None,None]*total_grad
             velocity_h += 0*velocity_h - dt[:,None]*bound_grad
-            xyt += dt[:,None,None] * velocity_xyt
-            h += dt[:,None] * velocity_h
+            sol.xyt += dt[:,None,None] * velocity_xyt
+            sol.h += dt[:,None] * velocity_h
+            #print(t_total0, h[0])
             t_total0 += dt[0]
             
             if self.plot_interval is not None and t_total0 - t_last_plot >= self.plot_interval*0.999:
-                t_last_plot = t_total                
+                t_last_plot = t_total0+0                
                 ax.clear()
                 ax.set_aspect('equal', adjustable='box')
-                tree_list.xyt = cp.asnumpy(xyt[0])
-                pack_vis.visualize_tree_list(tree_list, ax=ax, h=cp.asnumpy(h[0,0]))
+                tree_list.xyt = cp.asnumpy(sol.xyt[0])
+                pack_vis.visualize_tree_list(tree_list, ax=ax, h=cp.asnumpy(sol.h[0]))
                 ax.set_title(f'Time: {t_total0:.2f}')
                 display(fig)
                 clear_output(wait=True)       

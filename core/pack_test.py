@@ -19,8 +19,9 @@ def run_all_tests():
 
 def test_costs():
     print('Testing cost computation and gradients')
-    costs_to_test = [pack_cost.CostDummy(), pack_cost.AreaCost(), pack_cost.BoundaryDistanceCost(use_kernel=True), pack_cost.BoundaryDistanceCost(use_kernel=False), pack_cost.BoundaryCost(), pack_cost.CollisionCostOverlappingArea(scaling=3.), 
-                     pack_cost.CostCompound(costs=[pack_cost.AreaCost(), pack_cost.BoundaryCost()])]
+    costs_to_test = [pack_cost.CostDummy(), pack_cost.AreaCost(scaling = 2.), 
+                     pack_cost.BoundaryDistanceCost(use_kernel=False), pack_cost.BoundaryDistanceCost(use_kernel=True, scaling=5.), pack_cost.CollisionCostOverlappingArea(scaling=3.), 
+                     pack_cost.CostCompound(scaling = 1.5, costs=[pack_cost.AreaCost(), pack_cost.BoundaryDistanceCost()])]
 
     tree_list = []
     tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=0)))
@@ -28,7 +29,7 @@ def test_costs():
     pack_vis.visualize_tree_list(tree_list[0])
     pack_vis.visualize_tree_list(tree_list[1])
 
-    bounds = cp.array([[0.5],[2.]])  # square bounds
+    bounds = cp.array([[0.5, 0.2, 0.4],[2., -0.1, -0.15]])  # square bounds
 
 
     for c in costs_to_test:

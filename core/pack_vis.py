@@ -3,6 +3,7 @@ import numpy as np
 import scipy as sp
 import cupy as cp
 import kaggle_support as kgs
+from shapely import affinity
 
 def visualize_tree_list(tree_list, ax=None, h=None):
     trees = tree_list.get_trees()
@@ -11,13 +12,14 @@ def visualize_tree_list(tree_list, ax=None, h=None):
         # ensure we have an Axes to draw the square on
         if ax is None:
             fig, ax = plt.subplots()
-        half = float(h) / 2.0
+        half = float(h[0]) / 2.0
         square = Polygon([(-half, -half), (half, -half), (half, half), (-half, half)])
+        square = affinity.translate(square,h[1],h[2])
         # draw square on the provided axes (outline, no fill)
         x, y = square.exterior.xy
-        patch = MplPolygon(list(zip(x, y)), closed=True, facecolor='none', edgecolor='k', linewidth=1.0, zorder=2)
+        patch = MplPolygon(list(zip(x, y)), closed=True, facecolor='none', edgecolor='blue', linewidth=3.0, zorder=2)
         ax.add_patch(patch)
-    return plot_polygons(trees, ax=ax)
+    ax = plot_polygons(trees, ax=ax)
     
 
 import matplotlib.pyplot as plt

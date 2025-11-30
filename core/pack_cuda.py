@@ -714,11 +714,13 @@ __global__ void multi_boundary_list_total(
 // Returns the maximum squared distance of any vertex outside the boundary
 __device__ double boundary_distance_tree(
     const double3 pose,
-    const double h,
-    double3* d_pose,  // output: gradient w.r.t. pose (can be NULL)
-    double* d_h)      // output: gradient w.r.t. h (can be NULL)
+    const double3 h,      // h.x = boundary size, h.y = x_offset, h.z = y_offset
+    double3* d_pose,      // output: gradient w.r.t. pose (can be NULL)
+    double3* d_h)         // output: gradient w.r.t. h (can be NULL)
 {
-    double half = h * 0.5;
+    double half = h.x * 0.5;
+    double offset_x = h.y;
+    double offset_y = h.z;
     
     // Get number of vertices from constant memory
     int n_verts = const_n_tree_vertices;
@@ -737,9 +739,9 @@ __device__ double boundary_distance_tree(
         double vx_local = const_tree_vertices_xy[v * 2 + 0];
         double vy_local = const_tree_vertices_xy[v * 2 + 1];
         
-        // Apply rotation and translation
-        double vx = c * vx_local - s * vy_local + pose.x;
-        double vy = s * vx_local + c * vy_local + pose.y;
+        // Apply rotation and translation, then subtract offsets
+        double vx = c * vx_local - s * vy_local + pose.x - offset_x;
+        double vy = s * vx_local + c * vy_local + pose.y - offset_y;
         
         // Compute distance outside boundary
         double abs_vx = fabs(vx);
@@ -760,21 +762,22 @@ __device__ double boundary_distance_tree(
         double vx_local = const_tree_vertices_xy[max_idx * 2 + 0];
         double vy_local = const_tree_vertices_xy[max_idx * 2 + 1];
         
-        double vx_max = c * vx_local - s * vy_local + pose.x;
-        double vy_max = s * vx_local + c * vy_local + pose.y;
+        double vx_max = c * vx_local - s * vy_local + pose.x - offset_x;
+        double vy_max = s * vx_local + c * vy_local + pose.y - offset_y;
         
         double abs_vx_max = fabs(vx_max);
         double abs_vy_max = fabs(vy_max);
         double dx_max = (abs_vx_max > half) ? (abs_vx_max - half) : 0.0;
         double dy_max = (abs_vy_max > half) ? (abs_vy_max - half) : 0.0;
         
+        // Compute grad_vx_max and grad_vy_max (needed for both d_pose and d_h)
+        // Analytical gradients
+        // d(dist_sq)/d(vx) = 2*dx*sign(vx) if dx > 0 else 0
+        // d(dist_sq)/d(vy) = 2*dy*sign(vy) if dy > 0 else 0
+        double grad_vx_max = (dx_max > 0.0) ? 2.0 * dx_max * ((vx_max >= 0.0) ? 1.0 : -1.0) : 0.0;
+        double grad_vy_max = (dy_max > 0.0) ? 2.0 * dy_max * ((vy_max >= 0.0) ? 1.0 : -1.0) : 0.0;
+        
         if (d_pose != NULL) {
-            // Analytical gradients
-            // d(dist_sq)/d(vx) = 2*dx*sign(vx) if dx > 0 else 0
-            // d(dist_sq)/d(vy) = 2*dy*sign(vy) if dy > 0 else 0
-            double grad_vx_max = (dx_max > 0.0) ? 2.0 * dx_max * ((vx_max >= 0.0) ? 1.0 : -1.0) : 0.0;
-            double grad_vy_max = (dy_max > 0.0) ? 2.0 * dy_max * ((vy_max >= 0.0) ? 1.0 : -1.0) : 0.0;
-            
             // d(vx)/d(x) = 1, d(vy)/d(y) = 1
             d_pose->x = grad_vx_max;
             d_pose->y = grad_vy_max;
@@ -788,10 +791,15 @@ __device__ double boundary_distance_tree(
         }
         
         if (d_h != NULL) {
-            // d(dist_sq)/d(h) = d(dist_sq)/d(half) * d(half)/d(h)
+            // d(dist_sq)/d(h.x) = d(dist_sq)/d(half) * d(half)/d(h.x)
             // d(dist_sq)/d(half) = -2*dx - 2*dy (chain rule through abs)
-            // d(half)/d(h) = 0.5
-            *d_h = -(dx_max + dy_max);
+            // d(half)/d(h.x) = 0.5
+            d_h->x = -(dx_max + dy_max);
+            
+            // d(dist_sq)/d(offset_x) = -d(dist_sq)/d(vx) = -grad_vx_max
+            // d(dist_sq)/d(offset_y) = -d(dist_sq)/d(vy) = -grad_vy_max
+            d_h->y = -grad_vx_max;
+            d_h->z = -grad_vy_max;
         }
     }
     
@@ -803,10 +811,10 @@ __device__ double boundary_distance_tree(
 __device__ void boundary_distance_list_total(
     const double* __restrict__ xyt_Nx3,  // flattened: [n, 3] in C-contiguous layout
     const int n,
-    const double h,
+    const double3 h,                     // h.x = boundary size, h.y = x_offset, h.z = y_offset
     double* __restrict__ out_total,
-    double* __restrict__ out_grads,  // if non-NULL, write gradients [n*3]
-    double* __restrict__ out_grad_h)  // if non-NULL, write gradient w.r.t. h
+    double* __restrict__ out_grads,      // if non-NULL, write gradients [n*3]
+    double* __restrict__ out_grad_h)     // if non-NULL, write gradient w.r.t. h [3]
 {
     // Thread organization: 1 thread per tree
     int tree_idx = threadIdx.x;
@@ -822,7 +830,7 @@ __device__ void boundary_distance_list_total(
         
         // Compute gradients if requested
         double3 d_pose;
-        double d_h_local;
+        double3 d_h_local;
         
         // Each thread computes boundary distance cost for one tree with gradients
         local_cost = boundary_distance_tree(pose, h, 
@@ -841,7 +849,9 @@ __device__ void boundary_distance_list_total(
         
         if (out_grad_h != NULL) {
             // All threads contribute to d/dh
-            atomicAdd(out_grad_h, d_h_local);
+            atomicAdd(&out_grad_h[0], d_h_local.x);
+            atomicAdd(&out_grad_h[1], d_h_local.y);
+            atomicAdd(&out_grad_h[2], d_h_local.z);
         }
     }
 }
@@ -853,18 +863,18 @@ __device__ void boundary_distance_list_total(
 // Parameters:
 //   xyt_base: base pointer to 3D array [num_ensembles, n_trees, 3] in C-contiguous layout
 //   n_trees: number of trees per ensemble (same for all)
-//   h_list: array of h values (boundary size) for each ensemble
+//   h_list: array of h values (boundary size+offsets) for each ensemble [num_ensembles, 3]
 //   out_totals: array of output totals, one per ensemble
 //   out_grads_base: base pointer to gradient output [num_ensembles, n_trees, 3] (can be NULL)
-//   out_grad_h: array of h gradients [num_ensembles] (can be NULL)
+//   out_grad_h: array of h gradients [num_ensembles, 3] (can be NULL)
 //   num_ensembles: number of ensembles to process
 __global__ void multi_boundary_distance_list_total(
     const double* __restrict__ xyt_base,       // base pointer to [num_ensembles, n_trees, 3]
     const int n_trees,                          // number of trees per ensemble
-    const double* __restrict__ h_list,         // [num_ensembles]
+    const double* __restrict__ h_list,         // [num_ensembles, 3]
     double* __restrict__ out_totals,           // [num_ensembles]
     double* __restrict__ out_grads_base,       // base pointer to [num_ensembles, n_trees, 3] (NULL allowed)
-    double* __restrict__ out_grad_h,           // [num_ensembles] (NULL allowed)
+    double* __restrict__ out_grad_h,           // [num_ensembles, 3] (NULL allowed)
     const int num_ensembles)
 {
     int ensemble_id = blockIdx.x;
@@ -881,16 +891,21 @@ __global__ void multi_boundary_distance_list_total(
     
     // Parameters for boundary_distance_list_total
     int n = n_trees;
-    double h = h_list[ensemble_id];
+    double3 h;
+    h.x = h_list[ensemble_id * 3 + 0];
+    h.y = h_list[ensemble_id * 3 + 1];
+    h.z = h_list[ensemble_id * 3 + 2];
     double* out_total = &out_totals[ensemble_id];
     double* out_grads = (out_grads_base != NULL) ? (out_grads_base + ensemble_id * ensemble_stride) : NULL;
-    double* out_grad_h_elem = (out_grad_h != NULL) ? &out_grad_h[ensemble_id] : NULL;
+    double* out_grad_h_elem = (out_grad_h != NULL) ? &out_grad_h[ensemble_id * 3] : NULL;
     
     // Initialize outputs
     if (threadIdx.x == 0) {
         *out_total = 0.0;
         if (out_grad_h_elem != NULL) {
-            *out_grad_h_elem = 0.0;
+            out_grad_h_elem[0] = 0.0;
+            out_grad_h_elem[1] = 0.0;
+            out_grad_h_elem[2] = 0.0;
         }
     }
     // Initialize gradient buffer
@@ -1306,8 +1321,8 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_gra
     ----------
     xyt : cp.ndarray, shape (n_ensembles, n_trees, 3)
         Pose arrays. Must be C-contiguous and correct dtype.
-    h : cp.ndarray, shape (n_ensembles,)
-        Boundary sizes for each ensemble.
+    h : cp.ndarray, shape (n_ensembles, 3)
+        Boundary parameters for each ensemble: [size, x_offset, y_offset].
     compute_grad : bool, optional
         If True, compute and return gradients. Default is False.
     stream : cp.cuda.Stream, optional
@@ -1319,7 +1334,7 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_gra
         Total boundary distance cost for each ensemble.
     grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
         Gradient arrays. Only returned if compute_grad=True.
-    grad_h : cp.ndarray, shape (n_ensembles,), optional
+    grad_h : cp.ndarray, shape (n_ensembles, 3), optional
         Gradient w.r.t. h. Only returned if compute_grad=True.
     """
     _ensure_initialized()
@@ -1330,8 +1345,8 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_gra
     # Assert inputs are correct shape
     if xyt.ndim != 3 or xyt.shape[2] != 3:
         raise ValueError(f"xyt must be shape (n_ensembles, n_trees, 3), got {xyt.shape}")
-    if h.ndim != 1:
-        raise ValueError(f"h must be 1D array, got shape {h.shape}")
+    if h.ndim != 2 or h.shape[1] != 3:
+        raise ValueError(f"h must be shape (n_ensembles, 3), got {h.shape}")
     
     # Assert correct dtype
     if xyt.dtype != expected_dtype:
@@ -1342,19 +1357,21 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_gra
     # Assert contiguous
     if not xyt.flags.c_contiguous:
         raise ValueError("xyt must be C-contiguous")
+    if not h.flags.c_contiguous:
+        raise ValueError("h must be C-contiguous")
     
     num_ensembles = xyt.shape[0]
     n_trees = xyt.shape[1]
     dtype = xyt.dtype
     
     if h.shape[0] != num_ensembles:
-        raise ValueError(f"h must have {num_ensembles} elements, got {h.shape[0]}")
+        raise ValueError(f"h must have {num_ensembles} rows, got {h.shape[0]}")
     
     if num_ensembles == 0:
         out_totals = cp.array([], dtype=dtype)
         if compute_grad:
             out_grads = cp.zeros((0, 0, 3), dtype=dtype)
-            out_grad_h = cp.zeros(0, dtype=dtype)
+            out_grad_h = cp.zeros((0, 3), dtype=dtype)
             return out_totals, out_grads, out_grad_h
         return out_totals, None, None
     
@@ -1365,7 +1382,7 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_gra
     
     if compute_grad:
         out_grads = cp.zeros((num_ensembles, n_trees, 3), dtype=dtype)
-        out_grad_h = cp.zeros(num_ensembles, dtype=dtype)
+        out_grad_h = cp.zeros((num_ensembles, 3), dtype=dtype)
     
     # Launch kernel: one block per ensemble, n_trees threads per block (1 thread per tree)
     blocks = num_ensembles

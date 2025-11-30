@@ -138,6 +138,7 @@ class BoundaryCost(Cost):
     # Cost for trees being out of bounds
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):        
         # Use TreeList.get_trees() to build geometries and perform a single difference against the square (vectorized).
+        raise Error('TODO: deal with square offsets')
         b = float(h[0].get().item())
         half = b / 2.0
         square = Polygon([(-half, -half), (half, -half), (half, half), (-half, half)])
@@ -197,6 +198,7 @@ class BoundaryCost(Cost):
         return cp.array(area), grad, grad_bound
     
     def _compute_cost(self, sol:kgs.SolutionCollection):
+        raise Error('TODO: deal with square offsets')
         cost,grad,grad_h = pack_cuda.boundary_multi_ensemble(sol.xyt, sol.h[:,0], compute_grad=True)
         return cost,grad,grad_h[:,None]
 
@@ -204,7 +206,11 @@ class BoundaryCost(Cost):
 class AreaCost(Cost):
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
         cost = h[0]**2
-        grad_bound = cp.array([2.0*h[0]])
+        # Build grad_bound on the GPU without implicitly converting via NumPy
+        grad_bound = cp.empty(3, dtype=h.dtype)
+        grad_bound[0] = 2.0 * h[0]
+        grad_bound[1] = 0
+        grad_bound[2] = 0
         return cost, cp.zeros_like(xyt), grad_bound
     
     def _compute_cost(self, sol:kgs.SolutionCollection):
@@ -224,7 +230,10 @@ class BoundaryDistanceCost(Cost):
         half = b / 2.0
         
         tree_list = kgs.TreeList()
-        tree_list.xyt = xyt.get()
+        xyt = xyt.get()
+        xyt[:,0] = xyt[:,0] - h[1].get()
+        xyt[:,1] = xyt[:,1] - h[2].get()        
+        tree_list.xyt = xyt
         trees = tree_list.get_trees()
         
         n_trees = xyt.shape[0]
@@ -248,9 +257,9 @@ class BoundaryDistanceCost(Cost):
         epsilon = 1e-6
         
         for i in range(n_trees):
-            xi = xyt[i,0].get().item()
-            yi = xyt[i,1].get().item()
-            thetai = xyt[i,2].get().item()
+            xi = xyt[i,0].item()
+            yi = xyt[i,1].item()
+            thetai = xyt[i,2].item()
             
             for j in range(3):
                 if j == 0:
@@ -297,6 +306,8 @@ class BoundaryDistanceCost(Cost):
         
         # Compute gradient w.r.t. bound using finite differences
         grad_bound = cp.zeros_like(h)
+        
+        # Gradient w.r.t. h[0] (square size)
         b_plus = b + epsilon
         b_minus = b - epsilon
         half_plus = b_plus / 2.0
@@ -329,21 +340,29 @@ class BoundaryDistanceCost(Cost):
         
         grad_bound[0] = cp.array((cost_plus - cost_minus) / (2.0 * epsilon))
         
+        # Gradient w.r.t. h[1] (x-offset) and h[2] (y-offset)
+        # Increasing offset shifts square right/up, equivalent to shifting trees left/down
+        # So grad_h[1] = -grad_xyt summed over x, grad_h[2] = -grad_xyt summed over y
+        grad_bound[1] = -cp.sum(grad[:, 0])
+        grad_bound[2] = -cp.sum(grad[:, 1])
+        
         return cp.array(total_cost), grad, grad_bound
     
     def _compute_cost(self, sol:kgs.SolutionCollection):
         if self.use_kernel:
-            cost,grad,grad_h = pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h[:,0], compute_grad=True)
-            return cost,grad,grad_h[:,None]
+            cost,grad,grad_h = pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, compute_grad=True)
+            return cost,grad,grad_h
         else:
             return super()._compute_cost(sol)
             
     def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h):
-        # xyt is (n_trees, 3), bound is (1,)
+        # xyt is (n_trees, 3), h is (3,): [square_size, x_offset, y_offset]
         # Use kgs.tree_vertices (precomputed center tree vertices) for efficient vectorized computation
     
         b = float(h[0].get().item())
         half = b / 2.0
+        offset_x = h[1]  # (scalar)
+        offset_y = h[2]  # (scalar)
         
         n_trees = xyt.shape[0]
         
@@ -367,9 +386,9 @@ class BoundaryDistanceCost(Cost):
         vx_rot = cos_t * vx - sin_t * vy  # (n_trees, n_vertices)
         vy_rot = sin_t * vx + cos_t * vy  # (n_trees, n_vertices)
         
-        # Translate: add (x, y) for each tree
-        vx_final = vx_rot + x  # (n_trees, n_vertices)
-        vy_final = vy_rot + y  # (n_trees, n_vertices)
+        # Translate: add (x, y) for each tree, then subtract offsets (to shift relative to offset square)
+        vx_final = vx_rot + x - offset_x  # (n_trees, n_vertices)
+        vy_final = vy_rot + y - offset_y  # (n_trees, n_vertices)
         
         # Compute boundary distance for each vertex
         dx = cp.maximum(0.0, cp.abs(vx_final) - half)  # (n_trees, n_vertices)
@@ -430,9 +449,16 @@ class BoundaryDistanceCost(Cost):
         # And d(dist_sq)/d(b) = d(dist_sq)/d(half) * d(half)/d(b) = -2*(dx_max + dy_max) * (1/2)
         
         grad_h = -(dx_max + dy_max)  # (n_trees,)
-        grad_bound_val = cp.sum(grad_h)
+        grad_bound_0 = cp.sum(grad_h)
         
-        grad_bound = cp.array([grad_bound_val])
+        # Gradient w.r.t. h[1] (x-offset) and h[2] (y-offset)
+        # Since vx_final = vx_rot + x - offset_x, d(vx_final)/d(offset_x) = -1
+        # And d(cost)/d(vx_final) = grad_vx_max for the max vertex of each tree
+        # So d(cost)/d(offset_x) = -sum(grad_vx_max)
+        grad_bound_1 = -cp.sum(grad_vx_max)
+        grad_bound_2 = -cp.sum(grad_vy_max)
+        
+        grad_bound = cp.array([grad_bound_0, grad_bound_1, grad_bound_2])
         
         return total_cost, grad, grad_bound
 
