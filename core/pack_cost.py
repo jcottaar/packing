@@ -159,45 +159,43 @@ class CollisionCostSeparation(CollisionCost):
     # Separation distance = minimum distance trees must move to no longer overlap
     
 
-    def _compute_separation_distance_with_vertex_grads(self, poly1: Polygon, poly2: Polygon):
+    def _compute_separation_distance_with_critical_vertex_grad(self, poly1: Polygon, poly2: Polygon):
         """
-        Compute minimum separation distance (penetration depth) and its gradients
-        w.r.t. the vertices of poly1.
+        Compute minimum separation distance (penetration depth) and return the single
+        critical vertex index in `poly1` together with the 2-vector gradient of the
+        penetration w.r.t. that vertex coordinates.
 
         Returns:
             penetration: float
                 Minimum penetration depth (0 if no overlap).
-            grads: np.ndarray or None, shape (N, 2)
-                Derivatives d(penetration) / d(vertex_coords) for poly1.
-                N is the number of vertices of poly1 (excluding the closing vertex).
-                Will be all zeros if there is no penetration.
+            critical_index: int
+                Index of the critical vertex in `poly1.exterior.coords[:-1]`, or -1
+                if there is no penetration.
+            grad: np.ndarray, shape (2,)
+                Derivative d(penetration) / d(vertex_coord) for the critical vertex.
+                Zero vector if there is no penetration.
         """
         # Early exit: no overlap => zero cost, zero gradient
         if not poly1.intersects(poly2):
-            coords1 = np.array(poly1.exterior.coords[:-1])
-            grads = np.zeros_like(coords1, dtype=float)
-            return 0.0, grads
+            return 0.0, -1, np.zeros(2, dtype=float)
 
         overlap = poly1.intersection(poly2)
         if overlap.is_empty or overlap.area < 1e-10:
-            coords1 = np.array(poly1.exterior.coords[:-1])
-            grads = np.zeros_like(coords1, dtype=float)
-            return 0.0, grads
+            return 0.0, -1, np.zeros(2, dtype=float)
 
         # Get vertices of both polygons
         coords1 = np.array(poly1.exterior.coords[:-1])  # Exclude closing vertex
         coords2 = np.array(poly2.exterior.coords[:-1])
 
         if len(coords1) < 3 or len(coords2) < 3:
-            grads = np.zeros_like(coords1, dtype=float)
-            return 0.0, grads
+            return 0.0, -1, np.zeros(2, dtype=float)
 
         min_penetration = np.inf
 
-        # Data for the "active" axis / configuration that gives the minimum penetration
+        # Data for the active axis that gives the minimum penetration
         best_normal = None        # unit normal (axis)
         best_case = None          # "pen1" or "pen2"
-        best_indices = None       # indices of critical vertices in poly1
+        best_index = -1           # single critical vertex index in coords1
 
         # Check all edge normals from both polygons
         for coords in [coords1, coords2]:
@@ -225,65 +223,42 @@ class CollisionCostSeparation(CollisionCost):
                 if max1 < min2 or max2 < min1:
                     continue
 
-                # 1D penetration candidates on this axis:
-                # Option 1: move poly1 along -normal until max1 <= min2
-                pen1 = max1 - min2  # translation magnitude along -normal
-                # Option 2: move poly1 along +normal until min1 >= max2
-                pen2 = max2 - min1  # translation magnitude along +normal
+                # 1D penetration candidates on this axis
+                pen1 = max1 - min2  # move poly1 along -normal
+                pen2 = max2 - min1  # move poly1 along +normal
 
                 penetration = min(pen1, pen2)
 
                 if penetration < min_penetration:
                     min_penetration = penetration
-
-                    # Determine which case is active and which vertices in poly1 are critical
-                    # (ties handled by sharing gradient among all extremal vertices)
-                    eps = 1e-12  # tolerance to catch ties due to floating point
-
                     if pen1 <= pen2:
-                        # Active configuration: penetration governed by max1 vs min2
                         best_case = "pen1"
                         best_normal = normal.copy()
-                        max1_val = max1
-                        # indices of vertices achieving max projection
-                        best_indices = np.where(np.abs(proj1 - max1_val) <= eps)[0]
+                        # choose single vertex achieving max projection
+                        best_index = int(np.argmax(proj1))
                     else:
-                        # Active configuration: penetration governed by max2 vs min1
                         best_case = "pen2"
                         best_normal = normal.copy()
-                        min1_val = min1
-                        # indices of vertices achieving min projection
-                        best_indices = np.where(np.abs(proj1 - min1_val) <= eps)[0]
+                        # choose single vertex achieving min projection
+                        best_index = int(np.argmin(proj1))
 
         # If no finite penetration was found (shouldn't happen if they overlap, but be safe)
-        if not np.isfinite(min_penetration) or best_normal is None or best_case is None:
-            grads = np.zeros_like(coords1, dtype=float)
-            return 0.0, grads
+        if not np.isfinite(min_penetration) or best_normal is None or best_case is None or best_index < 0:
+            return 0.0, -1, np.zeros(2, dtype=float)
 
-        # Build per-vertex gradients: d(penetration)/d vertex_coords for poly1
-        grads = np.zeros_like(coords1, dtype=float)
+        # Build gradient for the single critical vertex
+        if best_case == "pen1":
+            # penetration = pen1 = max1 - min2 -> d/dv = normal
+            grad_vec = best_normal.copy()
+        else:
+            # penetration = pen2 = max2 - min1 -> d/dv = -normal
+            grad_vec = -best_normal.copy()
 
-        # We share the gradient among all vertices that are extremal along the active axis
-        if best_indices is not None and len(best_indices) > 0:
-            share = 1.0 / float(len(best_indices))
-
-            if best_case == "pen1":
-                # penetration = pen1 = max1 - min2
-                # d(penetration)/dv_i = normal for vertices at max1, 0 otherwise
-                contrib = best_normal * share
-            else:  # best_case == "pen2"
-                # penetration = pen2 = max2 - min1
-                # d(penetration)/dv_i = -normal for vertices at min1, 0 otherwise
-                contrib = -best_normal * share
-
-            for idx in best_indices:
-                grads[idx] = contrib
-
-        return float(min_penetration), grads
+        return float(min_penetration), int(best_index), grad_vec
     
     def _compute_separation_distance(self, poly1: Polygon, poly2: Polygon) -> float:
         """Backward compatible version that only returns the distance."""
-        sep, _ = self._compute_separation_distance_with_grad(poly1, poly2)
+        sep, _, _ = self._compute_separation_distance_with_critical_vertex_grad(poly1, poly2)
         return sep
     
     def _compute_cost_one_tree_ref(self, xyt1:cp.ndarray, xyt2:cp.ndarray, tree1:Polygon, tree2:list):
@@ -328,7 +303,7 @@ class CollisionCostSeparation(CollisionCost):
                 max_sep = 0.0
                 for pa in pieces_a:
                     for pb in pieces_b:
-                        s, _ = self._compute_separation_distance_with_vertex_grads(pa, pb)
+                        s, _, _ = self._compute_separation_distance_with_critical_vertex_grad(pa, pb)
                         if s > max_sep:
                             max_sep = s
 
@@ -347,7 +322,7 @@ class CollisionCostSeparation(CollisionCost):
                     mv = 0.0
                     for p1 in pa:
                         for p2 in pb:
-                            s, _ = self._compute_separation_distance_with_vertex_grads(p1, p2)
+                            s, _, _ = self._compute_separation_distance_with_critical_vertex_grad(p1, p2)
                             if s > mv:
                                 mv = s
                     return mv
