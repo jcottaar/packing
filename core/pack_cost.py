@@ -296,43 +296,76 @@ class CollisionCostSeparation(CollisionCost):
         
         # Check each tree in tree2 list
         for other_tree in tree2:
-            # Check if overlapping
-            if tree1.intersects(other_tree):
-                # Use analytical vertex gradients returned by
-                # `_compute_separation_distance_with_vertex_grads` for X and Y.
-                sep, vertex_grads = self._compute_separation_distance_with_vertex_grads(tree1, other_tree)
-                sep_squared = sep ** 2
-                total_sep_squared += sep_squared
+            # Decompose both trees into convex pieces and compute the maximum
+            # penetration across all piece-pairs. Use finite differences for
+            # gradients (x, y, theta) on this max-penetration value.
+            # Extract this tree pose
+            x1 = float(xyt1[0].get().item())
+            y1 = float(xyt1[1].get().item())
+            th1 = float(xyt1[2].get().item())
 
-                # Build gradient array: use vertex-derived analytical gradients for x and y,
-                # and retain finite-difference for theta.
+            # helper: transform convex breakdown pieces for a given pose
+            def transformed_pieces(xc, yc, th):
+                deg = 360.0 / (2.0 * np.pi)
+                th_deg = th * deg
+                pieces = []
+                for poly in kgs.convex_breakdown:
+                    r = kgs.affinity.rotate(poly, th_deg, origin=(0, 0))
+                    t = kgs.affinity.translate(r, xoff=xc * kgs.scale_factor, yoff=yc * kgs.scale_factor)
+                    pieces.append(t)
+                return pieces
+
+            pieces_a = transformed_pieces(x1, y1, th1)
+
+            # iterate over each other tree by pose
+            for j in range(xyt2.shape[0]):
+                xb = float(xyt2[j, 0].get().item())
+                yb = float(xyt2[j, 1].get().item())
+                thb = float(xyt2[j, 2].get().item())
+                pieces_b = transformed_pieces(xb, yb, thb)
+
+                # compute maximum separation across all piece pairs
+                max_sep = 0.0
+                for pa in pieces_a:
+                    for pb in pieces_b:
+                        s, _ = self._compute_separation_distance_with_vertex_grads(pa, pb)
+                        if s > max_sep:
+                            max_sep = s
+
+                if max_sep <= 0.0:
+                    continue
+
+                total_sep_squared += max_sep ** 2
+
+                # Finite-difference gradients for x, y, theta (on max over pieces)
                 grad = cp.zeros_like(xyt1)
+                eps = 1e-6
 
-                # d(sep)/dx is sum over vertex d(sep)/d(vertex_x)
-                dsep_dx = float(np.sum(vertex_grads[:, 0]))
-                dsep_dy = float(np.sum(vertex_grads[:, 1]))
+                def max_sep_at(xp, yp, thp):
+                    pa = transformed_pieces(xp, yp, thp)
+                    pb = pieces_b
+                    mv = 0.0
+                    for p1 in pa:
+                        for p2 in pb:
+                            s, _ = self._compute_separation_distance_with_vertex_grads(p1, p2)
+                            if s > mv:
+                                mv = s
+                    return mv
 
-                # d(sep^2)/dx = 2 * sep * dsep/dx  (and similarly for y)
-                grad[0] = cp.array(2.0 * sep * dsep_dx)
-                grad[1] = cp.array(2.0 * sep * dsep_dy)
+                sx_p = max_sep_at(x1 + eps, y1, th1)
+                sx_m = max_sep_at(x1 - eps, y1, th1)
+                dsep_dx = (sx_p - sx_m) / (2.0 * eps)
+                grad[0] = cp.array(2.0 * max_sep * dsep_dx)
 
-                # Finite-difference for theta only
-                epsilon = 1e-4
-                # perturb theta (index 2)
-                xyt1_plus = xyt1.copy()
-                xyt1_minus = xyt1.copy()
-                xyt1_plus[2] += epsilon
-                xyt1_minus[2] -= epsilon
-                tree1_plus = kgs.create_tree(xyt1_plus[0].get().item(), xyt1_plus[1].get().item(), xyt1_plus[2].get().item()*360/2/np.pi)
-                tree1_minus = kgs.create_tree(xyt1_minus[0].get().item(), xyt1_minus[1].get().item(), xyt1_minus[2].get().item()*360/2/np.pi)
+                sy_p = max_sep_at(x1, y1 + eps, th1)
+                sy_m = max_sep_at(x1, y1 - eps, th1)
+                dsep_dy = (sy_p - sy_m) / (2.0 * eps)
+                grad[1] = cp.array(2.0 * max_sep * dsep_dy)
 
-                # Use the vertex-graded separation function to compute scalar separations
-                sep_plus, _ = self._compute_separation_distance_with_vertex_grads(tree1_plus, other_tree)
-                sep_minus, _ = self._compute_separation_distance_with_vertex_grads(tree1_minus, other_tree)
-
-                sep_sq_plus = sep_plus ** 2
-                sep_sq_minus = sep_minus ** 2
-                grad[2] = cp.array((sep_sq_plus - sep_sq_minus) / (2 * epsilon))
+                st_p = max_sep_at(x1, y1, th1 + eps)
+                st_m = max_sep_at(x1, y1, th1 - eps)
+                dsep_dt = (st_p - st_m) / (2.0 * eps)
+                grad[2] = cp.array(2.0 * max_sep * dsep_dt)
 
                 total_grad += grad
             # Separated trees contribute zero cost, so we skip them

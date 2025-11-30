@@ -101,6 +101,7 @@ def test_costs():
 
             grad_fast_flat = cp.asarray(grad_fast).ravel()
             max_diff = cp.max(cp.abs(grad_num - grad_fast_flat)).get().item()
+            print(grad_num, grad_fast_flat)
             assert cp.allclose(grad_num, grad_fast_flat, rtol=1e-2, atol=1e-2), f"Finite-diff gradient mismatch (max diff {max_diff})"
 
             # Check bound gradient via finite differences
