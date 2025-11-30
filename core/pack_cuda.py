@@ -245,10 +245,10 @@ __device__ double overlap_ref_with_list_piece(
         sum += total;
     }
     
-    // Atomically accumulate the local gradient into the output
-    atomicAdd(&d_ref->x, d_ref_local.x);
-    atomicAdd(&d_ref->y, d_ref_local.y);
-    atomicAdd(&d_ref->z, d_ref_local.z);
+    // Accumulate the local gradient into the output (no atomics needed since each thread has its own d_ref)
+    d_ref->x += d_ref_local.x;
+    d_ref->y += d_ref_local.y;
+    d_ref->z += d_ref_local.z;
 
     return sum;
 }
@@ -461,8 +461,8 @@ __device__ void boundary_list_total(
 // Computes gradients for all trees in xyt1 if out_grads is non-NULL.
 // When xyt1 == xyt2 (same pointer), also accumulates gradients from the "other" side.
 //
-// Uses 4 threads per reference tree, one for each polygon piece.
-// Thread organization: tid = tree_idx * 4 + piece_idx
+// Uses 1 thread per reference tree, looping over all 4 pieces.
+// Thread organization: tid = tree_idx
 __device__ void overlap_list_total(
     const double* __restrict__ xyt1_Nx3,
     const int n1,
@@ -471,13 +471,8 @@ __device__ void overlap_list_total(
     double* __restrict__ out_total,
     double* __restrict__ out_grads) // if non-NULL, write gradients to out_grads[n1*3]
 {
-    // Thread organization: 4 threads per tree
-    // tid = tree_idx * 4 + piece_idx
-    int tid = threadIdx.x;
-    int tree_idx = tid / 4;  // which reference tree (0 to n1-1)
-    int piece_idx = tid % 4; // which piece of that tree (0 to 3)
-
-    double local_sum = 0.0;
+    // Thread organization: 1 thread per tree
+    int tree_idx = threadIdx.x;
 
     if (tree_idx < n1) {
         // Read pose with strided access: [tree_idx, component]
@@ -485,24 +480,28 @@ __device__ void overlap_list_total(
         ref.x = xyt1_Nx3[tree_idx * 3 + 0];
         ref.y = xyt1_Nx3[tree_idx * 3 + 1];
         ref.z = xyt1_Nx3[tree_idx * 3 + 2];
-
-        // Initialize gradient to zero (only first thread does this)
-        if (piece_idx == 0) {
-            out_grads[tree_idx * 3 + 0] = 0.0;
-            out_grads[tree_idx * 3 + 1] = 0.0;
-            out_grads[tree_idx * 3 + 2] = 0.0;
-        }
         
-        // Ensure initialization is complete before all threads start accumulating
-        __syncthreads();
+        double total_sum = 0.0;
+        double3 d_ref_output;
+        d_ref_output.x = 0.0;
+        d_ref_output.y = 0.0;
+        d_ref_output.z = 0.0;
 
-        // Each thread computes overlap for one piece of the reference tree
-        // The merged function computes both forward and backward passes
-        double3* d_ref_output = (double3*)(&out_grads[tree_idx * 3]);
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output);
+        // Loop over all 4 pieces of the reference tree
+        for (int piece_idx = 0; piece_idx < MAX_PIECES; ++piece_idx) {
+            // Each iteration computes overlap for one piece of the reference tree
+            // The merged function computes both forward and backward passes
+            double piece_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, &d_ref_output);
+            total_sum += piece_sum;
+        }
+
+        // Write accumulated gradients
+        out_grads[tree_idx * 3 + 0] = d_ref_output.x;
+        out_grads[tree_idx * 3 + 1] = d_ref_output.y;
+        out_grads[tree_idx * 3 + 2] = d_ref_output.z;
 
         // Atomic add for overlap sum
-        atomicAdd(out_total, local_sum / 2.0);
+        atomicAdd(out_total, total_sum / 2.0);
     }
 }
 
@@ -553,8 +552,7 @@ __global__ void multi_overlap_list_total(
     // Initialize gradient buffer
     if (out_grads != NULL) {
         int tid = threadIdx.x;
-        int max_tid = n_trees * 4;
-        for (int idx = tid; idx < n_trees * 3; idx += max_tid) {
+        for (int idx = tid; idx < n_trees * 3; idx += n_trees) {
             out_grads[idx] = 0.0;
         }
     }
@@ -1118,9 +1116,9 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, out_cost: cp.ndar
     out_cost[:] = 0
     out_grads[:] = 0
     
-    # Launch kernel: one block per ensemble, n_trees * 4 threads per block
+    # Launch kernel: one block per ensemble, n_trees threads per block
     blocks = num_ensembles
-    threads_per_block = n_trees * 4
+    threads_per_block = n_trees
     
     _multi_overlap_list_total_kernel(
         (blocks,),
