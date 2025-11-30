@@ -133,13 +133,19 @@ __device__ __forceinline__ void compute_tree_poly_and_aabb(
 
 // Compute overlap for a single piece (pi) of the reference tree against all pieces of trees in the list.
 // This enables parallelization across the 4 pieces of the reference tree.
+// Also computes gradients w.r.t. the reference pose.
 __device__ double overlap_ref_with_list_piece(
     const double3 ref,
     const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
     const int n,
-    const int pi) // piece index to process (0-3)
+    const int pi,          // piece index to process (0-3)
+    double3* d_ref)        // output: gradient w.r.t. ref pose (accumulated)
 {
     double sum = 0.0;
+    
+    // Compute transform coefficients for ref tree
+    double c_ref = 0.0, s_ref = 0.0;
+    sincos(ref.z, &s_ref, &c_ref);
     
     // Compute only the assigned ref piece
     d2 ref_poly[MAX_VERTS_PER_PIECE];
@@ -152,6 +158,21 @@ __device__ double overlap_ref_with_list_piece(
                                 ref_aabb_min_y, ref_aabb_max_y);
     
     int n1 = const_piece_nverts[pi];
+    
+    // Load local piece vertices from constant memory
+    d2 ref_local_piece[MAX_VERTS_PER_PIECE];
+    for (int v = 0; v < n1; ++v) {
+        int idx = pi * MAX_VERTS_PER_PIECE + v;
+        int base = 2 * idx;
+        ref_local_piece[v].x = const_piece_xy[base + 0];
+        ref_local_piece[v].y = const_piece_xy[base + 1];
+    }
+    
+    // Accumulate gradients locally
+    double3 d_ref_local;
+    d_ref_local.x = 0.0;
+    d_ref_local.y = 0.0;
+    d_ref_local.z = 0.0;
     
     // Loop over all trees in the list
     for (int i = 0; i < n; ++i) {
@@ -198,11 +219,43 @@ __device__ double overlap_ref_with_list_piece(
                 continue;  // No AABB overlap, skip expensive intersection
             }
 
-            total += convex_intersection_area(ref_poly, n1, other_poly, n2);
+            double area = convex_intersection_area(ref_poly, n1, other_poly, n2);
+            total += area;
+            
+            // Backward pass
+            if (area > 0.0) {
+                d2 d_ref_poly[MAX_VERTS_PER_PIECE];
+                d2 d_other_poly[MAX_VERTS_PER_PIECE];
+                
+                backward_convex_intersection_area(
+                    ref_poly, n1,
+                    other_poly, n2,
+                    1.0,  // gradient flows from output (d_overlap_sum = 1.0)
+                    d_ref_poly,
+                    d_other_poly);
+                
+                // Backward through transform for ref piece
+                double3 d_ref_pose_piece;
+                backward_transform_vertices(
+                    ref_local_piece, n1,
+                    d_ref_poly,
+                    c_ref, s_ref,
+                    &d_ref_pose_piece);
+                
+                // Accumulate into local gradient
+                d_ref_local.x += d_ref_pose_piece.x;
+                d_ref_local.y += d_ref_pose_piece.y;
+                d_ref_local.z += d_ref_pose_piece.z;
+            }
         }
         
         sum += total;
     }
+    
+    // Atomically accumulate the local gradient into the output
+    atomicAdd(&d_ref->x, d_ref_local.x);
+    atomicAdd(&d_ref->y, d_ref_local.y);
+    atomicAdd(&d_ref->z, d_ref_local.z);
 
     return sum;
 }
@@ -210,155 +263,27 @@ __device__ double overlap_ref_with_list_piece(
 // Compute sum of overlap areas between a reference tree `ref` and a list
 // of other trees provided as a flattened Nx3 array.
 // Always skips comparing ref with identical pose in the other list.
+// Note: This function is currently unused but kept for potential future use.
+// It would need to be updated to handle gradients if used.
 __device__ double overlap_ref_with_list(
     const double3 ref,
     const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
     const int n)
 {
     double sum = 0.0;
+    double3 d_ref_dummy;
+    d_ref_dummy.x = 0.0;
+    d_ref_dummy.y = 0.0;
+    d_ref_dummy.z = 0.0;
+    
     // Sum across all 4 pieces
     for (int pi = 0; pi < MAX_PIECES; ++pi) {
-        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi);
+        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, &d_ref_dummy);
     }
     return sum;
 }
 
-// Backward pass for a single piece (pi) of the reference tree
-// Computes gradient contribution from one piece against all trees in the list
-__device__ void backward_overlap_ref_with_list_piece(
-    const double3 ref,
-    const double* __restrict__ xyt_Nx3,
-    const int n,
-    double d_overlap_sum,  // gradient w.r.t. output overlap sum
-    const int pi,          // piece index to process (0-3)
-    double3* d_ref)        // output: gradient w.r.t. ref pose (accumulated)
-{
-    if (d_overlap_sum == 0.0) return;
-    
-    // Compute transform coefficients for ref tree
-    double c_ref = 0.0, s_ref = 0.0;
-    sincos(ref.z, &s_ref, &c_ref);
-    
-    // Compute only the assigned ref piece
-    d2 ref_poly[MAX_VERTS_PER_PIECE];
-    double ref_aabb_min_x;
-    double ref_aabb_max_x;
-    double ref_aabb_min_y;
-    double ref_aabb_max_y;
-    
-    compute_tree_poly_and_aabb(ref, pi, ref_poly, ref_aabb_min_x, ref_aabb_max_x,
-                                ref_aabb_min_y, ref_aabb_max_y);
-    
-    // Load local piece vertices from constant memory for this piece only
-    d2 ref_local_piece[MAX_VERTS_PER_PIECE];
-    int n1 = const_piece_nverts[pi];
-    for (int v = 0; v < n1; ++v) {
-        int idx = pi * MAX_VERTS_PER_PIECE + v;
-        int base = 2 * idx;
-        ref_local_piece[v].x = const_piece_xy[base + 0];
-        ref_local_piece[v].y = const_piece_xy[base + 1];
-    }
-    
-    // Accumulate gradients locally
-    double3 d_ref_local;
-    d_ref_local.x = 0.0;
-    d_ref_local.y = 0.0;
-    d_ref_local.z = 0.0;
-    
-    // Loop over all trees in the list
-    for (int i = 0; i < n; ++i) {
-        // Read pose with strided access: [i, component]
-        double3 other;
-        other.x = xyt_Nx3[i * 3 + 0];
-        other.y = xyt_Nx3[i * 3 + 1];
-        other.z = xyt_Nx3[i * 3 + 2];
 
-        // Skip if poses are identical
-        if (other.x == ref.x && other.y == ref.y && other.z == ref.z) {
-            continue;
-        }
-
-        // Early exit check
-        double dx = other.x - ref.x;
-        double dy = other.y - ref.y;
-        double dist_sq = dx*dx + dy*dy;
-        double max_overlap_dist = 2.0 * MAX_RADIUS;
-        
-        if (dist_sq > max_overlap_dist * max_overlap_dist) {
-            continue;
-        }
-        
-        // Process only the assigned piece (pi) against all pieces of other tree
-        for (int pj = 0; pj < MAX_PIECES; ++pj) {
-            int n2 = const_piece_nverts[pj];
-            
-            // Compute only this piece of the other tree
-            d2 other_poly[MAX_VERTS_PER_PIECE];
-            double other_aabb_min_x;
-            double other_aabb_max_x;
-            double other_aabb_min_y;
-            double other_aabb_max_y;
-            
-            compute_tree_poly_and_aabb(other, pj, other_poly, other_aabb_min_x, other_aabb_max_x,
-                                        other_aabb_min_y, other_aabb_max_y);
-
-            // AABB overlap test
-            if (ref_aabb_max_x < other_aabb_min_x || other_aabb_max_x < ref_aabb_min_x ||
-                ref_aabb_max_y < other_aabb_min_y || other_aabb_max_y < ref_aabb_min_y) {
-                continue;
-            }
-
-            // Backward through intersection area
-            d2 d_ref_poly[MAX_VERTS_PER_PIECE];
-            d2 d_other_poly[MAX_VERTS_PER_PIECE];
-            
-            backward_convex_intersection_area(
-                ref_poly, n1,
-                other_poly, n2,
-                d_overlap_sum,  // gradient flows from output
-                d_ref_poly,
-                d_other_poly);
-            
-            // Backward through transform for ref piece
-            double3 d_ref_pose_piece;
-            backward_transform_vertices(
-                ref_local_piece, n1,
-                d_ref_poly,
-                c_ref, s_ref,
-                &d_ref_pose_piece);
-            
-            // Accumulate into local gradient
-            d_ref_local.x += d_ref_pose_piece.x;
-            d_ref_local.y += d_ref_pose_piece.y;
-            d_ref_local.z += d_ref_pose_piece.z;
-        }
-    }
-    
-    // Atomically accumulate the local gradient into the output
-    // Multiple threads (one per piece) will contribute to the same gradient
-    atomicAdd(&d_ref->x, d_ref_local.x);
-    atomicAdd(&d_ref->y, d_ref_local.y);
-    atomicAdd(&d_ref->z, d_ref_local.z);
-}
-
-// Backward pass for overlap_ref_with_list
-// Computes gradient of overlap sum w.r.t. ref pose using analytic derivatives
-__device__ void backward_overlap_ref_with_list(
-    const double3 ref,
-    const double* __restrict__ xyt_Nx3,
-    const int n,
-    double d_overlap_sum,  // gradient w.r.t. output overlap sum
-    double3* d_ref)        // output: gradient w.r.t. ref pose
-{
-    d_ref->x = 0.0;
-    d_ref->y = 0.0;
-    d_ref->z = 0.0;
-    
-    // Sum gradients across all 4 pieces
-    for (int pi = 0; pi < MAX_PIECES; ++pi) {
-        backward_overlap_ref_with_list_piece(ref, xyt_Nx3, n, d_overlap_sum, pi, d_ref);
-    }
-}
 
 // Compute the area of a single convex polygon that lies outside the square [-h/2, h/2] x [-h/2, h/2]
 // Uses the clipping algorithm to find the intersection with the square, then subtracts from polygon area
@@ -564,30 +489,23 @@ __device__ void overlap_list_total(
         ref.y = xyt1_Nx3[tree_idx * 3 + 1];
         ref.z = xyt1_Nx3[tree_idx * 3 + 2];
 
+        // Initialize gradient to zero (only first thread does this)
+        if (piece_idx == 0) {
+            out_grads[tree_idx * 3 + 0] = 0.0;
+            out_grads[tree_idx * 3 + 1] = 0.0;
+            out_grads[tree_idx * 3 + 2] = 0.0;
+        }
+        
+        // Ensure initialization is complete before all threads start accumulating
+        __syncthreads();
+
         // Each thread computes overlap for one piece of the reference tree
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx);
+        // The merged function computes both forward and backward passes
+        double3* d_ref_output = (double3*)(&out_grads[tree_idx * 3]);
+        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output);
 
         // Atomic add for overlap sum
         atomicAdd(out_total, local_sum / 2.0);
-
-        // For gradients, all 4 threads participate
-        if (out_grads != NULL) {
-            // Initialize gradient to zero (only first thread does this)
-            if (piece_idx == 0) {
-                out_grads[tree_idx * 3 + 0] = 0.0;
-                out_grads[tree_idx * 3 + 1] = 0.0;
-                out_grads[tree_idx * 3 + 2] = 0.0;
-            }
-            
-            // Ensure initialization is complete before all threads start accumulating
-            __syncthreads();
-            
-            // Point to the output gradient location for this tree
-            double3* d_ref_output = (double3*)(&out_grads[tree_idx * 3]);
-            
-            // Compute gradient contribution from this piece
-            backward_overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, 1.0, piece_idx, d_ref_output);
-        }
     }
 }
 
