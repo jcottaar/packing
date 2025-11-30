@@ -127,7 +127,7 @@ __global__ void test_clip_against_edge_fwd_bwd(
     // Forward pass: call clip_against_edge with metadata
     d2 out_pts[MAX_INTERSECTION_VERTS];
     ClipMetadata meta;
-    int n_out_verts = clip_against_edge_with_metadata(in_pts, n_verts, A, B, out_pts, &meta);
+    int n_out_verts = clip_against_edge(in_pts, n_verts, A, B, out_pts, &meta);
     
     // Store output
     n_out[idx] = n_out_verts;
@@ -187,17 +187,13 @@ __global__ void test_polygon_area_fwd_bwd(
         v[i].y = verts_flat[offset + 1];
     }
     
-    // Forward: compute area
-    double area = polygon_area(v, n);
+    // Merged function: compute area and gradients
+    d2 d_v[MAX_VERTS_PER_PIECE];
+    double area = polygon_area(v, n, d_v);
     areas[idx] = area;
     
-    // Backward: assume upstream gradient d_area = 1.0
+    // Store gradients if requested
     if (compute_gradients) {
-        double d_area = 1.0;
-        d2 d_v[MAX_VERTS_PER_PIECE];
-        backward_polygon_area(v, n, d_area, d_v);
-        
-        // Store gradients
         for (int i = 0; i < n; ++i) {
             int offset = idx * max_n_verts * 2 + i * 2;
             d_verts_flat[offset] = d_v[i].x;

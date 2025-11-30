@@ -32,91 +32,40 @@ __device__ __forceinline__ d2 line_intersection(d2 p1, d2 p2,
     return make_double2(p1.x + t * rx, p1.y + t * ry);
 }
 
-__device__ __forceinline__ int clip_against_edge(
-    const d2* in_pts, int in_count,
-    d2 A, d2 B,
-    d2* out_pts)
-{
-    // Clip a convex polygon "in_pts" against the half-plane defined by
-    // the directed edge A->B: keep points on the left side (cross >= 0).
-    if (in_count == 0) return 0;
-
-    int out_count = 0;
-
-    d2 S = in_pts[in_count - 1];
-    double S_side = cross3(A, B, S);
-
-    for (int i = 0; i < in_count; ++i) {
-        d2 E = in_pts[i];
-        double E_side = cross3(A, B, E);
-
-        bool S_inside = (S_side >= 0.0);
-        bool E_inside = (E_side >= 0.0);
-
-        if (S_inside && E_inside) {
-            // keep E
-            out_pts[out_count++] = E;
-        } else if (S_inside && !E_inside) {
-            // leaving - keep intersection only
-            out_pts[out_count++] = line_intersection(S, E, A, B);
-        } else if (!S_inside && E_inside) {
-            // entering - add intersection then E
-            out_pts[out_count++] = line_intersection(S, E, A, B);
-            out_pts[out_count++] = E;
-        }
-        // else both outside -> keep nothing
-
-        S = E;
-        S_side = E_side;
-    }
-
-    return out_count;
-}
-
-__device__ __forceinline__ double polygon_area(const d2* v, int n) {
-    // Signed polygon area via the shoelace formula (absolute value returned).
-    if (n < 3) return 0.0;
-    double sum = 0.0;
-    for (int i = 0; i < n; ++i) {
-        int j = (i + 1) % n;
-        sum += v[i].x * v[j].y - v[j].x * v[i].y;
-    }
-    double a = 0.5 * sum;
-    return a >= 0.0 ? a : -a;
-}
-
-// ============================================================================
-// BACKWARD PASS PRIMITIVES
-// ============================================================================
-
-// Backward for polygon_area: given d_area (gradient w.r.t. area output),
-// compute gradients w.r.t. each vertex (x,y) coordinate.
+// Compute signed polygon area via the shoelace formula (absolute value returned).
+// Also computes gradients w.r.t. each vertex (x,y) coordinate.
 // Shoelace: A = 0.5 * sum_i (x_i*y_{i+1} - x_{i+1}*y_i)
 // ∂A/∂x_k = 0.5 * (y_{k+1} - y_{k-1})
 // ∂A/∂y_k = 0.5 * (x_{k-1} - x_{k+1})
-__device__ __forceinline__ void backward_polygon_area(
-    const d2* v, int n,
-    double d_area,
-    d2* d_v)  // output: gradients w.r.t each vertex
-{
+__device__ __forceinline__ double polygon_area(const d2* v, int n, d2* d_v) {
     if (n < 3) {
         for (int i = 0; i < n; ++i) {
             d_v[i] = make_double2(0.0, 0.0);
         }
-        return;
+        return 0.0;
     }
     
-    // Compute signed area to determine sign
+    // Compute signed area
     double sum = 0.0;
     for (int i = 0; i < n; ++i) {
         int j = (i + 1) % n;
         sum += v[i].x * v[j].y - v[j].x * v[i].y;
     }
     double signed_area = 0.5 * sum;
-    double sign = (signed_area >= 0.0) ? 1.0 : -1.0;
+    double area = (signed_area >= 0.0) ? signed_area : -signed_area;
     
-    // Gradient of |A| = sign(A) * ∂A/∂v
-    double factor = sign * d_area;
+    // Skip backward if area is zero
+    if (area == 0.0) {
+        for (int i = 0; i < n; ++i) {
+            d_v[i] = make_double2(0.0, 0.0);
+        }
+        return 0.0;
+    }
+    
+    // Compute gradients: gradient of |A| = sign(A) * ∂A/∂v
+    // Implicit d_area = 1.0
+    double sign = (signed_area >= 0.0) ? 1.0 : -1.0;
+    double factor = sign * 1.0;
     
     for (int k = 0; k < n; ++k) {
         int k_prev = (k - 1 + n) % n;
@@ -125,7 +74,13 @@ __device__ __forceinline__ void backward_polygon_area(
         d_v[k].x = factor * 0.5 * (v[k_next].y - v[k_prev].y);
         d_v[k].y = factor * 0.5 * (v[k_prev].x - v[k_next].x);
     }
+    
+    return area;
 }
+
+// ============================================================================
+// BACKWARD PASS PRIMITIVES
+// ============================================================================
 
 // Backward for line_intersection: given d_out (gradient w.r.t. intersection point),
 // compute gradients w.r.t. the four input points p1, p2, q1, q2.
@@ -271,8 +226,8 @@ struct ClipMetadata {
     int src_idx2[MAX_INTERSECTION_VERTS];  // if type==1: next edge vertex index
 };
 
-// Enhanced clip_against_edge that also saves metadata for backward
-__device__ __forceinline__ int clip_against_edge_with_metadata(
+// Clip against edge with metadata for backward pass
+__device__ __forceinline__ int clip_against_edge(
     const d2* in_pts, int in_count,
     d2 A, d2 B,
     d2* out_pts,
@@ -415,7 +370,7 @@ __device__ double convex_intersection_area(
         d2 A = clip[e];
         d2 B = clip[(e + 1) % n_clip];
 
-        int n_out = clip_against_edge_with_metadata(
+        int n_out = clip_against_edge(
             forward_polys[e], forward_counts[e], 
             A, B, 
             forward_polys[e + 1], &metadata[e]);
@@ -425,9 +380,12 @@ __device__ double convex_intersection_area(
 
     // Final polygon is in forward_polys[clip_count]
     int final_n = forward_counts[clip_count];
-    double area = polygon_area(forward_polys[clip_count], final_n);
     
-    // Skip backward pass if area is zero - just zero out gradients
+    // Compute area and gradients through polygon_area
+    d2 d_polyFinal[MAX_INTERSECTION_VERTS];
+    double area = polygon_area(forward_polys[clip_count], final_n, d_polyFinal);
+    
+    // Skip backward pass if area is zero - gradients already zeroed by polygon_area
     if (area == 0.0) {
         for (int i = 0; i < n_subj; ++i) {
             d_subj[i] = make_double2(0.0, 0.0);
@@ -438,10 +396,7 @@ __device__ double convex_intersection_area(
         return 0.0;
     }
     
-    // Backward pass: compute gradients
-    // Backward through polygon_area (gradient w.r.t. area = 1.0)
-    d2 d_polyFinal[MAX_INTERSECTION_VERTS];
-    backward_polygon_area(forward_polys[clip_count], final_n, 1.0, d_polyFinal);
+    // Backward pass: backprop through clipping stages
     
     // Backward through each clipping stage in reverse
     d2 d_current[MAX_INTERSECTION_VERTS];
