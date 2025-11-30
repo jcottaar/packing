@@ -1126,7 +1126,7 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, compute_grad: bool = True, stream: cp.cuda.Stream | None = None):
+def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray = None, stream: cp.cuda.Stream | None = None):
     """Compute total overlap sum for multiple ensembles in parallel.
     
     Parameters
@@ -1135,64 +1135,73 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, compute_grad: boo
         Pose arrays for first set of trees. Must be C-contiguous and correct dtype.
     xyt2 : cp.ndarray, shape (n_ensembles, n_trees, 3)
         Pose arrays for second set of trees. Must be C-contiguous and correct dtype.
-    compute_grad : bool, optional
-        If True, compute and return gradients. Default is True.
+    out_cost : cp.ndarray, shape (n_ensembles,)
+        Preallocated array for output costs. Must be provided.
+    out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3)
+        Preallocated array for gradients. Must be provided.
     stream : cp.cuda.Stream, optional
         CUDA stream for kernel execution. If None, uses default stream.
-    
-    Returns
-    -------
-    totals : cp.ndarray, shape (n_ensembles,)
-        Total overlap for each ensemble.
-    grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
-        Gradient arrays. Only returned if compute_grad=True.
     """
     _ensure_initialized()
-    
-    # Determine expected dtype based on USE_FLOAT32
-    expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
-    
-    # Assert inputs are 3D arrays
-    if xyt1.ndim != 3 or xyt1.shape[2] != 3:
-        raise ValueError(f"xyt1 must be shape (n_ensembles, n_trees, 3), got {xyt1.shape}")
-    if xyt2.ndim != 3 or xyt2.shape[2] != 3:
-        raise ValueError(f"xyt2 must be shape (n_ensembles, n_trees, 3), got {xyt2.shape}")
-    
-    # Assert correct dtype
-    if xyt1.dtype != expected_dtype:
-        raise ValueError(f"xyt1 must have dtype {expected_dtype}, got {xyt1.dtype}")
-    if xyt2.dtype != expected_dtype:
-        raise ValueError(f"xyt2 must have dtype {expected_dtype}, got {xyt2.dtype}")
-    
-    # Assert they are contiguous
-    if not xyt1.flags.c_contiguous:
-        raise ValueError("xyt1 must be C-contiguous")
-    if not xyt2.flags.c_contiguous:
-        raise ValueError("xyt2 must be C-contiguous")
-    
-    # Validate matching dimensions
-    if xyt1.shape[0] != xyt2.shape[0]:
-        raise ValueError(f"xyt1 and xyt2 must have same number of ensembles: {xyt1.shape[0]} vs {xyt2.shape[0]}")
-    if xyt1.shape[1] != xyt2.shape[1]:
-        raise ValueError(f"xyt1 and xyt2 must have same number of trees: {xyt1.shape[1]} vs {xyt2.shape[1]}")
     
     num_ensembles = xyt1.shape[0]
     n_trees = xyt1.shape[1]
     dtype = xyt1.dtype
     
     if num_ensembles == 0:
-        out_totals = cp.array([], dtype=dtype)
-        if compute_grad:
-            out_grads = cp.zeros((0, 0, 3), dtype=dtype)
-            return out_totals, out_grads
-        return out_totals, None
+        return
     
-    # Allocate outputs (ONLY allocations allowed)
-    out_totals = cp.zeros(num_ensembles, dtype=dtype)
-    out_grads = None
+    if kgs.debugging_mode >= 2:
+        # Determine expected dtype based on USE_FLOAT32
+        expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
+        
+        # Assert inputs are 3D arrays
+        if xyt1.ndim != 3 or xyt1.shape[2] != 3:
+            raise ValueError(f"xyt1 must be shape (n_ensembles, n_trees, 3), got {xyt1.shape}")
+        if xyt2.ndim != 3 or xyt2.shape[2] != 3:
+            raise ValueError(f"xyt2 must be shape (n_ensembles, n_trees, 3), got {xyt2.shape}")
+        
+        # Assert correct dtype
+        if xyt1.dtype != expected_dtype:
+            raise ValueError(f"xyt1 must have dtype {expected_dtype}, got {xyt1.dtype}")
+        if xyt2.dtype != expected_dtype:
+            raise ValueError(f"xyt2 must have dtype {expected_dtype}, got {xyt2.dtype}")
+        
+        # Assert they are contiguous
+        if not xyt1.flags.c_contiguous:
+            raise ValueError("xyt1 must be C-contiguous")
+        if not xyt2.flags.c_contiguous:
+            raise ValueError("xyt2 must be C-contiguous")
+        
+        # Validate matching dimensions
+        if xyt1.shape[0] != xyt2.shape[0]:
+            raise ValueError(f"xyt1 and xyt2 must have same number of ensembles: {xyt1.shape[0]} vs {xyt2.shape[0]}")
+        if xyt1.shape[1] != xyt2.shape[1]:
+            raise ValueError(f"xyt1 and xyt2 must have same number of trees: {xyt1.shape[1]} vs {xyt2.shape[1]}")
+        
+        # Assert outputs are provided
+        if out_cost is None:
+            raise ValueError("out_cost must be provided")
+        if out_grads is None:
+            raise ValueError("out_grads must be provided")
+        
+        # Validate output array shapes and types
+        if out_cost.shape != (num_ensembles,):
+            raise ValueError(f"out_cost must have shape ({num_ensembles},), got {out_cost.shape}")
+        if out_grads.shape != (num_ensembles, n_trees, 3):
+            raise ValueError(f"out_grads must have shape ({num_ensembles}, {n_trees}, 3), got {out_grads.shape}")
+        if out_cost.dtype != dtype:
+            raise ValueError(f"out_cost must have dtype {dtype}, got {out_cost.dtype}")
+        if out_grads.dtype != dtype:
+            raise ValueError(f"out_grads must have dtype {dtype}, got {out_grads.dtype}")
+        if not out_cost.flags.c_contiguous:
+            raise ValueError("out_cost must be C-contiguous")
+        if not out_grads.flags.c_contiguous:
+            raise ValueError("out_grads must be C-contiguous")
     
-    if compute_grad:
-        out_grads = cp.zeros((num_ensembles, n_trees, 3), dtype=dtype)
+    # Zero the output arrays
+    out_cost[:] = 0
+    out_grads[:] = 0
     
     # Launch kernel: one block per ensemble, n_trees * 4 threads per block
     blocks = num_ensembles
@@ -1205,20 +1214,15 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, compute_grad: boo
             xyt1,
             xyt2,
             np.int32(n_trees),
-            out_totals,
-            out_grads if out_grads is not None else cp.array([0], dtype=cp.uint64),
+            out_cost,
+            out_grads,
             np.int32(num_ensembles),
         ),
         stream=stream,
     )
-    
-    if compute_grad:
-        return out_totals, out_grads
-    else:
-        return out_totals, None
 
 
-def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool = False, stream: cp.cuda.Stream | None = None):
+def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray = None, out_grad_h: cp.ndarray = None, stream: cp.cuda.Stream | None = None):
     """Compute total boundary violation area for multiple ensembles in parallel.
     
     Parameters
@@ -1227,64 +1231,79 @@ def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool =
         Pose arrays. Must be C-contiguous and correct dtype.
     h : cp.ndarray, shape (n_ensembles,)
         Boundary sizes for each ensemble.
-    compute_grad : bool, optional
-        If True, compute and return gradients. Default is False.
+    out_cost : cp.ndarray, shape (n_ensembles,)
+        Preallocated array for output costs. Must be provided.
+    out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3)
+        Preallocated array for gradients. Must be provided.
+    out_grad_h : cp.ndarray, shape (n_ensembles,)
+        Preallocated array for h gradients. Must be provided.
     stream : cp.cuda.Stream, optional
         CUDA stream for kernel execution. If None, uses default stream.
-    
-    Returns
-    -------
-    totals : cp.ndarray, shape (n_ensembles,)
-        Total boundary violation area for each ensemble.
-    grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
-        Gradient arrays. Only returned if compute_grad=True.
-    grad_h : cp.ndarray, shape (n_ensembles,), optional
-        Gradient w.r.t. h. Only returned if compute_grad=True.
     """
     _ensure_initialized()
-    
-    # Determine expected dtype based on USE_FLOAT32
-    expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
-    
-    # Assert inputs are correct shape
-    if xyt.ndim != 3 or xyt.shape[2] != 3:
-        raise ValueError(f"xyt must be shape (n_ensembles, n_trees, 3), got {xyt.shape}")
-    if h.ndim != 1:
-        raise ValueError(f"h must be 1D array, got shape {h.shape}")
-    
-    # Assert correct dtype
-    if xyt.dtype != expected_dtype:
-        raise ValueError(f"xyt must have dtype {expected_dtype}, got {xyt.dtype}")
-    if h.dtype != expected_dtype:
-        raise ValueError(f"h must have dtype {expected_dtype}, got {h.dtype}")
-    
-    # Assert contiguous
-    if not xyt.flags.c_contiguous:
-        raise ValueError("xyt must be C-contiguous")
     
     num_ensembles = xyt.shape[0]
     n_trees = xyt.shape[1]
     dtype = xyt.dtype
     
-    if h.shape[0] != num_ensembles:
-        raise ValueError(f"h must have {num_ensembles} elements, got {h.shape[0]}")
-    
     if num_ensembles == 0:
-        out_totals = cp.array([], dtype=dtype)
-        if compute_grad:
-            out_grads = cp.zeros((0, 0, 3), dtype=dtype)
-            out_grad_h = cp.zeros(0, dtype=dtype)
-            return out_totals, out_grads, out_grad_h
-        return out_totals, None, None
+        return
     
-    # Allocate outputs (ONLY allocations allowed)
-    out_totals = cp.zeros(num_ensembles, dtype=dtype)
-    out_grads = None
-    out_grad_h = None
+    if kgs.debugging_mode >= 2:
+        # Determine expected dtype based on USE_FLOAT32
+        expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
+        
+        # Assert inputs are correct shape
+        if xyt.ndim != 3 or xyt.shape[2] != 3:
+            raise ValueError(f"xyt must be shape (n_ensembles, n_trees, 3), got {xyt.shape}")
+        if h.ndim != 1:
+            raise ValueError(f"h must be 1D array, got shape {h.shape}")
+        
+        # Assert correct dtype
+        if xyt.dtype != expected_dtype:
+            raise ValueError(f"xyt must have dtype {expected_dtype}, got {xyt.dtype}")
+        if h.dtype != expected_dtype:
+            raise ValueError(f"h must have dtype {expected_dtype}, got {h.dtype}")
+        
+        # Assert contiguous
+        if not xyt.flags.c_contiguous:
+            raise ValueError("xyt must be C-contiguous")
+        
+        if h.shape[0] != num_ensembles:
+            raise ValueError(f"h must have {num_ensembles} elements, got {h.shape[0]}")
+        
+        # Assert outputs are provided
+        if out_cost is None:
+            raise ValueError("out_cost must be provided")
+        if out_grads is None:
+            raise ValueError("out_grads must be provided")
+        if out_grad_h is None:
+            raise ValueError("out_grad_h must be provided")
+        
+        # Validate output array shapes and types
+        if out_cost.shape != (num_ensembles,):
+            raise ValueError(f"out_cost must have shape ({num_ensembles},), got {out_cost.shape}")
+        if out_grads.shape != (num_ensembles, n_trees, 3):
+            raise ValueError(f"out_grads must have shape ({num_ensembles}, {n_trees}, 3), got {out_grads.shape}")
+        if out_grad_h.shape != (num_ensembles,):
+            raise ValueError(f"out_grad_h must have shape ({num_ensembles},), got {out_grad_h.shape}")
+        if out_cost.dtype != dtype:
+            raise ValueError(f"out_cost must have dtype {dtype}, got {out_cost.dtype}")
+        if out_grads.dtype != dtype:
+            raise ValueError(f"out_grads must have dtype {dtype}, got {out_grads.dtype}")
+        if out_grad_h.dtype != dtype:
+            raise ValueError(f"out_grad_h must have dtype {dtype}, got {out_grad_h.dtype}")
+        if not out_cost.flags.c_contiguous:
+            raise ValueError("out_cost must be C-contiguous")
+        if not out_grads.flags.c_contiguous:
+            raise ValueError("out_grads must be C-contiguous")
+        if not out_grad_h.flags.c_contiguous:
+            raise ValueError("out_grad_h must be C-contiguous")
     
-    if compute_grad:
-        out_grads = cp.zeros((num_ensembles, n_trees, 3), dtype=dtype)
-        out_grad_h = cp.zeros(num_ensembles, dtype=dtype)
+    # Zero the output arrays
+    out_cost[:] = 0
+    out_grads[:] = 0
+    out_grad_h[:] = 0
     
     # Launch kernel: one block per ensemble, n_trees * 4 threads per block
     blocks = num_ensembles
@@ -1297,21 +1316,16 @@ def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool =
             xyt,
             np.int32(n_trees),
             h,
-            out_totals,
-            out_grads if out_grads is not None else cp.array([0], dtype=cp.uint64),
-            out_grad_h if out_grad_h is not None else cp.array([0], dtype=cp.uint64),
+            out_cost,
+            out_grads,
+            out_grad_h,
             np.int32(num_ensembles),
         ),
         stream=stream,
     )
-    
-    if compute_grad:
-        return out_totals, out_grads, out_grad_h
-    else:
-        return out_totals, None, None
 
 
-def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_grad: bool = False, stream: cp.cuda.Stream | None = None):
+def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray = None, out_grad_h: cp.ndarray = None, stream: cp.cuda.Stream | None = None):
     """Compute total boundary distance cost for multiple ensembles in parallel.
     
     For each tree, computes the maximum squared distance of any vertex outside the boundary.
@@ -1323,66 +1337,81 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_gra
         Pose arrays. Must be C-contiguous and correct dtype.
     h : cp.ndarray, shape (n_ensembles, 3)
         Boundary parameters for each ensemble: [size, x_offset, y_offset].
-    compute_grad : bool, optional
-        If True, compute and return gradients. Default is False.
+    out_cost : cp.ndarray, shape (n_ensembles,)
+        Preallocated array for output costs. Must be provided.
+    out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3)
+        Preallocated array for gradients. Must be provided.
+    out_grad_h : cp.ndarray, shape (n_ensembles, 3)
+        Preallocated array for h gradients. Must be provided.
     stream : cp.cuda.Stream, optional
         CUDA stream for kernel execution. If None, uses default stream.
-    
-    Returns
-    -------
-    totals : cp.ndarray, shape (n_ensembles,)
-        Total boundary distance cost for each ensemble.
-    grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
-        Gradient arrays. Only returned if compute_grad=True.
-    grad_h : cp.ndarray, shape (n_ensembles, 3), optional
-        Gradient w.r.t. h. Only returned if compute_grad=True.
     """
     _ensure_initialized()
-    
-    # Determine expected dtype based on USE_FLOAT32
-    expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
-    
-    # Assert inputs are correct shape
-    if xyt.ndim != 3 or xyt.shape[2] != 3:
-        raise ValueError(f"xyt must be shape (n_ensembles, n_trees, 3), got {xyt.shape}")
-    if h.ndim != 2 or h.shape[1] != 3:
-        raise ValueError(f"h must be shape (n_ensembles, 3), got {h.shape}")
-    
-    # Assert correct dtype
-    if xyt.dtype != expected_dtype:
-        raise ValueError(f"xyt must have dtype {expected_dtype}, got {xyt.dtype}")
-    if h.dtype != expected_dtype:
-        raise ValueError(f"h must have dtype {expected_dtype}, got {h.dtype}")
-    
-    # Assert contiguous
-    if not xyt.flags.c_contiguous:
-        raise ValueError("xyt must be C-contiguous")
-    if not h.flags.c_contiguous:
-        raise ValueError("h must be C-contiguous")
     
     num_ensembles = xyt.shape[0]
     n_trees = xyt.shape[1]
     dtype = xyt.dtype
     
-    if h.shape[0] != num_ensembles:
-        raise ValueError(f"h must have {num_ensembles} rows, got {h.shape[0]}")
-    
     if num_ensembles == 0:
-        out_totals = cp.array([], dtype=dtype)
-        if compute_grad:
-            out_grads = cp.zeros((0, 0, 3), dtype=dtype)
-            out_grad_h = cp.zeros((0, 3), dtype=dtype)
-            return out_totals, out_grads, out_grad_h
-        return out_totals, None, None
+        return
     
-    # Allocate outputs (ONLY allocations allowed)
-    out_totals = cp.zeros(num_ensembles, dtype=dtype)
-    out_grads = None
-    out_grad_h = None
+    if kgs.debugging_mode >= 2:
+        # Determine expected dtype based on USE_FLOAT32
+        expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
+        
+        # Assert inputs are correct shape
+        if xyt.ndim != 3 or xyt.shape[2] != 3:
+            raise ValueError(f"xyt must be shape (n_ensembles, n_trees, 3), got {xyt.shape}")
+        if h.ndim != 2 or h.shape[1] != 3:
+            raise ValueError(f"h must be shape (n_ensembles, 3), got {h.shape}")
+        
+        # Assert correct dtype
+        if xyt.dtype != expected_dtype:
+            raise ValueError(f"xyt must have dtype {expected_dtype}, got {xyt.dtype}")
+        if h.dtype != expected_dtype:
+            raise ValueError(f"h must have dtype {expected_dtype}, got {h.dtype}")
+        
+        # Assert contiguous
+        if not xyt.flags.c_contiguous:
+            raise ValueError("xyt must be C-contiguous")
+        if not h.flags.c_contiguous:
+            raise ValueError("h must be C-contiguous")
+        
+        if h.shape[0] != num_ensembles:
+            raise ValueError(f"h must have {num_ensembles} rows, got {h.shape[0]}")
+        
+        # Assert outputs are provided
+        if out_cost is None:
+            raise ValueError("out_cost must be provided")
+        if out_grads is None:
+            raise ValueError("out_grads must be provided")
+        if out_grad_h is None:
+            raise ValueError("out_grad_h must be provided")
+        
+        # Validate output array shapes and types
+        if out_cost.shape != (num_ensembles,):
+            raise ValueError(f"out_cost must have shape ({num_ensembles},), got {out_cost.shape}")
+        if out_grads.shape != (num_ensembles, n_trees, 3):
+            raise ValueError(f"out_grads must have shape ({num_ensembles}, {n_trees}, 3), got {out_grads.shape}")
+        if out_grad_h.shape != (num_ensembles, 3):
+            raise ValueError(f"out_grad_h must have shape ({num_ensembles}, 3), got {out_grad_h.shape}")
+        if out_cost.dtype != dtype:
+            raise ValueError(f"out_cost must have dtype {dtype}, got {out_cost.dtype}")
+        if out_grads.dtype != dtype:
+            raise ValueError(f"out_grads must have dtype {dtype}, got {out_grads.dtype}")
+        if out_grad_h.dtype != dtype:
+            raise ValueError(f"out_grad_h must have dtype {dtype}, got {out_grad_h.dtype}")
+        if not out_cost.flags.c_contiguous:
+            raise ValueError("out_cost must be C-contiguous")
+        if not out_grads.flags.c_contiguous:
+            raise ValueError("out_grads must be C-contiguous")
+        if not out_grad_h.flags.c_contiguous:
+            raise ValueError("out_grad_h must be C-contiguous")
     
-    if compute_grad:
-        out_grads = cp.zeros((num_ensembles, n_trees, 3), dtype=dtype)
-        out_grad_h = cp.zeros((num_ensembles, 3), dtype=dtype)
+    # Zero the output arrays
+    out_cost[:] = 0
+    out_grads[:] = 0
+    out_grad_h[:] = 0
     
     # Launch kernel: one block per ensemble, n_trees threads per block (1 thread per tree)
     blocks = num_ensembles
@@ -1395,18 +1424,13 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, compute_gra
             xyt,
             np.int32(n_trees),
             h,
-            out_totals,
-            out_grads if out_grads is not None else cp.array([0], dtype=cp.uint64),
-            out_grad_h if out_grad_h is not None else cp.array([0], dtype=cp.uint64),
+            out_cost,
+            out_grads,
+            out_grad_h,
             np.int32(num_ensembles),
         ),
         stream=stream,
     )
-    
-    if compute_grad:
-        return out_totals, out_grads, out_grad_h
-    else:
-        return out_totals, None, None
 
 
 

@@ -35,7 +35,7 @@ class Cost(kgs.BaseClass):
     
     def compute_cost_allocate(self, sol:kgs.SolutionCollection):
         # Allocates gradient arrays and calls compute_cost
-        cost = cp.zeros(sol.N_solutions)
+        cost = cp.zeros(sol.N_solutions, dtype=sol.xyt.dtype)
         grad_xyt = cp.zeros_like(sol.xyt)
         grad_bound = cp.zeros_like(sol.h)
         self.compute_cost(sol, cost, grad_xyt, grad_bound)
@@ -82,11 +82,12 @@ class CostCompound(Cost):
         grad_bound[:] = 0
         
         # Check if we need to allocate or reallocate temporary arrays
+        # Use dtype matching the output arrays to ensure consistency
         current_shape = (sol.N_solutions, sol.xyt.shape, sol.h.shape)
         if self._temp_shape != current_shape:
-            self._temp_cost = cp.zeros(sol.N_solutions)
-            self._temp_grad_xyt = cp.zeros_like(sol.xyt)
-            self._temp_grad_bound = cp.zeros_like(sol.h)
+            self._temp_cost = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+            self._temp_grad_xyt = cp.zeros(sol.xyt.shape, dtype=grad_xyt.dtype)
+            self._temp_grad_bound = cp.zeros(sol.h.shape, dtype=grad_bound.dtype)
             self._temp_shape = current_shape
         
         for c in self.costs:
@@ -147,9 +148,7 @@ class CollisionCostOverlappingArea(CollisionCost):
         return area, grad
 
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
-        result_cost,result_grad = pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt)
-        cost[:] = result_cost
-        grad_xyt[:] = result_grad
+        pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, out_cost=cost, out_grads=grad_xyt)
         grad_bound[:] = 0
     
 
@@ -219,10 +218,10 @@ class BoundaryCost(Cost):
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
         raise Error('TODO: deal with square offsets')
-        result_cost,result_grad,result_grad_h = pack_cuda.boundary_multi_ensemble(sol.xyt, sol.h[:,0], compute_grad=True)
-        cost[:] = result_cost
-        grad_xyt[:] = result_grad
-        grad_bound[:,0] = result_grad_h
+        grad_h_temp = cp.zeros(sol.N_solutions, dtype=sol.h.dtype)
+        pack_cuda.boundary_multi_ensemble(sol.xyt, sol.h[:,0], out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_h_temp)
+        grad_bound[:] = 0
+        grad_bound[:,0] = grad_h_temp
 
 @dataclass 
 class AreaCost(Cost):
@@ -372,10 +371,7 @@ class BoundaryDistanceCost(Cost):
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
         if self.use_kernel:
-            result_cost,result_grad,result_grad_h = pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, compute_grad=True)
-            cost[:] = result_cost
-            grad_xyt[:] = result_grad
-            grad_bound[:] = result_grad_h
+            pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_bound)
         else:
             super()._compute_cost(sol, cost, grad_xyt, grad_bound)
             

@@ -13,6 +13,7 @@ import pack_cuda_primitives_test
 pack_cuda.USE_FLOAT32 = True
 
 def run_all_tests():
+    kgs.debugging_mode = 2
     pack_cuda_primitives_test.run_all_tests()
     test_costs()
     print("All tests passed.")
