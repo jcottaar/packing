@@ -441,16 +441,16 @@ class CollisionCostSeparation(CollisionCost):
                                 y1=y1,
                                 th1=th1,
                             )
-                        import pack_cuda_primitives_test
-                        sep2, grad2 = pack_cuda_primitives_test.sat_separation_with_grad_pose_fwd_bwd(
-                            cp.array(pa_local),
-                            cp.array(pb_world2),
-                            x1, y1, np.cos(th1), np.sin(th1),
-                            compute_gradients=True
-                        )
-                        print(sep, sep2.get().item())
-                        print(grad2, (dsep_dx, dsep_dy, dsep_dtheta))
-                        print('')
+                        # import pack_cuda_primitives_test
+                        # sep2, grad2 = pack_cuda_primitives_test.sat_separation_with_grad_pose_fwd_bwd(
+                        #     cp.array(pa_local),
+                        #     cp.array(pb_world2),
+                        #     x1, y1, np.cos(th1), np.sin(th1),
+                        #     compute_gradients=True
+                        # )
+                        # print(sep, sep2.get().item())
+                        # print( (dsep_dx, dsep_dy, dsep_dtheta), grad2)
+                        # print('')
 
                     if self.use_max:
                         if sep > max_sep:
