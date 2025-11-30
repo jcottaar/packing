@@ -150,6 +150,324 @@ class CollisionCostOverlappingArea(CollisionCost):
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
         pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, out_cost=cost, out_grads=grad_xyt)
         grad_bound[:] = 0
+
+
+class CollisionCostSeparation(CollisionCost):
+    # Collision cost based on minimum separation distance between trees
+    # Cost = sum(separation_distance^2) over all pairwise overlaps
+    # Only overlapping pairs contribute (separated pairs have zero cost)
+    # Separation distance = minimum distance trees must move to no longer overlap
+    
+    def _compute_separation_distance_with_critical_vertex_grad(
+        self,
+        poly1_world: Polygon,
+        poly2_world: Polygon,
+        local_coords1: np.ndarray,
+        x1: float,
+        y1: float,
+        th1: float,
+    ):
+        """
+        Compute minimum separation distance (penetration depth) between poly1 and poly2,
+        AND the derivatives of that separation wrt the pose (x, y, theta) of poly1.
+
+        Arguments
+        ---------
+        poly1_world : Polygon
+            Convex piece of tree1 in world coordinates.
+        poly2_world : Polygon
+            Convex piece of tree2 in world coordinates.
+        local_coords1 : (N, 2) ndarray
+            Vertices of this piece in tree1's local coordinate frame (center-tree coords),
+            in the SAME order used to build poly1_world.
+        x1, y1 : float
+            Translation of tree1.
+        th1 : float
+            Rotation (radians) of tree1.
+
+        Returns
+        -------
+        sep : float
+            Minimum penetration depth (0 if no overlap).
+        dsep_dx : float
+            Derivative of sep wrt translation x1 of poly1.
+        dsep_dy : float
+            Derivative of sep wrt translation y1 of poly1.
+        dsep_dtheta : float
+            Derivative of sep wrt rotation th1 of poly1.
+        """
+
+        # Early exit: no overlap => zero cost, zero gradient
+        if not poly1_world.intersects(poly2_world):
+            return 0.0, 0.0, 0.0, 0.0
+
+        overlap = poly1_world.intersection(poly2_world)
+        if overlap.is_empty or overlap.area < 1e-10:
+            return 0.0, 0.0, 0.0, 0.0
+
+        # Recompute world coords of poly1 piece from local coords and pose, to avoid
+        # any reordering Shapely might do.
+        c = np.cos(th1)
+        s = np.sin(th1)
+        R = np.array([[c, -s],
+                    [s,  c]], dtype=float)
+        offset = np.array([x1, y1], dtype=float)
+
+        world_coords1 = local_coords1 @ R.T + offset  # (N1, 2)
+        if world_coords1.shape[0] < 3:
+            return 0.0, 0.0, 0.0, 0.0
+
+        # For poly2 we only need world coordinates; we don't need its local frame.
+        coords2 = np.array(poly2_world.exterior.coords[:-1])  # (N2, 2)
+        if coords2.shape[0] < 3:
+            return 0.0, 0.0, 0.0, 0.0
+
+        min_penetration = np.inf
+
+        # Data for the active axis
+        best_normal = None          # unit normal n
+        best_case = None            # "pen1" or "pen2"
+        best_v_idx = -1             # index of critical vertex in world_coords1 / local_coords1
+        best_w_world = None         # opposing vertex (world coords) in poly2
+        axis_from_poly1 = False     # did axis come from poly1's edges?
+
+        # Helper: iterate over edge normals of a given vertex array
+        def iter_axes(coords, is_poly1_axis: bool):
+            n_verts = coords.shape[0]
+            for i in range(n_verts):
+                p1 = coords[i]
+                p2 = coords[(i + 1) % n_verts]
+                edge = p2 - p1
+
+                # perpendicular vector
+                normal = np.array([-edge[1], edge[0]], dtype=float)
+                norm_len = np.linalg.norm(normal)
+                if norm_len < 1e-10:
+                    continue
+                normal /= norm_len
+                yield normal, is_poly1_axis
+
+        # Precompute projections of poly1 on-demand, so we reuse them per axis
+        # (we'll re-project for each axis anyway since normal changes)
+        for normal, is_poly1_axis in iter_axes(world_coords1, True):
+            # Poly1 axis
+            proj1 = world_coords1 @ normal
+            proj2 = coords2 @ normal
+
+            min1, max1 = proj1.min(), proj1.max()
+            min2, max2 = proj2.min(), proj2.max()
+
+            if max1 < min2 or max2 < min1:
+                continue  # separated on this axis
+
+            pen1 = max1 - min2      # move poly1 along -normal
+            pen2 = max2 - min1      # move poly1 along +normal
+            penetration = min(pen1, pen2)
+            if penetration < min_penetration:
+                min_penetration = penetration
+                best_normal = normal.copy()
+                axis_from_poly1 = True
+
+                if pen1 <= pen2:
+                    best_case = "pen1"
+                    best_v_idx = int(np.argmax(proj1))   # vertex in poly1 at max1
+                    w_idx = int(np.argmin(proj2))        # vertex in poly2 at min2
+                    best_w_world = coords2[w_idx].copy()
+                else:
+                    best_case = "pen2"
+                    best_v_idx = int(np.argmin(proj1))   # vertex in poly1 at min1
+                    w_idx = int(np.argmax(proj2))        # vertex in poly2 at max2
+                    best_w_world = coords2[w_idx].copy()
+
+        # Also check axes from poly2 edges
+        for normal, is_poly1_axis in iter_axes(coords2, False):
+            proj1 = world_coords1 @ normal
+            proj2 = coords2 @ normal
+
+            min1, max1 = proj1.min(), proj1.max()
+            min2, max2 = proj2.min(), proj2.max()
+
+            if max1 < min2 or max2 < min1:
+                continue
+
+            pen1 = max1 - min2
+            pen2 = max2 - min1
+            penetration = min(pen1, pen2)
+            if penetration < min_penetration:
+                min_penetration = penetration
+                best_normal = normal.copy()
+                axis_from_poly1 = False
+
+                if pen1 <= pen2:
+                    best_case = "pen1"
+                    best_v_idx = int(np.argmax(proj1))
+                    w_idx = int(np.argmin(proj2))
+                    best_w_world = coords2[w_idx].copy()
+                else:
+                    best_case = "pen2"
+                    best_v_idx = int(np.argmin(proj1))
+                    w_idx = int(np.argmax(proj2))
+                    best_w_world = coords2[w_idx].copy()
+
+        # No valid penetrating axis found
+        if (not np.isfinite(min_penetration) or best_normal is None or
+            best_case is None or best_v_idx < 0 or best_w_world is None):
+            return 0.0, 0.0, 0.0, 0.0
+
+        sep = float(min_penetration)
+
+        # -------- dsep/dx, dsep/dy from ∂p/∂v --------
+        # For a fixed axis, penetration gradient wrt critical vertex is ±n
+        if best_case == "pen1":
+            # p = max1 - min2 => p ≈ (v - w) · n  at critical vertex
+            grad_v = best_normal.copy()
+        else:  # "pen2"
+            # p = max2 - min1 => p ≈ (w - v) · n
+            grad_v = -best_normal.copy()
+
+        dsep_dx = float(grad_v[0])  # dv/dx = [1,0]
+        dsep_dy = float(grad_v[1])  # dv/dy = [0,1]
+
+        # -------- dsep/dtheta: vertex motion + axis rotation (if axis from poly1) --------
+        # local coords of the critical vertex
+        vx0, vy0 = local_coords1[best_v_idx]
+
+        # dv/dtheta from local coords
+        sv = np.sin(th1)
+        cv = np.cos(th1)
+        dvx_dt = -sv * vx0 - cv * vy0
+        dvy_dt =  cv * vx0 - sv * vy0
+
+        # term from vertex motion: ∂p/∂v · dv/dθ
+        term_vertex = grad_v[0] * dvx_dt + grad_v[1] * dvy_dt
+
+        # term from axis rotation (only if axis came from poly1)
+        if axis_from_poly1:
+            # critical vertex world coords
+            v_world = world_coords1[best_v_idx]
+            w_world = best_w_world
+
+            if best_case == "pen1":
+                # p = (v - w) · n => ∂p/∂n = (v - w)
+                grad_n = v_world - w_world
+            else:
+                # p = (w - v) · n => ∂p/∂n = (w - v)
+                grad_n = w_world - v_world
+
+            # n(θ) = R(θ) n0 => dn/dθ = J n,  J = [[0, -1], [1, 0]]
+            dn_dt = np.array([-best_normal[1], best_normal[0]], dtype=float)
+
+            term_axis = grad_n[0] * dn_dt[0] + grad_n[1] * dn_dt[1]
+        else:
+            term_axis = 0.0
+
+        dsep_dtheta = float(term_vertex + term_axis)
+
+        return sep, dsep_dx, dsep_dy, dsep_dtheta
+
+    
+    def _compute_cost_one_tree_ref(self,
+                               xyt1: cp.ndarray,
+                               xyt2: cp.ndarray,
+                               tree1: Polygon,
+                               tree2: list):
+        """
+        Sum squared separation distance over all overlapping tree pairs.
+
+        For each pair (this tree vs another tree), we:
+        - Break both into convex pieces.
+        - For each piece pair, compute SAT-based separation and gradients
+            wrt (x1, y1, th1) using the helper.
+        - Take the maximum separation over all piece pairs.
+        - Add max_sep^2 to the cost, and use the gradient at the max piece pair.
+        """
+
+        total_sep_squared = 0.0
+        total_grad = cp.zeros_like(xyt1)
+
+        # Pose of this tree
+        x1 = float(xyt1[0].get().item())
+        y1 = float(xyt1[1].get().item())
+        th1 = float(xyt1[2].get().item())
+
+        # Transform convex breakdown pieces for this tree
+        def transformed_pieces_for_tree1(xc, yc, th):
+            c = np.cos(th)
+            s = np.sin(th)
+            R = np.array([[c, -s],
+                        [s,  c]], dtype=float)
+            offset = np.array([xc, yc], dtype=float)
+            pieces = []
+            for poly in kgs.convex_breakdown:
+                local_coords = np.array(poly.exterior.coords[:-1])        # (N, 2)
+                world_coords = local_coords @ R.T + offset                # (N, 2)
+                poly_world = Polygon(world_coords)
+                pieces.append((poly_world, local_coords))
+            return pieces
+
+        def transformed_pieces_other_tree(xc, yc, th):
+            c = np.cos(th)
+            s = np.sin(th)
+            R = np.array([[c, -s],
+                        [s,  c]], dtype=float)
+            offset = np.array([xc, yc], dtype=float)
+            pieces = []
+            for poly in kgs.convex_breakdown:
+                local_coords = np.array(poly.exterior.coords[:-1])        # not used for grads
+                world_coords = local_coords @ R.T + offset
+                poly_world = Polygon(world_coords)
+                pieces.append(poly_world)
+            return pieces
+
+        pieces_a = transformed_pieces_for_tree1(x1, y1, th1)
+
+        # Iterate over each "other tree" pose
+        for j in range(xyt2.shape[0]):
+            xb = float(xyt2[j, 0].get().item())
+            yb = float(xyt2[j, 1].get().item())
+            thb = float(xyt2[j, 2].get().item())
+
+            pieces_b = transformed_pieces_other_tree(xb, yb, thb)
+
+            # For this pair of trees: max separation over all piece pairs
+            max_sep = 0.0
+            best_dsep_dx = 0.0
+            best_dsep_dy = 0.0
+            best_dsep_dtheta = 0.0
+
+            for (pa_world, pa_local) in pieces_a:
+                for pb_world in pieces_b:
+                    sep, dsep_dx, dsep_dy, dsep_dtheta = \
+                        self._compute_separation_distance_with_critical_vertex_grad(
+                            poly1_world=pa_world,
+                            poly2_world=pb_world,
+                            local_coords1=pa_local,
+                            x1=x1,
+                            y1=y1,
+                            th1=th1,
+                        )
+
+                    if sep > max_sep:
+                        max_sep = sep
+                        best_dsep_dx = dsep_dx
+                        best_dsep_dy = dsep_dy
+                        best_dsep_dtheta = dsep_dtheta
+
+            if max_sep <= 0.0:
+                continue
+
+            # Cost contribution: sep^2
+            total_sep_squared += max_sep ** 2
+
+            # Gradient of sep^2: 2 * sep * dsep/dparam
+            grad = cp.zeros_like(xyt1)
+            grad[0] = 2.0 * max_sep * best_dsep_dx
+            grad[1] = 2.0 * max_sep * best_dsep_dy
+            grad[2] = 2.0 * max_sep * best_dsep_dtheta
+
+            total_grad += grad
+
+        return cp.array(total_sep_squared), total_grad
     
 
 @dataclass

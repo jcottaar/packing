@@ -16,6 +16,8 @@ from IPython.display import HTML, display, clear_output
 from scipy import stats
 from typeguard import typechecked
 
+print('Preallocate for cost')
+
 @dataclass
 class Optimizer(kgs.BaseClass):
     # Minimizes the cost, not physics-based
@@ -57,7 +59,7 @@ class Optimizer(kgs.BaseClass):
         t_last_plot = np.float32(-np.inf)     
         for i_iteration in range(self.n_iterations):
             dt = self.dt        
-            total_cost, total_grad, bound_grad = self.cost.compute_cost(sol)
+            total_cost, total_grad, bound_grad = self.cost.compute_cost_allocate(sol)
             
             # Clip gradients per tree to prevent violent repulsion
             if self.max_grad_norm is not None:
@@ -123,8 +125,8 @@ class Dynamics(kgs.BaseClass):
             if cost_0_scaling[0]>0 and prev_cost_0_scaling[0] == 0.: # assuming this applies to all...
                 sol.snap()
             prev_cost_0_scaling = cost_0_scaling        
-            total_cost0, total_grad0, bound_grad0 = self.cost0.compute_cost(sol)
-            total_cost1, total_grad1, bound_grad1 = self.cost1.compute_cost(sol)
+            total_cost0, total_grad0, bound_grad0 = self.cost0.compute_cost_allocate(sol)
+            total_cost1, total_grad1, bound_grad1 = self.cost1.compute_cost_allocate(sol)
             total_cost = total_cost0 * cost_0_scaling + total_cost1
             total_grad = total_grad0 * cost_0_scaling[:, None, None] + total_grad1
             bound_grad = bound_grad0 * cost_0_scaling[:, None] + bound_grad1
