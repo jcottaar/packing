@@ -378,61 +378,27 @@ __device__ __forceinline__ void backward_clip_against_edge(
     }
 }
 
+// Compute the area of intersection between two convex polygons using
+// Sutherland-Hodgman clipping of "subj" against all edges of "clip".
+// Also computes gradients w.r.t. both input polygons.
 __device__ double convex_intersection_area(
     const d2* subj, int n_subj,
-    const d2* clip, int n_clip)
-{
-    // Compute the area of intersection between two convex polygons using
-    // Sutherland-Hodgman clipping of "subj" against all edges of "clip".
-    if (n_subj == 0 || n_clip == 0) return 0.0;
-
-    d2 polyA[MAX_INTERSECTION_VERTS];
-    d2 polyB[MAX_INTERSECTION_VERTS];
-
-    int nA = n_subj;
-    // Copy subject polygon into work buffer
-    for (int i = 0; i < n_subj; ++i) {
-        polyA[i] = subj[i];
-    }
-
-    // Clip A against each edge of clip polygon
-    for (int e = 0; e < n_clip && nA > 0; ++e) {
-        d2 A = clip[e];
-        d2 B = clip[(e + 1) % n_clip];
-
-        int nB = clip_against_edge(polyA, nA, A, B, polyB);
-
-        // Copy back to polyA for next iteration
-        nA = nB;
-        for (int i = 0; i < nA; ++i) {
-            polyA[i] = polyB[i];
-        }
-    }
-
-    return polygon_area(polyA, nA);
-}
-
-// Backward for convex_intersection_area
-// Recomputes forward clipping sequence while tracking metadata,
-// then backpropagates through clipping and area computation
-__device__ void backward_convex_intersection_area(
-    const d2* subj, int n_subj,
     const d2* clip, int n_clip,
-    double d_area,  // gradient w.r.t. output area
     d2* d_subj,     // output: gradient w.r.t. subject vertices
     d2* d_clip)     // output: gradient w.r.t. clip vertices
 {
-    // Initialize output gradients
-    for (int i = 0; i < n_subj; ++i) {
-        d_subj[i] = make_double2(0.0, 0.0);
+    // Early exit for empty input - zero gradients
+    if (n_subj == 0 || n_clip == 0) {
+        for (int i = 0; i < n_subj; ++i) {
+            d_subj[i] = make_double2(0.0, 0.0);
+        }
+        for (int i = 0; i < n_clip; ++i) {
+            d_clip[i] = make_double2(0.0, 0.0);
+        }
+        return 0.0;
     }
-    for (int i = 0; i < n_clip; ++i) {
-        d_clip[i] = make_double2(0.0, 0.0);
-    }
-    
-    if (n_subj == 0 || n_clip == 0 || d_area == 0.0) return;
 
-    // Forward pass: recompute clipping with metadata AND save intermediate polygons
+    // Forward pass: perform clipping with metadata AND save intermediate polygons
     d2 forward_polys[MAX_VERTS_PER_PIECE + 1][MAX_INTERSECTION_VERTS];
     int forward_counts[MAX_VERTS_PER_PIECE + 1];
     ClipMetadata metadata[MAX_VERTS_PER_PIECE];  // one per clipping edge
@@ -459,10 +425,23 @@ __device__ void backward_convex_intersection_area(
 
     // Final polygon is in forward_polys[clip_count]
     int final_n = forward_counts[clip_count];
+    double area = polygon_area(forward_polys[clip_count], final_n);
     
-    // Backward through polygon_area
+    // Skip backward pass if area is zero - just zero out gradients
+    if (area == 0.0) {
+        for (int i = 0; i < n_subj; ++i) {
+            d_subj[i] = make_double2(0.0, 0.0);
+        }
+        for (int i = 0; i < n_clip; ++i) {
+            d_clip[i] = make_double2(0.0, 0.0);
+        }
+        return 0.0;
+    }
+    
+    // Backward pass: compute gradients
+    // Backward through polygon_area (gradient w.r.t. area = 1.0)
     d2 d_polyFinal[MAX_INTERSECTION_VERTS];
-    backward_polygon_area(forward_polys[clip_count], final_n, d_area, d_polyFinal);
+    backward_polygon_area(forward_polys[clip_count], final_n, 1.0, d_polyFinal);
     
     // Backward through each clipping stage in reverse
     d2 d_current[MAX_INTERSECTION_VERTS];
@@ -499,5 +478,7 @@ __device__ void backward_convex_intersection_area(
     for (int i = 0; i < n_subj; ++i) {
         d_subj[i] = d_current[i];
     }
+    
+    return area;
 }
 """

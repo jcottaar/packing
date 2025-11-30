@@ -219,34 +219,27 @@ __device__ double overlap_ref_with_list_piece(
                 continue;  // No AABB overlap, skip expensive intersection
             }
 
-            double area = convex_intersection_area(ref_poly, n1, other_poly, n2);
+            // Merged function computes both area and gradients
+            d2 d_ref_poly[MAX_VERTS_PER_PIECE];
+            d2 d_other_poly[MAX_VERTS_PER_PIECE];
+            
+            double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
+                                                    d_ref_poly, d_other_poly);
             total += area;
             
-            // Backward pass
-            if (area > 0.0) {
-                d2 d_ref_poly[MAX_VERTS_PER_PIECE];
-                d2 d_other_poly[MAX_VERTS_PER_PIECE];
-                
-                backward_convex_intersection_area(
-                    ref_poly, n1,
-                    other_poly, n2,
-                    1.0,  // gradient flows from output (d_overlap_sum = 1.0)
-                    d_ref_poly,
-                    d_other_poly);
-                
-                // Backward through transform for ref piece
-                double3 d_ref_pose_piece;
-                backward_transform_vertices(
-                    ref_local_piece, n1,
-                    d_ref_poly,
-                    c_ref, s_ref,
-                    &d_ref_pose_piece);
-                
-                // Accumulate into local gradient
-                d_ref_local.x += d_ref_pose_piece.x;
-                d_ref_local.y += d_ref_pose_piece.y;
-                d_ref_local.z += d_ref_pose_piece.z;
-            }
+            // Backward through transform for ref piece
+            // Note: d_ref_poly will be zero if area is zero, so this is safe
+            double3 d_ref_pose_piece;
+            backward_transform_vertices(
+                ref_local_piece, n1,
+                d_ref_poly,
+                c_ref, s_ref,
+                &d_ref_pose_piece);
+            
+            // Accumulate into local gradient
+            d_ref_local.x += d_ref_pose_piece.x;
+            d_ref_local.y += d_ref_pose_piece.y;
+            d_ref_local.z += d_ref_pose_piece.z;
         }
         
         sum += total;
@@ -304,7 +297,11 @@ __device__ double convex_area_outside_square(
     square[3] = make_double2(-half_h, half_h);
     
     // Compute intersection area between polygon and square
-    double intersection_area = convex_intersection_area(poly, n, square, 4);
+    // We need dummy gradient buffers since gradients are always computed
+    d2 d_poly_dummy[MAX_VERTS_PER_PIECE];
+    d2 d_square_dummy[4];
+    double intersection_area = convex_intersection_area(poly, n, square, 4,
+                                                         d_poly_dummy, d_square_dummy);
     
     // Compute total polygon area
     double total_area = 0.0;
