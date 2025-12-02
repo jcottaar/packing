@@ -165,6 +165,7 @@ class DynamicsInitialize(Dynamics):
     scaling_boundary = 5.
     scaling_overlap = 1. # recommend to keep this fixed
     use_boundary_distance = True
+    use_separation_overlap = False
 
     @typechecked
     def run_simulation(self, sol:kgs.SolutionCollection):
@@ -174,7 +175,8 @@ class DynamicsInitialize(Dynamics):
                                         pack_cost.CollisionCostOverlappingArea(scaling=self.scaling_overlap)])
         if not self.use_boundary_distance:
             self.cost1.costs[0] = pack_cost.BoundaryCost(scaling=self.scaling_boundary)
-        
+        if self.use_separation_overlap:
+            self.cost1.costs[1] = pack_cost.CollisionCostSeparation(scaling=self.scaling_overlap)   
         t_total = np.float32(0.)
         dt = np.float32(self.dt)
         phase = 'init'

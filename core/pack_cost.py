@@ -148,7 +148,8 @@ class CollisionCostOverlappingArea(CollisionCost):
         return area, grad
 
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
-        pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, out_cost=cost, out_grads=grad_xyt)
+        # use_separation=False -> run overlap area path
+        pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt)
         grad_bound[:] = 0
 
 @dataclass
@@ -487,6 +488,14 @@ class CollisionCostSeparation(CollisionCost):
                 total_grad += grad
 
         return cp.array(total_sep_squared), total_grad
+    
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+        # use_separation=True -> run separation (sum-of-squares) path
+        if self.use_max or self.TEMP_use_kernel:
+            super()._compute_cost(sol, cost, grad_xyt, grad_bound)
+        else:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt)
+            grad_bound[:] = 0
     
 
 @dataclass

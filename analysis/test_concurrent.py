@@ -225,15 +225,15 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         xyt1 = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))
         xyt2 = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))
         
-        # Warmup
-        pack_cuda.overlap_multi_ensemble(xyt1, xyt2, compute_grad=True)
+        # Warmup (overlap area path)
+        pack_cuda.overlap_multi_ensemble(xyt1, xyt2, False)
         cp.cuda.Device().synchronize()
         
         # Timed run
         cp.cuda.Device().synchronize()
         start = time.perf_counter()
         for i in range(iters_per_stream):
-            pack_cuda.overlap_multi_ensemble(xyt1, xyt2, compute_grad=True)
+            pack_cuda.overlap_multi_ensemble(xyt1, xyt2, False)
         cp.cuda.Device().synchronize()
         end = time.perf_counter()
     

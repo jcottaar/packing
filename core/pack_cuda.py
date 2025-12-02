@@ -139,7 +139,8 @@ __device__ double overlap_ref_with_list_piece(
     const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
     const int n,
     const int pi,          // piece index to process (0-3)
-    double3* d_ref)        // output: gradient w.r.t. ref pose (accumulated)
+    double3* d_ref,        // output: gradient w.r.t. ref pose (accumulated)
+    const int use_separation) // if non-zero, compute separation-based cost (sum of sep^2)
 {
     double sum = 0.0;
     
@@ -219,27 +220,56 @@ __device__ double overlap_ref_with_list_piece(
                 continue;  // No AABB overlap, skip expensive intersection
             }
 
-            // Merged function computes both area and gradients
-            d2 d_ref_poly[MAX_VERTS_PER_PIECE];
-            d2 d_other_poly[MAX_VERTS_PER_PIECE];
-            
-            double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
-                                                    d_ref_poly, d_other_poly);
-            total += area;
-            
-            // Backward through transform for ref piece
-            // Note: d_ref_poly will be zero if area is zero, so this is safe
-            double3 d_ref_pose_piece;
-            backward_transform_vertices(
-                ref_local_piece, n1,
-                d_ref_poly,
-                c_ref, s_ref,
-                &d_ref_pose_piece);
-            
-            // Accumulate into local gradient
-            d_ref_local.x += d_ref_pose_piece.x;
-            d_ref_local.y += d_ref_pose_piece.y;
-            d_ref_local.z += d_ref_pose_piece.z;
+            if (!use_separation) {
+                // Merged function computes both area and gradients
+                d2 d_ref_poly[MAX_VERTS_PER_PIECE];
+                d2 d_other_poly[MAX_VERTS_PER_PIECE];
+
+                double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
+                                                        d_ref_poly, d_other_poly);
+                total += area;
+
+                // Backward through transform for ref piece
+                // Note: d_ref_poly will be zero if area is zero, so this is safe
+                double3 d_ref_pose_piece;
+                backward_transform_vertices(
+                    ref_local_piece, n1,
+                    d_ref_poly,
+                    c_ref, s_ref,
+                    &d_ref_pose_piece);
+
+                // Accumulate into local gradient
+                d_ref_local.x += d_ref_pose_piece.x;
+                d_ref_local.y += d_ref_pose_piece.y;
+                d_ref_local.z += d_ref_pose_piece.z;
+            } else {
+                // Separation-based primitive: compute penetration depth and its
+                // derivatives wrt ref pose. We only support the sum-of-squares
+                // behavior (use_max == False), so for each piece-pair with
+                // positive separation we add sep^2 to the total and accumulate
+                // gradient 2*sep*dsep.
+                double sep = 0.0;
+                double dsep_dx = 0.0;
+                double dsep_dy = 0.0;
+                double dsep_dtheta = 0.0;
+
+                // Device primitive defined in pack_cuda_primitives.PRIMITIVE_SRC
+                sat_separation_with_grad_pose(
+                    ref_local_piece, n1,
+                    other_poly, n2,
+                    ref.x, ref.y, c_ref, s_ref,
+                    &sep, &dsep_dx, &dsep_dy, &dsep_dtheta);
+
+                // Only positive penetration contributes
+                if (sep > 0.0) {
+                    total += sep * sep;
+
+                    // Gradient of sep^2: 2 * sep * dsep/dparam
+                    d_ref_local.x += 2.0 * sep * dsep_dx;
+                    d_ref_local.y += 2.0 * sep * dsep_dy;
+                    d_ref_local.z += 2.0 * sep * dsep_dtheta;
+                }
+            }
         }
         
         sum += total;
@@ -271,7 +301,8 @@ __device__ double overlap_ref_with_list(
     
     // Sum across all 4 pieces
     for (int pi = 0; pi < MAX_PIECES; ++pi) {
-        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, &d_ref_dummy);
+        // Call with use_separation=0 (area mode)
+        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, &d_ref_dummy, 0);
     }
     return sum;
 }
@@ -469,7 +500,8 @@ __device__ void overlap_list_total(
     const double* __restrict__ xyt2_Nx3,
     const int n2,
     double* __restrict__ out_total,
-    double* __restrict__ out_grads) // if non-NULL, write gradients to out_grads[n1*3]
+    double* __restrict__ out_grads, // if non-NULL, write gradients to out_grads[n1*3]
+    const int use_separation) // non-zero -> use separation sum-of-squares path
 {
     // Thread organization: 4 threads per tree
     // tid = tree_idx * 4 + piece_idx
@@ -496,10 +528,10 @@ __device__ void overlap_list_total(
         // Ensure initialization is complete before all threads start accumulating
         __syncthreads();
 
-        // Each thread computes overlap for one piece of the reference tree
+        // Each thread computes overlap (or separation) for one piece of the reference tree
         // The merged function computes both forward and backward passes
         double3* d_ref_output = (double3*)(&out_grads[tree_idx * 3]);
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output);
+        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation);
 
         // Atomic add for overlap sum
         atomicAdd(out_total, local_sum / 2.0);
@@ -525,7 +557,8 @@ __global__ void multi_overlap_list_total(
     const int n_trees,                          // number of trees per ensemble
     double* __restrict__ out_totals,           // [num_ensembles]
     double* __restrict__ out_grads_base,       // base pointer to [num_ensembles, n_trees, 3] (NULL allowed)
-    const int num_ensembles)
+    const int num_ensembles,
+    const int use_separation)
 {
     int ensemble_id = blockIdx.x;
     
@@ -561,7 +594,7 @@ __global__ void multi_overlap_list_total(
     __syncthreads();
     
     // Call overlap_list_total - it now reads (n_trees, 3) format directly
-    overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads);
+    overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads, use_separation);
 }
 
 // Multi-ensemble kernel for boundary: one block per ensemble
@@ -1041,7 +1074,7 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray = None, stream: cp.cuda.Stream | None = None):
+def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: bool, out_cost: cp.ndarray = None, out_grads: cp.ndarray = None, stream: cp.cuda.Stream | None = None):
     """Compute total overlap sum for multiple ensembles in parallel.
     
     Parameters
@@ -1050,6 +1083,9 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, out_cost: cp.ndar
         Pose arrays for first set of trees. Must be C-contiguous and correct dtype.
     xyt2 : cp.ndarray, shape (n_ensembles, n_trees, 3)
         Pose arrays for second set of trees. Must be C-contiguous and correct dtype.
+    use_separation : bool
+        If True, compute separation-based cost (sum of sep^2) instead of overlap area.
+        This flag is required (no default) and is propagated to the CUDA kernel.
     out_cost : cp.ndarray, shape (n_ensembles,)
         Preallocated array for output costs. Must be provided.
     out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3)
@@ -1099,6 +1135,9 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, out_cost: cp.ndar
             raise ValueError("out_cost must be provided")
         if out_grads is None:
             raise ValueError("out_grads must be provided")
+        # Validate use_separation flag
+        if not isinstance(use_separation, (bool, np.bool_)):
+            raise ValueError("use_separation must be a boolean")
         
         # Validate output array shapes and types
         if out_cost.shape != (num_ensembles,):
@@ -1121,7 +1160,6 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, out_cost: cp.ndar
     # Launch kernel: one block per ensemble, n_trees * 4 threads per block
     blocks = num_ensembles
     threads_per_block = n_trees * 4
-    
     _multi_overlap_list_total_kernel(
         (blocks,),
         (threads_per_block,),
@@ -1132,6 +1170,7 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, out_cost: cp.ndar
             out_cost,
             out_grads,
             np.int32(num_ensembles),
+            np.int32(1 if use_separation else 0),
         ),
         stream=stream,
     )
