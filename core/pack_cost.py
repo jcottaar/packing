@@ -159,7 +159,7 @@ class CollisionCostSeparation(CollisionCost):
     # Only overlapping pairs contribute (separated pairs have zero cost)
     # Separation distance = minimum distance trees must move to no longer overlap
 
-    use_max:bool = field(init=True, default=True)
+    use_max:bool = field(init=True, default=False)
     TEMP_use_kernel:bool = field(init=True, default=False)
     
     def _compute_separation_distance(
