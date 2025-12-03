@@ -55,11 +55,20 @@ class Optimizer(kgs.BaseClass):
             fig, ax = plt.subplots(figsize=(8, 8))
             tree_list = kgs.TreeList()
 
+        # Pre-allocate gradient arrays once (float32 for efficiency)
+        total_cost = cp.zeros(n_ensembles, dtype=cp.float32)
+        total_grad = cp.zeros_like(xyt, dtype=cp.float32)
+        bound_grad = cp.zeros_like(h, dtype=cp.float32)
+
         t_total0 = np.float32(0.)   
         t_last_plot = np.float32(-np.inf)     
         for i_iteration in range(self.n_iterations):
-            dt = self.dt        
-            total_cost, total_grad, bound_grad = self.cost.compute_cost_allocate(sol)
+            dt = self.dt
+            # Reuse pre-allocated arrays
+            total_cost[:] = 0
+            total_grad[:] = 0
+            bound_grad[:] = 0
+            self.cost.compute_cost(sol, total_cost, total_grad, bound_grad)
             
             # Clip gradients per tree to prevent violent repulsion
             if self.max_grad_norm is not None:
@@ -137,7 +146,6 @@ class Dynamics(kgs.BaseClass):
             velocity_h += 0*velocity_h - dt[:,None]*bound_grad
             sol.xyt += dt[:,None,None] * velocity_xyt
             sol.h += dt[:,None] * velocity_h
-            #print(t_total0, h[0])
             t_total0 += dt[0]
             
             if self.plot_interval is not None and t_total0 - t_last_plot >= self.plot_interval*0.999:
