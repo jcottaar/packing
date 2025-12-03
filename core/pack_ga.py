@@ -11,6 +11,7 @@ import shapely
 import pack_cost
 import pack_dynamics
 
+print('stop final relax at some point')
 
 # ============================================================
 # Definition of population
@@ -35,6 +36,7 @@ class Population(kgs.BaseClass):
 
 @dataclass
 class Initializer(kgs.BaseClass):
+    seed: int = field(init=True, default=42)
     def initialize_population(self, N_individuals, N_trees):
         population = self._initialize_population(N_individuals, N_trees)
         population.set_dummy_fitness()
@@ -47,11 +49,9 @@ class Initializer(kgs.BaseClass):
 @dataclass
 class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
-    size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)
-    seed: int = field(init=True, default=42)
+    size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
 
     def _initialize_population(self, N_individuals, N_trees):
-        print('stop final relax at some point')
         size_setup_scaled = self.size_setup * np.sqrt(N_trees)
         xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=(N_individuals, N_trees, 3))
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, np.pi]]]
@@ -65,14 +65,97 @@ class InitializerRandomJiggled(Initializer):
 
 
 # ============================================================
-# Main GA algorith
+# Main GA algorithm
 # ============================================================
 
 @dataclass
 class GA(kgs.BaseClass):
+    # Configuration
     N_trees_to_do: np.ndarray = field(init=True, default=None)
+    seed: int = field(init=True, default=42)
+
+    # Hyperparameters
     population_size:int = field(init=True, default=1000)
     n_generations:int = field(init=True, default=50)
     tournament_size:int = field(init=True, default=4)
+    fitness_cost: pack_cost.Cost = field(init=True, default=None)
+    initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
+    relaxers: list[pack_dynamics.Optimizer] = field(init=True, default=None)
 
+    # Outputs
     populations: list[Population] = field(init=True, default_factory=list)
+
+    def __post_init__(self):
+        self.fitness_cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-2), 
+                                        pack_cost.BoundaryDistanceCost(scaling=1.), 
+                                        pack_cost.CollisionCostSeparation(scaling=1.)])
+        self.relaxers = []
+        relaxer = pack_dynamics.Optimizer()
+        relaxer.cost = self.fitness_cost
+        relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        relaxer.n_iterations *= 2
+        self.relaxers.append(relaxer)
+        relaxer = pack_dynamics.Optimizer()
+        relaxer.cost = self.fitness_cost
+        relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        relaxer.n_iterations *= 2
+        self.relaxers.append(relaxer)
+
+
+    def _relax_and_score(self, population:Population):
+        sol = population.configuration
+        for relaxer in self.relaxers:
+            sol = relaxer.run_simulation(sol)
+        costs = self.fitness_cost.compute_cost_allocate(sol)[0]
+        population.configuration = sol
+        population.fitness = costs.get()
+
+    def run(self):
+        generator = np.random.default_rng(seed=self.seed)
+
+        # Initialize populations
+        for N_trees in self.N_trees_to_do:    
+            self.initializer.seed = 200*self.seed + N_trees        
+            population = self.initializer.initialize_population(self.population_size, N_trees)
+            self._relax_and_score(population)
+            self.populations.append(population)    
+
+        for i_gen in range(self.n_generations):
+            for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
+                current_pop = self.populations[i_N_trees]
+                current_xyt = current_pop.configuration.xyt.get()  # (N_individuals, N_trees, 3)
+                current_h = current_pop.configuration.h.get()  # (N_individuals, 3) - [size, x_offset, y_offset]
+                current_fitness = current_pop.fitness
+
+                # Tournament selection for each new individual
+                new_xyt = np.empty_like(current_xyt)
+                new_h = np.empty_like(current_h)
+                for i_ind in range(self.population_size):
+                    # Pick tournament_size individuals at random
+                    tournament_ids = generator.choice(self.population_size, size=self.tournament_size, replace=False)
+                    # Select the one with the best (lowest) fitness
+                    winner_idx = tournament_ids[np.argmin(current_fitness[tournament_ids])]
+                    
+                    # Copy the winner's configuration
+                    new_xyt[i_ind] = current_xyt[winner_idx]
+                    new_h[i_ind] = current_h[winner_idx]
+                    
+                    # Pick a random tree and give it a new random position within the square
+                    tree_to_mutate = generator.integers(0, N_trees)
+                    h_size = new_h[i_ind, 0]  # Square size
+                    h_offset_x = new_h[i_ind, 1]  # x offset
+                    h_offset_y = new_h[i_ind, 2]  # y offset
+                    new_xyt[i_ind, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
+                    new_xyt[i_ind, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
+                    new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta
+
+                # Update existing population's configuration in-place
+                current_pop.configuration.xyt = cp.array(new_xyt, dtype=np.float32)
+                current_pop.configuration.h = cp.array(new_h, dtype=np.float32)
+                
+                # Relax and score the population
+                self._relax_and_score(current_pop)
+
+                best_id = np.argmin(self.populations[i_N_trees].fitness)                   
+                print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.4f}')    
+        
