@@ -55,7 +55,7 @@ MAX_RADIUS = kgs.tree_max_radius
 # Global variable to control floating point precision
 # Set this to 'float32' or 'float64' BEFORE calling any functions
 # Default is 'float64' for maximum precision
-USE_FLOAT32 = False  # Set to True to use float32 instead of float64
+USE_FLOAT32 = True  # Set to True to use float32 instead of float64
 
 
 # ---------------------------------------------------------------------------

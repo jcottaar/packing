@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 importlib.reload(kgs)
 import numpy as np
 import cupy as cp
+import time
 from dataclasses import dataclass, field, fields
 import pack_cuda
 import pack_vis
@@ -15,8 +16,6 @@ import copy
 from IPython.display import HTML, display, clear_output
 from scipy import stats
 from typeguard import typechecked
-
-print('Preallocate for cost')
 
 @dataclass
 class Optimizer(kgs.BaseClass):
@@ -27,13 +26,13 @@ class Optimizer(kgs.BaseClass):
 
     # Hyperparameters
     cost = None
-    dt = 0.1
-    n_iterations = 100
+    dt = 0.05
+    n_iterations = 1200
     max_grad_norm = 10.0  # Clip gradients to prevent violent repulsion
 
     def __post_init__(self):
         super().__post_init__()
-        self.cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-3), 
+        self.cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-2), 
                                         pack_cost.BoundaryDistanceCost(scaling=1.), 
                                         pack_cost.CollisionCostOverlappingArea(scaling=1.)])
 
@@ -65,17 +64,14 @@ class Optimizer(kgs.BaseClass):
         for i_iteration in range(self.n_iterations):
             dt = self.dt
             # Reuse pre-allocated arrays
-            total_cost[:] = 0
-            total_grad[:] = 0
-            bound_grad[:] = 0
             self.cost.compute_cost(sol, total_cost, total_grad, bound_grad)
             
             # Clip gradients per tree to prevent violent repulsion
-            if self.max_grad_norm is not None:
-                grad_norms = cp.sqrt(cp.sum(total_grad**2, axis=2))  # (n_ensembles, n_trees)
-                grad_norms = cp.maximum(grad_norms, 1e-8)  # Avoid division by zero
-                clip_factor = cp.minimum(1.0, self.max_grad_norm / grad_norms)  # (n_ensembles, n_trees)
-                total_grad = total_grad * clip_factor[:, :, None]  # Apply to each component
+            # if self.max_grad_norm is not None:
+            #     grad_norms = cp.sqrt(cp.sum(total_grad**2, axis=2))  # (n_ensembles, n_trees)
+            #     grad_norms = cp.maximum(grad_norms, 1e-8)  # Avoid division by zero
+            #     clip_factor = cp.minimum(1.0, self.max_grad_norm / grad_norms)  # (n_ensembles, n_trees)
+            #     total_grad = total_grad * clip_factor[:, :, None]  # Apply to each component
             
             xyt -= dt * total_grad
             h -= dt * bound_grad
@@ -125,6 +121,14 @@ class Dynamics(kgs.BaseClass):
             fig, ax = plt.subplots(figsize=(8, 8))
             tree_list = kgs.TreeList()
 
+        # Pre-allocate gradient arrays once (float32 for efficiency)
+        total_cost0 = cp.zeros(n_ensembles, dtype=cp.float32)
+        total_grad0 = cp.zeros_like(sol.xyt, dtype=cp.float32)
+        bound_grad0 = cp.zeros_like(sol.h, dtype=cp.float32)
+        total_cost1 = cp.zeros(n_ensembles, dtype=cp.float32)
+        total_grad1 = cp.zeros_like(sol.xyt, dtype=cp.float32)
+        bound_grad1 = cp.zeros_like(sol.h, dtype=cp.float32)
+
         t_total0 = np.float32(0.)      
         t_last_plot = np.float32(-np.inf)  
         velocity_xyt = cp.zeros_like(sol.xyt)
@@ -136,9 +140,10 @@ class Dynamics(kgs.BaseClass):
             cost_0_scaling = self.cost_0_scaling_list[:, i_iteration]  
             if cost_0_scaling[0]>0 and prev_cost_0_scaling[0] == 0.: # assuming this applies to all...
                 sol.snap()
-            prev_cost_0_scaling = cost_0_scaling        
-            total_cost0, total_grad0, bound_grad0 = cost0.compute_cost_allocate(sol)
-            total_cost1, total_grad1, bound_grad1 = cost1.compute_cost_allocate(sol)
+            prev_cost_0_scaling = cost_0_scaling
+            # Reuse pre-allocated arrays
+            cost0.compute_cost(sol, total_cost0, total_grad0, bound_grad0)
+            cost1.compute_cost(sol, total_cost1, total_grad1, bound_grad1)
             total_cost = total_cost0 * cost_0_scaling + total_cost1
             total_grad = total_grad0 * cost_0_scaling[:, None, None] + total_grad1
             bound_grad = bound_grad0 * cost_0_scaling[:, None] + bound_grad1
@@ -162,18 +167,18 @@ class Dynamics(kgs.BaseClass):
 class DynamicsInitialize(Dynamics):
     n_rounds = 5
     duration_init = 10.
-    duration_compact = 200.
+    duration_compact = 150.
     duration_final = 10.
-    dt = 0.02
-    friction_min = 0.1
-    friction_max = 10.
-    friction_periods = 10
-    scaling_area_start = 0.3
-    scaling_area_end = 0.001
-    scaling_boundary = 5.
-    scaling_overlap = 1. # recommend to keep this fixed
+    dt = 0.04
+    friction_min = 0.18
+    friction_max = 0.
+    friction_periods = 3
+    scaling_area_start = 0.6
+    scaling_area_end = 0.002
+    scaling_boundary = 50.
+    scaling_overlap = 10. # recommend to keep this fixed
     use_boundary_distance = True
-    use_separation_overlap = False
+    use_separation_overlap = True
 
     @typechecked
     def run_simulation(self, sol:kgs.SolutionCollection):
@@ -235,4 +240,68 @@ class DynamicsInitialize(Dynamics):
         self.dt_list = None
         self.friction_list = None
         self.cost_0_scaling_list = None
+        return sol
+
+
+@dataclass
+class OptimizerGraph(Optimizer):
+    """
+    Variant of `Optimizer` that builds and executes a CuPy CUDA graph for the
+    loop body on each iteration. The graph is recreated for every iteration
+    (not reused across runs) so this is only suitable for measuring raw
+    graph execution time. The total graph execution time for the run is
+    accumulated in `self.last_graph_exec_time` (seconds).
+    """
+
+    last_graph_exec_time: float = 0.0
+
+    @typechecked
+    def run_simulation(self, sol:kgs.SolutionCollection):
+        # Initial configuration (same setup as Optimizer)
+
+        sol.check_constraints()
+        sol = copy.deepcopy(sol)
+        sol.snap()
+
+        xyt = sol.xyt
+        h = sol.h
+
+        n_ensembles = xyt.shape[0]
+        n_trees = xyt.shape[1]
+
+        # Pre-allocate gradient arrays once (float32 for efficiency)
+        total_cost = cp.zeros(n_ensembles, dtype=cp.float32)
+        total_grad = cp.zeros_like(xyt, dtype=cp.float32)
+        bound_grad = cp.zeros_like(h, dtype=cp.float32)
+
+        # warmup cost compute
+        pack_cost.skip_allocations = False
+        self.cost.compute_cost(sol, total_cost, total_grad, bound_grad)
+        pack_cost.skip_allocations = True
+
+        # Build a single CUDA graph that captures the entire loop.
+        # Use stream.begin_capture() / end_capture() (CuPy API).
+        stream = cp.cuda.Stream()
+        with stream:
+            stream.begin_capture()
+            # Unroll the iteration loop inside the capture so the graph
+            # contains the whole sequence of operations.
+            for i_iteration in range(self.n_iterations):
+                dt = self.dt
+                # Compute cost/grad and apply the update. Omit plotting and
+                # max_grad_norm handling as requested.
+                self.cost.compute_cost(sol, total_cost, total_grad, bound_grad)
+                xyt -= dt * total_grad
+                h -= dt * bound_grad
+            graph = stream.end_capture()
+
+        pack_cost.skip_allocations = False
+
+        # Time the graph execution (launch + synchronize)
+        t0 = time.perf_counter()
+        graph.launch(stream)
+        stream.synchronize()
+        t1 = time.perf_counter()
+        self.last_graph_exec_time = (t1 - t0)
+
         return sol

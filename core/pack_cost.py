@@ -10,6 +10,8 @@ from shapely.ops import unary_union
 import shapely
 import pack_cuda
 
+skip_allocations = False
+
 @dataclass
 class Cost(kgs.BaseClass):
     scaling:float = field(init=True, default=1.0)
@@ -83,13 +85,14 @@ class CostCompound(Cost):
         
         # Check if we need to allocate or reallocate temporary arrays
         # Use dtype matching the output arrays to ensure consistency
-        current_shape = (sol.N_solutions, sol.xyt.shape, sol.h.shape)
-        if self._temp_shape != current_shape:
-            self._temp_cost = cp.zeros(sol.N_solutions, dtype=cost.dtype)
-            self._temp_grad_xyt = cp.zeros(sol.xyt.shape, dtype=grad_xyt.dtype)
-            self._temp_grad_bound = cp.zeros(sol.h.shape, dtype=grad_bound.dtype)
-            self._temp_shape = current_shape
-        
+        if not skip_allocations:
+            current_shape = (sol.N_solutions, sol.xyt.shape, sol.h.shape)
+            if self._temp_shape != current_shape:
+                self._temp_cost = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+                self._temp_grad_xyt = cp.zeros(sol.xyt.shape, dtype=grad_xyt.dtype)
+                self._temp_grad_bound = cp.zeros(sol.h.shape, dtype=grad_bound.dtype)
+                self._temp_shape = current_shape
+            
         for c in self.costs:
             self._temp_cost[:] = 0
             self._temp_grad_xyt[:] = 0
@@ -159,7 +162,7 @@ class CollisionCostSeparation(CollisionCost):
     # Only overlapping pairs contribute (separated pairs have zero cost)
     # Separation distance = minimum distance trees must move to no longer overlap
 
-    use_max:bool = field(init=True, default=False)
+    use_max:bool = field(init=True, default=True)
     TEMP_use_kernel:bool = field(init=True, default=False)
     
     def _compute_separation_distance(
