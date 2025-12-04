@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import scipy as sp
 import cupy as cp
+import cugraph
+import cudf
 import kaggle_support as kgs
 from dataclasses import dataclass, field, fields
 from typeguard import typechecked
@@ -10,9 +12,177 @@ from shapely.ops import unary_union
 import shapely
 import pack_cost
 import pack_dynamics
-import copy
 
 print('stop final relax at some point')
+
+
+# ============================================================
+# Genetic diversity measurement
+# ============================================================
+
+def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
+    """
+    Compute the minimum-cost assignment distance between each individual in a population
+    and a single reference configuration, considering all 8 symmetry transformations
+    (4 rotations × 2 mirror states).
+    
+    Uses the Hungarian algorithm (via cugraph) to find the optimal tree-to-tree mapping
+    that minimizes total distance. The distance metric includes (x, y, theta) with equal weights.
+    
+    Parameters
+    ----------
+    population_xyt : cp.ndarray
+        Shape (N_pop, N_trees, 3). Population of individuals, where each individual
+        has N_trees trees with (x, y, theta) coordinates.
+    reference_xyt : cp.ndarray
+        Shape (N_trees, 3). Single reference configuration to compare against.
+        
+    Returns
+    -------
+    cp.ndarray
+        Shape (N_pop,). Minimum assignment distance for each individual, taken over
+        all 8 symmetry transformations.
+        
+    Notes
+    -----
+    The 8 transformations applied to each population individual are:
+    - 0°, 90°, 180°, 270° rotations (about origin)
+    - Each rotation with and without x-axis mirroring
+    
+    For each transformation, we compute the cost matrix between transformed trees
+    and reference trees, then solve the linear assignment problem. The minimum
+    cost across all 8 transformations is returned.
+    
+    Distance for each tree pair: sqrt((x1-x2)^2 + (y1-y2)^2 + angular_dist(theta1, theta2)^2)
+    where angular_dist wraps to [-pi, pi].
+    """
+    N_pop, N_trees, _ = population_xyt.shape
+    
+    # Validate shapes
+    assert reference_xyt.shape == (N_trees, 3), \
+        f"Reference shape {reference_xyt.shape} doesn't match expected ({N_trees}, 3)"
+    
+    # Pre-compute the 8 transformation parameters
+    # Each transformation is (rotation_angle, mirror_x)
+    # rotation_angle: angle to rotate coordinates (0, pi/2, pi, 3pi/2)
+    # mirror_x: whether to mirror across x-axis before rotation
+    transformations = [
+        (0.0,        False),  # Identity
+        (np.pi/2,    False),  # 90° rotation
+        (np.pi,      False),  # 180° rotation
+        (3*np.pi/2,  False),  # 270° rotation
+        (0.0,        True),   # Mirror only
+        (np.pi/2,    True),   # Mirror + 90° rotation
+        (np.pi,      True),   # Mirror + 180° rotation
+        (3*np.pi/2,  True),   # Mirror + 270° rotation
+    ]
+    
+    # Initialize result: will store minimum distance across all transformations
+    min_distances = cp.full(N_pop, cp.inf, dtype=cp.float32)
+    
+    # Reference coordinates (fixed, not transformed)
+    ref_x = reference_xyt[:, 0]      # (N_trees,)
+    ref_y = reference_xyt[:, 1]      # (N_trees,)
+    ref_theta = reference_xyt[:, 2]  # (N_trees,)
+    
+    for rot_angle, do_mirror in transformations:
+        # ---------------------------------------------------------
+        # Step 1: Apply transformation to population individuals
+        # ---------------------------------------------------------
+        # Extract coordinates
+        pop_x = population_xyt[:, :, 0].copy()      # (N_pop, N_trees)
+        pop_y = population_xyt[:, :, 1].copy()      # (N_pop, N_trees)
+        pop_theta = population_xyt[:, :, 2].copy()  # (N_pop, N_trees)
+        
+        # Apply mirror first (reflect across x-axis: y -> -y, theta -> -theta)
+        if do_mirror:
+            pop_y = -pop_y
+            pop_theta = -pop_theta
+        
+        # Apply rotation around origin
+        # New coordinates: x' = x*cos(a) - y*sin(a), y' = x*sin(a) + y*cos(a)
+        # New theta: theta' = theta + a
+        if rot_angle != 0.0:
+            cos_a = np.cos(rot_angle)
+            sin_a = np.sin(rot_angle)
+            new_x = pop_x * cos_a - pop_y * sin_a
+            new_y = pop_x * sin_a + pop_y * cos_a
+            pop_x = new_x
+            pop_y = new_y
+            pop_theta = pop_theta + rot_angle
+        
+        # Normalize theta to [-pi, pi] for consistent angular distance
+        pop_theta = cp.remainder(pop_theta + np.pi, 2*np.pi) - np.pi
+        
+        # ---------------------------------------------------------
+        # Step 2: Compute pairwise cost matrix for each individual
+        # ---------------------------------------------------------
+        # We need cost[i, j] = distance between pop_tree_i and ref_tree_j
+        # for each individual in the population.
+        
+        # Expand dimensions for broadcasting:
+        # pop: (N_pop, N_trees, 1), ref: (N_trees,) -> broadcast to (N_pop, N_trees, N_trees)
+        dx = pop_x[:, :, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :]  # (N_pop, N_trees, N_trees)
+        dy = pop_y[:, :, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :]  # (N_pop, N_trees, N_trees)
+        
+        # Angular distance: wrap difference to [-pi, pi]
+        dtheta = pop_theta[:, :, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :]
+        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
+        
+        # Total distance (Euclidean in x,y,theta space with weight=1 for all)
+        cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)  # (N_pop, N_trees, N_trees)
+        
+        # ---------------------------------------------------------
+        # Step 3: Solve assignment problem for each individual
+        # ---------------------------------------------------------
+        # cugraph's linear assignment works on a single cost matrix at a time,
+        # so we need to loop over individuals. We keep data on GPU.
+        
+        for i in range(N_pop):
+            cost_matrix = cost_matrices[i]  # (N_trees, N_trees) on GPU
+            
+            # cugraph.dense.linear_assignment expects cupy array, returns assignment cost
+            # It returns (assignment, cost) where assignment maps rows to columns
+            assignment_cost = _solve_linear_assignment_cugraph(cost_matrix)
+            
+            # Update minimum distance for this individual
+            if assignment_cost < min_distances[i]:
+                min_distances[i] = assignment_cost
+    
+    return min_distances
+
+
+def _solve_linear_assignment_cugraph(cost_matrix: cp.ndarray) -> float:
+    """
+    Solve the linear sum assignment problem using cugraph.
+    
+    Parameters
+    ----------
+    cost_matrix : cp.ndarray
+        Shape (N, N). Cost matrix where cost_matrix[i, j] is the cost of 
+        assigning row i to column j.
+        
+    Returns
+    -------
+    float
+        The minimum total assignment cost.
+    """
+    N = cost_matrix.shape[0]
+    
+    # cugraph.dense_hungarian expects:
+    #   costs      : cudf.Series – flattened dense matrix in row-major order
+    #   num_rows   : int
+    #   num_columns: int
+    # Returns (total_cost, assignment_series)
+
+    # Convert to float64 and flatten in row-major order
+    cost_matrix_f64 = cost_matrix.astype(cp.float64)
+    costs_flat = cudf.Series(cost_matrix_f64.ravel())
+
+    # Call RAPIDS dense Hungarian solver with correct signature
+    total_cost, _assignment = cugraph.dense_hungarian(costs_flat, N, N)
+
+    return float(total_cost)
 
 # ============================================================
 # Definition of population
