@@ -213,7 +213,7 @@ class GA(kgs.BaseClass):
     population_size:int = field(init=True, default=1000)
     selection_size:list[int] = field(init=True, default_factory=lambda: [1,2,3,4,6,8,10,12,14,16,18,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,300,600,1000])    
     n_generations:int = field(init=True, default=5000)    
-    p_move: float = field(init=True, default=0.9)
+    p_move: float = field(init=True, default=1.)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     relaxers: list[pack_dynamics.Optimizer] = field(init=True, default=None)
