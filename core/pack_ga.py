@@ -213,7 +213,7 @@ class GA(kgs.BaseClass):
     population_size:int = field(init=True, default=1000)
     selection_size:list = field(init=True, default_factory=lambda: [1,2,3,4,6,8,10,12,14,16,18,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,300,600,1000])    
     n_generations:int = field(init=True, default=5000)    
-    p_move: float = field(init=True, default=1.)
+    p_move: float = field(init=True, default=0.5)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
@@ -352,7 +352,7 @@ class GA(kgs.BaseClass):
                 #print(f'Before annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
                 self.annealer.seed = generator.integers(0, 1e6)
                 self.annealer.friction = generator.uniform(0.5, 2.0, size=self.population_size).astype(np.float32)
-                self.annealer.T_start = generator.uniform(-0.1,0.05, size=self.population_size).astype(np.float32)
+                self.annealer.T_start = generator.uniform(-0.05,0.05, size=self.population_size).astype(np.float32)
                 self.annealer.T_start[self.annealer.T_start<0] = 0.
                 self.annealer.tau = generator.uniform(0.5,2.0, size=self.population_size).astype(np.float32)
                 current_pop.configuration = self.annealer.run_simulation(current_pop.configuration)
