@@ -348,8 +348,8 @@ class GA(kgs.BaseClass):
                 self._rough_relax(current_pop)
 
                 # Annealing
-                self._relax_and_score(current_pop);
-                print(f'Before annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
+                #self._relax_and_score(current_pop);
+                #print(f'Before annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
                 self.annealer.seed = generator.integers(0, 1e6)
                 self.annealer.friction = generator.uniform(0.5, 2.0, size=self.population_size).astype(np.float32)
                 self.annealer.T_start = generator.uniform(-0.1,0.05, size=self.population_size).astype(np.float32)
@@ -357,7 +357,7 @@ class GA(kgs.BaseClass):
                 self.annealer.tau = generator.uniform(0.5,2.0, size=self.population_size).astype(np.float32)
                 current_pop.configuration = self.annealer.run_simulation(current_pop.configuration)
                 self._relax_and_score(current_pop)
-                print(f'After annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
+                #print(f'After annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
                 
                 current_pop.configuration.xyt[:parent_size] = old_pop.configuration.xyt
                 current_pop.configuration.h[:parent_size] = old_pop.configuration.h
