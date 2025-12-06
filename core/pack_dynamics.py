@@ -143,7 +143,7 @@ class Dynamics(kgs.BaseClass):
             prev_cost_0_scaling = cost_0_scaling
             
             # Velocity Verlet with exact exponential friction
-            # Step 1: Half-step position update
+            # Step 1: Half-step position update with OLD velocity
             sol.xyt += 0.5 * dt[:, None, None] * velocity_xyt
             sol.h += 0.5 * dt[:, None] * velocity_h
             
@@ -165,11 +165,11 @@ class Dynamics(kgs.BaseClass):
                                      (1 - decay_h) / friction[:, None],
                                      dt[:, None])
             
-            # Step 4: Full velocity update
+            # Step 4: Velocity update with exact exponential friction
             velocity_xyt = decay_xyt * velocity_xyt - force_coef_xyt * total_grad
             velocity_h = decay_h * velocity_h - force_coef_h * bound_grad
             
-            # Step 5: Second half-step position update
+            # Step 5: Half-step position update with NEW velocity
             sol.xyt += 0.5 * dt[:, None, None] * velocity_xyt
             sol.h += 0.5 * dt[:, None] * velocity_h
             t_total0 += dt[0]
@@ -194,7 +194,7 @@ class DynamicsInitialize(Dynamics):
     friction_min = 0.18
     friction_max = 0.
     friction_periods = 3
-    friction_high = 5000.  # High friction for init/final phases (replaces 1/dt)
+    friction_high = 15.8  # Tuned to match original 1/dt Euler behavior with exponential friction
     scaling_area_start = 0.6
     scaling_area_end = 0.002
     scaling_boundary = 50.
