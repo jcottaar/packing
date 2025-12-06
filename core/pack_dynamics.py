@@ -141,16 +141,37 @@ class Dynamics(kgs.BaseClass):
             if cost_0_scaling[0]>0 and prev_cost_0_scaling[0] == 0.: # assuming this applies to all...
                 sol.snap()
             prev_cost_0_scaling = cost_0_scaling
-            # Reuse pre-allocated arrays
+            
+            # Velocity Verlet with exact exponential friction
+            # Step 1: Half-step position update
+            sol.xyt += 0.5 * dt[:, None, None] * velocity_xyt
+            sol.h += 0.5 * dt[:, None] * velocity_h
+            
+            # Step 2: Compute forces at midpoint
             cost0.compute_cost(sol, total_cost0, total_grad0, bound_grad0)
             cost1.compute_cost(sol, total_cost1, total_grad1, bound_grad1)
             total_cost = total_cost0 * cost_0_scaling + total_cost1
             total_grad = total_grad0 * cost_0_scaling[:, None, None] + total_grad1
             bound_grad = bound_grad0 * cost_0_scaling[:, None] + bound_grad1
-            velocity_xyt += -dt[:,None,None]*friction[:,None,None]*velocity_xyt - dt[:,None,None]*total_grad
-            velocity_h += 0*velocity_h - dt[:,None]*bound_grad
-            sol.xyt += dt[:,None,None] * velocity_xyt
-            sol.h += dt[:,None] * velocity_h
+            
+            # Step 3: Exact exponential friction decay for stability (handles large gamma*dt)
+            decay_xyt = cp.exp(-friction[:, None, None] * dt[:, None, None])
+            decay_h = cp.exp(-friction[:, None] * dt[:, None])
+            # Force coefficient: (1 - exp(-gamma*dt)) / gamma, with limit dt as gamma->0
+            force_coef_xyt = cp.where(friction[:, None, None] > 1e-8, 
+                                       (1 - decay_xyt) / friction[:, None, None],
+                                       dt[:, None, None])
+            force_coef_h = cp.where(friction[:, None] > 1e-8,
+                                     (1 - decay_h) / friction[:, None],
+                                     dt[:, None])
+            
+            # Step 4: Full velocity update
+            velocity_xyt = decay_xyt * velocity_xyt - force_coef_xyt * total_grad
+            velocity_h = decay_h * velocity_h - force_coef_h * bound_grad
+            
+            # Step 5: Second half-step position update
+            sol.xyt += 0.5 * dt[:, None, None] * velocity_xyt
+            sol.h += 0.5 * dt[:, None] * velocity_h
             t_total0 += dt[0]
             
             if self.plot_interval is not None and t_total0 - t_last_plot >= self.plot_interval*0.999:
@@ -173,6 +194,7 @@ class DynamicsInitialize(Dynamics):
     friction_min = 0.18
     friction_max = 0.
     friction_periods = 3
+    friction_high = 5000.  # High friction for init/final phases (replaces 1/dt)
     scaling_area_start = 0.6
     scaling_area_end = 0.002
     scaling_boundary = 50.
@@ -208,7 +230,7 @@ class DynamicsInitialize(Dynamics):
                 friction = self.friction_max + (self.friction_min - self.friction_max) * (1+np.cos(frac*2*np.pi*self.friction_periods))/2
             else:
                 cost_0_scaling = 0.
-                friction = 1/dt
+                friction = self.friction_high  # Use high friction (exact exp decay handles this stably)
             self.dt_list.append(dt)
             self.friction_list.append(friction)
             self.cost_0_scaling_list.append(cost_0_scaling)        
