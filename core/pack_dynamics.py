@@ -94,12 +94,14 @@ class Dynamics(kgs.BaseClass):
 
     # Configuration    
     plot_interval = None
+    seed = None  # Random seed for reproducible Langevin noise (None = non-reproducible)
 
     # Hyperparameters
     cost0 = None # scales
     cost1 = None # doens't scale
     dt_list = None
     friction_list = None
+    temperature_list = None  # Langevin temperature (0 = deterministic)
     cost_0_scaling_list = None
 
     @typechecked
@@ -115,7 +117,14 @@ class Dynamics(kgs.BaseClass):
         n_ensembles = sol.xyt.shape[0]
         n_trees = sol.xyt.shape[1]
         assert self.dt_list.shape == self.friction_list.shape == self.cost_0_scaling_list.shape
+        assert self.temperature_list.shape == self.dt_list.shape
         assert self.dt_list.shape[0] == n_ensembles
+
+        # Set up random generator for reproducible Langevin noise
+        if self.seed is not None:
+            rng = cp.random.Generator(cp.random.XORWOW(seed=self.seed))
+        else:
+            rng = cp.random.Generator(cp.random.XORWOW())
 
         if self.plot_interval is not None:
             fig, ax = plt.subplots(figsize=(8, 8))
@@ -169,6 +178,16 @@ class Dynamics(kgs.BaseClass):
             velocity_xyt = decay_xyt * velocity_xyt - force_coef_xyt * total_grad
             velocity_h = decay_h * velocity_h - force_coef_h * bound_grad
             
+            # Step 4b: Langevin noise injection (fluctuation-dissipation: sigma = sqrt(T * (1 - exp(-2*gamma*dt))))
+            temperature = self.temperature_list[:, i_iteration]
+            # Noise amplitude for exact exponential friction discretization
+            noise_var_xyt = temperature[:, None, None] * (1 - decay_xyt**2)
+            noise_var_h = temperature[:, None] * (1 - decay_h**2)
+            noise_xyt = cp.sqrt(cp.maximum(noise_var_xyt, 0.)) * rng.standard_normal(velocity_xyt.shape, dtype=velocity_xyt.dtype)
+            noise_h = cp.sqrt(cp.maximum(noise_var_h, 0.)) * rng.standard_normal(velocity_h.shape, dtype=velocity_h.dtype)
+            velocity_xyt += noise_xyt
+            velocity_h += noise_h
+            
             # Step 5: Half-step position update with NEW velocity
             sol.xyt += 0.5 * dt[:, None, None] * velocity_xyt
             sol.h += 0.5 * dt[:, None] * velocity_h
@@ -219,6 +238,7 @@ class DynamicsInitialize(Dynamics):
         rounds_done = 0
         self.dt_list = []
         self.friction_list = []
+        self.temperature_list = []
         self.cost_0_scaling_list = []
         while True:
             if phase == 'compact':
@@ -233,6 +253,7 @@ class DynamicsInitialize(Dynamics):
                 friction = self.friction_high  # Use high friction (exact exp decay handles this stably)
             self.dt_list.append(dt)
             self.friction_list.append(friction)
+            self.temperature_list.append(0.)  # No thermal noise by default
             self.cost_0_scaling_list.append(cost_0_scaling)        
                   
             t_this_phase += dt
@@ -256,11 +277,101 @@ class DynamicsInitialize(Dynamics):
         self.dt_list = cp.tile(self.dt_list[None, :], (n_ensembles, 1))
         self.friction_list = cp.array(self.friction_list)
         self.friction_list = cp.tile(self.friction_list[None, :], (n_ensembles, 1))
+        self.temperature_list = cp.array(self.temperature_list)
+        self.temperature_list = cp.tile(self.temperature_list[None, :], (n_ensembles, 1))
         self.cost_0_scaling_list = cp.array(self.cost_0_scaling_list)
         self.cost_0_scaling_list = cp.tile(self.cost_0_scaling_list[None, :], (n_ensembles, 1))
         sol = super().run_simulation(sol)
         self.dt_list = None
         self.friction_list = None
+        self.temperature_list = None
+        self.cost_0_scaling_list = None
+        return sol
+
+
+@dataclass
+class DynamicsAnneal(Dynamics):
+    """
+    Single-round simulated annealing with exponential temperature decay.
+    Temperature decays as T(t) = T_start * exp(-t / tau).
+    
+    Parameters can vary per-individual for use in genetic algorithms.
+    """
+    # Hyperparameters (per-individual arrays of size N_solutions)
+    cost = None  # Cost function (set in __post_init__)
+    dt: float = 0.04
+    total_time: float = 100.
+    friction = None  # Shape (N_solutions,) - friction coefficient per individual
+    T_start = None   # Shape (N_solutions,) - starting temperature per individual
+    tau = None       # Shape (N_solutions,) - exponential decay time constant per individual
+    seed: int = None  # Random seed for reproducible Langevin noise
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.cost = pack_cost.CostCompound(costs=[
+            pack_cost.AreaCost(scaling=1e-2),
+            pack_cost.BoundaryDistanceCost(scaling=1.),
+            pack_cost.CollisionCostOverlappingArea(scaling=1.)
+        ])
+
+    @typechecked
+    def run_simulation(self, sol: kgs.SolutionCollection):
+        n_ensembles = sol.N_solutions
+        
+        # Use cost as cost1, no cost0 (no force balance scheduling)
+        self.cost0 = pack_cost.CostDummy()  # Empty, no scaling cost
+        self.cost1 = self.cost
+        
+        # Convert scalar parameters to arrays if needed
+        friction = np.atleast_1d(self.friction)
+        T_start = np.atleast_1d(self.T_start)
+        tau = np.atleast_1d(self.tau)
+        
+        # Broadcast to n_ensembles if single values provided
+        if friction.shape[0] == 1:
+            friction = np.full(n_ensembles, friction[0])
+        if T_start.shape[0] == 1:
+            T_start = np.full(n_ensembles, T_start[0])
+        if tau.shape[0] == 1:
+            tau = np.full(n_ensembles, tau[0])
+        
+        assert friction.shape == (n_ensembles,), f"friction shape {friction.shape} != ({n_ensembles},)"
+        assert T_start.shape == (n_ensembles,), f"T_start shape {T_start.shape} != ({n_ensembles},)"
+        assert tau.shape == (n_ensembles,), f"tau shape {tau.shape} != ({n_ensembles},)"
+        
+        # Build schedule lists
+        dt = np.float32(self.dt)
+        n_steps = int(np.ceil(self.total_time / dt))
+        
+        self.dt_list = []
+        self.friction_list = []
+        self.temperature_list = []
+        self.cost_0_scaling_list = []
+        
+        for i_step in range(n_steps):
+            t = i_step * dt
+            # Temperature: T(t) = T_start * exp(-t / tau)
+            # Handle tau=0 or very small tau (instant decay to 0)
+            temperature = np.where(tau > 1e-8, T_start * np.exp(-t / tau), 0.)
+            
+            self.dt_list.append(np.full(n_ensembles, dt, dtype=np.float32))
+            self.friction_list.append(friction.astype(np.float32))
+            self.temperature_list.append(temperature.astype(np.float32))
+            self.cost_0_scaling_list.append(np.zeros(n_ensembles, dtype=np.float32))  # No cost0 scaling
+        
+        # Convert to cupy arrays with shape (n_ensembles, n_steps)
+        self.dt_list = cp.array(np.stack(self.dt_list, axis=1))
+        self.friction_list = cp.array(np.stack(self.friction_list, axis=1))
+        self.temperature_list = cp.array(np.stack(self.temperature_list, axis=1))
+        self.cost_0_scaling_list = cp.array(np.stack(self.cost_0_scaling_list, axis=1))
+        
+        # Run the simulation
+        sol = super().run_simulation(sol)
+        
+        # Clean up
+        self.dt_list = None
+        self.friction_list = None
+        self.temperature_list = None
         self.cost_0_scaling_list = None
         return sol
 

@@ -216,7 +216,8 @@ class GA(kgs.BaseClass):
     p_move: float = field(init=True, default=1.)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
-    relaxers: list[pack_dynamics.Optimizer] = field(init=True, default=None)
+    rough_relaxers: list[pack_dynamics.Optimizer] = field(init=True, default=None) # meant to prevent heavy overlaps
+    fine_relaxers: list[pack_dynamics.Optimizer] = field(init=True, default=None)  # meant to refine solutions
 
     # Outputs
     populations: list[Population] = field(init=True, default_factory=list)
@@ -226,26 +227,33 @@ class GA(kgs.BaseClass):
         self.fitness_cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-2), 
                                         pack_cost.BoundaryDistanceCost(scaling=1.), 
                                         pack_cost.CollisionCostSeparation(scaling=1.)])
-        self.relaxers = []
+        self.rough_relaxers = []
         relaxer = pack_dynamics.Optimizer()
         relaxer.cost = copy.deepcopy(self.fitness_cost)
         relaxer.cost.costs[2] = pack_cost.CollisionCostOverlappingArea(scaling=1.)
         relaxer.n_iterations *= 2
-        self.relaxers.append(relaxer)
+        self.rough_relaxers.append(relaxer)
+
+        self.fine_relaxers = []
         relaxer = pack_dynamics.Optimizer()
         relaxer.cost = copy.deepcopy(self.fitness_cost)
         relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
         relaxer.n_iterations *= 2
-        self.relaxers.append(relaxer)
+        self.fine_relaxers.append(relaxer)
         # relaxer = pack_dynamics.Optimizer()
         # relaxer.cost = pack_cost.CollisionCostSeparation(scaling=1.)
         # relaxer.n_iterations *= 2
         # self.relaxers.append(relaxer)
 
+    def _rough_relax(self, population:Population):
+        sol = population.configuration
+        for relaxer in self.rough_relaxers:
+            sol = relaxer.run_simulation(sol)
+        population.configuration = sol
 
     def _relax_and_score(self, population:Population):
         sol = population.configuration
-        for relaxer in self.relaxers:
+        for relaxer in self.fine_relaxers:
             sol = relaxer.run_simulation(sol)
         costs = self.fitness_cost.compute_cost_allocate(sol)[0]
         population.configuration = sol
@@ -259,6 +267,7 @@ class GA(kgs.BaseClass):
             self.initializer.seed = 200*self.seed + N_trees        
             population = self.initializer.initialize_population(self.population_size, N_trees)
             population.check_constraints()
+            self._rough_relax(population)
             self._relax_and_score(population)
             self.populations.append(population)    
 
@@ -333,6 +342,11 @@ class GA(kgs.BaseClass):
                 current_pop.configuration.xyt = cp.array(new_xyt)
                 current_pop.configuration.h = cp.array(new_h)
                 current_pop.lineages = new_lineages
+                self._rough_relax(current_pop)
+
+                # Annealing
+                
+
                 self._relax_and_score(current_pop)
                 current_pop.configuration.xyt[:parent_size] = old_pop.configuration.xyt
                 current_pop.configuration.h[:parent_size] = old_pop.configuration.h
