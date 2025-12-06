@@ -352,7 +352,8 @@ class GA(kgs.BaseClass):
                 print(f'Before annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
                 self.annealer.seed = generator.integers(0, 1e6)
                 self.annealer.friction = generator.uniform(0.5, 2.0, size=self.population_size).astype(np.float32)
-                self.annealer.T_start = generator.uniform(0.0,0.1, size=self.population_size).astype(np.float32)
+                self.annealer.T_start = generator.uniform(-0.1,0.05, size=self.population_size).astype(np.float32)
+                self.annealer.T_start[self.annealer.T_start<0] = 0.
                 self.annealer.tau = generator.uniform(0.5,2.0, size=self.population_size).astype(np.float32)
                 current_pop.configuration = self.annealer.run_simulation(current_pop.configuration)
                 self._relax_and_score(current_pop)
