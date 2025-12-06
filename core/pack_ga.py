@@ -2,8 +2,6 @@ import pandas as pd
 import numpy as np
 import scipy as sp
 import cupy as cp
-import cugraph
-import cudf
 import kaggle_support as kgs
 from dataclasses import dataclass, field, fields
 from typeguard import typechecked
@@ -12,6 +10,7 @@ from shapely.ops import unary_union
 import shapely
 import pack_cost
 import pack_dynamics
+import copy
 
 print('stop final relax at some point')
 
@@ -26,7 +25,7 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     and a single reference configuration, considering all 8 symmetry transformations
     (4 rotations × 2 mirror states).
     
-    Uses the Hungarian algorithm (via cugraph) to find the optimal tree-to-tree mapping
+    Uses the Hungarian algorithm (via scipy) to find the optimal tree-to-tree mapping
     that minimizes total distance. The distance metric includes (x, y, theta) with equal weights.
     
     Parameters
@@ -135,54 +134,20 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
         # ---------------------------------------------------------
         # Step 3: Solve assignment problem for each individual
         # ---------------------------------------------------------
-        # cugraph's linear assignment works on a single cost matrix at a time,
-        # so we need to loop over individuals. We keep data on GPU.
+        # Transfer all cost matrices to CPU in one go (single sync point),
+        # then solve all assignments on CPU using scipy (faster for small N).
         
+        cost_matrices_cpu = cost_matrices.get()  # Single GPU->CPU transfer
+        transform_costs = np.empty(N_pop, dtype=np.float32)
         for i in range(N_pop):
-            cost_matrix = cost_matrices[i]  # (N_trees, N_trees) on GPU
-            
-            # cugraph.dense.linear_assignment expects cupy array, returns assignment cost
-            # It returns (assignment, cost) where assignment maps rows to columns
-            assignment_cost = _solve_linear_assignment_cugraph(cost_matrix)
-            
-            # Update minimum distance for this individual
-            if assignment_cost < min_distances[i]:
-                min_distances[i] = assignment_cost
+            row_ind, col_ind = sp.optimize.linear_sum_assignment(cost_matrices_cpu[i])
+            transform_costs[i] = cost_matrices_cpu[i, row_ind, col_ind].sum()
+        
+        # Single element-wise minimum update
+        min_distances = cp.minimum(min_distances, cp.asarray(transform_costs))
     
     return min_distances
 
-
-def _solve_linear_assignment_cugraph(cost_matrix: cp.ndarray) -> float:
-    """
-    Solve the linear sum assignment problem using cugraph.
-    
-    Parameters
-    ----------
-    cost_matrix : cp.ndarray
-        Shape (N, N). Cost matrix where cost_matrix[i, j] is the cost of 
-        assigning row i to column j.
-        
-    Returns
-    -------
-    float
-        The minimum total assignment cost.
-    """
-    N = cost_matrix.shape[0]
-    
-    # cugraph.dense_hungarian expects:
-    #   costs      : cudf.Series – flattened dense matrix in row-major order
-    #   num_rows   : int
-    #   num_columns: int
-    # Returns (total_cost, assignment_series)
-
-    # Convert to float64 and flatten in row-major order
-    cost_matrix_f64 = cost_matrix.astype(cp.float64)
-    costs_flat = cudf.Series(cost_matrix_f64.ravel())
-
-    # Call RAPIDS dense Hungarian solver with correct signature
-    total_cost, _assignment = cugraph.dense_hungarian(costs_flat, N, N)
-
-    return float(total_cost)
 
 # ============================================================
 # Definition of population
@@ -199,6 +164,11 @@ class Population(kgs.BaseClass):
 
     def set_dummy_fitness(self):
         self.fitness = np.zeros(self.configuration.N_solutions)
+
+    def select_ids(self, inds):
+        self.configuration.xyt = self.configuration.xyt[inds]
+        self.configuration.h = self.configuration.h[inds]
+        self.fitness = self.fitness[inds]
 
 
 # ============================================================
@@ -247,9 +217,8 @@ class GA(kgs.BaseClass):
 
     # Hyperparameters
     population_size:int = field(init=True, default=1000)
-    n_generations:int = field(init=True, default=5000)
-    tournament_size:int = field(init=True, default=20)
-    n_elites:int = field(init=True, default=10)
+    selection_size:list[int] = field(init=True, default_factory=lambda: [1,2,3,4,6,8,10,12,14,16,18,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,500,1000])    
+    n_generations:int = field(init=True, default=5000)    
     p_move: float = field(init=True, default=1.)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
@@ -300,45 +269,44 @@ class GA(kgs.BaseClass):
 
         self.best_cost_per_generation = np.zeros((self.n_generations, len(self.N_trees_to_do)))
         for i_gen in range(self.n_generations):
+
+            # Selection and diversity maintenance
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
                 best_id = np.argmin(self.populations[i_N_trees].fitness)                   
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
-                self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]
-                import matplotlib.pyplot as plt
-                #plt.figure()
-                #plt.plot(np.sort(self.populations[i_N_trees].fitness))
-                #plt.pause(0.0001)
+                self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]                
                 
                 current_pop = self.populations[i_N_trees]
-                current_xyt = current_pop.configuration.xyt.get()  # (N_individuals, N_trees, 3)
-                current_h = current_pop.configuration.h.get()  # (N_individuals, 3) - [size, x_offset, y_offset]
+                current_pop.select_ids(np.argsort(current_pop.fitness))  # Sort by fitness
+                current_xyt = current_pop.configuration.xyt  # (N_individuals, N_trees, 3)
+                current_h = current_pop.configuration.h  # (N_individuals, 3) - [size, x_offset, y_offset]
                 current_fitness = current_pop.fitness
 
-                # Elitism: find the best n_elites individuals
-                elite_indices = np.argsort(current_fitness)[:self.n_elites]
+                selected = np.zeros(self.population_size, dtype=bool)
+                diversity = np.inf*np.ones(self.population_size)
+                for sel_size in self.selection_size:
+                    selected_id = np.argmax(diversity[:sel_size])
+                    selected[selected_id] = True
+                    diversity = np.minimum(compute_genetic_diversity(cp.array(current_xyt), cp.array(current_xyt[selected_id])).get(), diversity)
+                    #print(sel_size, diversity)
+                    assert(np.all(diversity[selected]<1e-4))
+                current_pop.select_ids(np.where(selected)[0])
+                self.populations[i_N_trees] = current_pop
 
-                # Tournament selection for each new individual
-                new_xyt = np.empty_like(current_xyt)
-                new_h = np.empty_like(current_h)
-                
-                # Copy elites unmutated
-                for i_ind, elite_idx in enumerate(elite_indices):
-                    new_xyt[i_ind] = current_xyt[elite_idx]
-                    new_h[i_ind] = current_h[elite_idx]
-                
-                # Fill remaining slots with tournament selection + mutation
-                for i_ind in range(self.n_elites, self.population_size):
-                    # Pick tournament_size individuals at random
-                    tournament_ids = generator.choice(self.population_size, size=self.tournament_size, replace=False)
-                    # Select the one with the best (lowest) fitness
-                    winner_idx = tournament_ids[np.argmin(current_fitness[tournament_ids])]
-                    
-                    # Copy the winner's configuration
-                    new_xyt[i_ind] = current_xyt[winner_idx]
-                    new_h[i_ind] = current_h[winner_idx]
-                    
-                    # Pick a random tree and give it a new random position within the square
-                    if generator.uniform()<self.p_move:
+            # Offspring generation
+            for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
+                current_pop = self.populations[i_N_trees]
+                parent_size = current_pop.configuration.N_solutions
+                new_xyt = np.empty((self.population_size, N_trees, 3), dtype=np.float32)
+                new_h = np.empty((self.population_size, 3), dtype=np.float32)
+                new_xyt[:parent_size] = current_pop.configuration.xyt.get()
+                new_h[:parent_size] = current_pop.configuration.h.get()
+                for i_ind in np.arange(parent_size, self.population_size):
+                    # Pick a random parent
+                    parent_id = generator.integers(0, parent_size)
+                    new_xyt[i_ind] = new_xyt[parent_id]
+                    new_h[i_ind] = new_h[parent_id]
+                    if generator.uniform() < self.p_move:
                         tree_to_mutate = generator.integers(0, N_trees)
                         h_size = new_h[i_ind, 0]  # Square size
                         h_offset_x = new_h[i_ind, 1]  # x offset
@@ -346,13 +314,7 @@ class GA(kgs.BaseClass):
                         new_xyt[i_ind, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
                         new_xyt[i_ind, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
                         new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta
-
-                # Update existing population's configuration in-place
-                current_pop.configuration.xyt = cp.array(new_xyt, dtype=np.float32)
-                current_pop.configuration.h = cp.array(new_h, dtype=np.float32)
-                
-                # Relax and score the population
+                current_pop.configuration.xyt = cp.array(new_xyt)
+                current_pop.configuration.h = cp.array(new_h)
                 self._relax_and_score(current_pop)
-
-                
         
