@@ -23,6 +23,7 @@ class Optimizer(kgs.BaseClass):
 
     # Configuration    
     plot_interval = None
+    use_lookahead = False  # Enable second-order lookahead (predictor-corrector)
 
     # Hyperparameters
     cost = None
@@ -60,7 +61,13 @@ class Optimizer(kgs.BaseClass):
         bound_grad = cp.zeros_like(h, dtype=cp.float32)
 
         t_total0 = np.float32(0.)   
-        t_last_plot = np.float32(-np.inf)     
+        t_last_plot = np.float32(-np.inf)
+        
+        # For second-order lookahead, store previous gradients
+        if self.use_lookahead:
+            prev_grad = cp.zeros_like(xyt, dtype=cp.float32)
+            prev_bound_grad = cp.zeros_like(h, dtype=cp.float32)
+            
         for i_iteration in range(self.n_iterations):
             dt = self.dt
             # Reuse pre-allocated arrays
@@ -73,8 +80,23 @@ class Optimizer(kgs.BaseClass):
             #     clip_factor = cp.minimum(1.0, self.max_grad_norm / grad_norms)  # (n_ensembles, n_trees)
             #     total_grad = total_grad * clip_factor[:, :, None]  # Apply to each component
             
-            xyt -= dt * total_grad
-            h -= dt * bound_grad
+            if self.use_lookahead and i_iteration > 0:
+                # Second-order lookahead: use gradient + 0.5 * (gradient - prev_gradient)
+                # This is a predictor-corrector scheme: x_{n+1} = x_n - dt * (1.5*g_n - 0.5*g_{n-1})
+                # Equivalent to Adams-Bashforth 2-step method
+                effective_grad = 1.5 * total_grad - 0.5 * prev_grad
+                effective_bound_grad = 1.5 * bound_grad - 0.5 * prev_bound_grad
+                xyt -= dt * effective_grad
+                h -= dt * effective_bound_grad
+            else:
+                xyt -= dt * total_grad
+                h -= dt * bound_grad
+            
+            if self.use_lookahead:
+                # Store current gradients for next iteration
+                prev_grad[:] = total_grad
+                prev_bound_grad[:] = bound_grad
+                
             t_total0 += dt
             
             if self.plot_interval is not None and t_total0 - t_last_plot >= self.plot_interval*0.999:
@@ -103,6 +125,7 @@ class Dynamics(kgs.BaseClass):
     friction_list = None
     temperature_list = None  # Langevin temperature (0 = deterministic)
     cost_0_scaling_list = None
+    mass_h = 1.0  # Mass for boundary parameter h (single value)
 
     @typechecked
     def run_simulation(self, sol:kgs.SolutionCollection):
@@ -176,13 +199,14 @@ class Dynamics(kgs.BaseClass):
             
             # Step 4: Velocity update with exact exponential friction
             velocity_xyt = decay_xyt * velocity_xyt - force_coef_xyt * total_grad
-            velocity_h = decay_h * velocity_h - force_coef_h * bound_grad
+            velocity_h = decay_h * velocity_h - force_coef_h * bound_grad / self.mass_h
             
-            # Step 4b: Langevin noise injection (fluctuation-dissipation: sigma = sqrt(T * (1 - exp(-2*gamma*dt))))
+            # Step 4b: Langevin noise injection (fluctuation-dissipation: sigma = sqrt(T/m * (1 - exp(-2*gamma*dt))))
             temperature = self.temperature_list[:, i_iteration]
             # Noise amplitude for exact exponential friction discretization
+            # Divide by mass for proper equipartition: (1/2)*m*<v^2> = (1/2)*T
             noise_var_xyt = temperature[:, None, None] * (1 - decay_xyt**2)
-            noise_var_h = temperature[:, None] * (1 - decay_h**2)
+            noise_var_h = (temperature[:, None] / self.mass_h) * (1 - decay_h**2)
             noise_xyt = cp.sqrt(cp.maximum(noise_var_xyt, 0.)) * rng.standard_normal(velocity_xyt.shape, dtype=velocity_xyt.dtype)
             noise_h = cp.sqrt(cp.maximum(noise_var_h, 0.)) * rng.standard_normal(velocity_h.shape, dtype=velocity_h.dtype)
             velocity_xyt += noise_xyt
@@ -300,10 +324,10 @@ class DynamicsAnneal(Dynamics):
     # Hyperparameters (per-individual arrays of size N_solutions)
     cost = None  # Cost function (set in __post_init__)
     dt: float = 0.04
-    total_time: float = 100.
-    friction = None  # Shape (N_solutions,) - friction coefficient per individual
-    T_start = None   # Shape (N_solutions,) - starting temperature per individual
-    tau = None       # Shape (N_solutions,) - exponential decay time constant per individual
+    total_time: float = 20.
+    friction = 1.  # Shape (N_solutions,) - friction coefficient per individual
+    T_start = 0.05   # Shape (N_solutions,) - starting temperature per individual
+    tau = 1.       # Shape (N_solutions,) - exponential decay time constant per individual
     seed: int = None  # Random seed for reproducible Langevin noise
 
     def __post_init__(self):

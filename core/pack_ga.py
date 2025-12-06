@@ -211,16 +211,18 @@ class GA(kgs.BaseClass):
 
     # Hyperparameters
     population_size:int = field(init=True, default=1000)
-    selection_size:list[int] = field(init=True, default_factory=lambda: [1,2,3,4,6,8,10,12,14,16,18,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,300,600,1000])    
+    selection_size:list = field(init=True, default_factory=lambda: [1,2,3,4,6,8,10,12,14,16,18,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,300,600,1000])    
     n_generations:int = field(init=True, default=5000)    
     p_move: float = field(init=True, default=1.)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
-    rough_relaxers: list[pack_dynamics.Optimizer] = field(init=True, default=None) # meant to prevent heavy overlaps
-    fine_relaxers: list[pack_dynamics.Optimizer] = field(init=True, default=None)  # meant to refine solutions
+    rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
+    fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
+
+    annealer: pack_dynamics.DynamicsAnneal = field(init=True, default_factory=pack_dynamics.DynamicsAnneal)
 
     # Outputs
-    populations: list[Population] = field(init=True, default_factory=list)
+    populations: list = field(init=True, default_factory=list)
     best_cost_per_generation = None
 
     def __post_init__(self):
@@ -260,6 +262,7 @@ class GA(kgs.BaseClass):
         population.fitness = costs.get()
 
     def run(self):
+        self.check_constraints()
         generator = np.random.default_rng(seed=self.seed)
 
         # Initialize populations
@@ -345,9 +348,16 @@ class GA(kgs.BaseClass):
                 self._rough_relax(current_pop)
 
                 # Annealing
-                
-
+                self._relax_and_score(current_pop);
+                print(f'Before annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
+                self.annealer.seed = generator.integers(0, 1e6)
+                self.annealer.friction = generator.uniform(0.5, 2.0, size=self.population_size).astype(np.float32)
+                self.annealer.T_start = generator.uniform(0.0,0.1, size=self.population_size).astype(np.float32)
+                self.annealer.tau = generator.uniform(0.5,2.0, size=self.population_size).astype(np.float32)
+                current_pop.configuration = self.annealer.run_simulation(current_pop.configuration)
                 self._relax_and_score(current_pop)
+                print(f'After annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
+                
                 current_pop.configuration.xyt[:parent_size] = old_pop.configuration.xyt
                 current_pop.configuration.h[:parent_size] = old_pop.configuration.h
                 current_pop.fitness[:parent_size] = old_pop.fitness
