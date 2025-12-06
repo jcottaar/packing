@@ -9,16 +9,17 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 import shapely
 import pack_cost
+import pack_vis
 import pack_dynamics
 import copy
+import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor
+import lap_batch
 
 print('stop final relax at some point')
 
 
-# ============================================================
-# Genetic diversity measurement
-# ============================================================
-
+@kgs.profile_each_line
 def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
     """
     Compute the minimum-cost assignment distance between each individual in a population
@@ -84,23 +85,20 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     ref_y = reference_xyt[:, 1]      # (N_trees,)
     ref_theta = reference_xyt[:, 2]  # (N_trees,)
     
+    # Compute cost matrices for all 8 transformations on GPU
+    all_cost_matrices = []
     for rot_angle, do_mirror in transformations:
         # ---------------------------------------------------------
-        # Step 1: Apply transformation to population individuals
+        # Step 1: Apply transformation to population individuals (GPU)
         # ---------------------------------------------------------
-        # Extract coordinates
-        pop_x = population_xyt[:, :, 0].copy()      # (N_pop, N_trees)
-        pop_y = population_xyt[:, :, 1].copy()      # (N_pop, N_trees)
-        pop_theta = population_xyt[:, :, 2].copy()  # (N_pop, N_trees)
+        pop_x = population_xyt[:, :, 0].copy()
+        pop_y = population_xyt[:, :, 1].copy()
+        pop_theta = population_xyt[:, :, 2].copy()
         
-        # Apply mirror first (reflect across x-axis: y -> -y, theta -> -theta)
         if do_mirror:
             pop_y = -pop_y
             pop_theta = -pop_theta
         
-        # Apply rotation around origin
-        # New coordinates: x' = x*cos(a) - y*sin(a), y' = x*sin(a) + y*cos(a)
-        # New theta: theta' = theta + a
         if rot_angle != 0.0:
             cos_a = np.cos(rot_angle)
             sin_a = np.sin(rot_angle)
@@ -110,41 +108,33 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
             pop_y = new_y
             pop_theta = pop_theta + rot_angle
         
-        # Normalize theta to [-pi, pi] for consistent angular distance
         pop_theta = cp.remainder(pop_theta + np.pi, 2*np.pi) - np.pi
         
         # ---------------------------------------------------------
-        # Step 2: Compute pairwise cost matrix for each individual
+        # Step 2: Compute pairwise cost matrix (GPU)
         # ---------------------------------------------------------
-        # We need cost[i, j] = distance between pop_tree_i and ref_tree_j
-        # for each individual in the population.
-        
-        # Expand dimensions for broadcasting:
-        # pop: (N_pop, N_trees, 1), ref: (N_trees,) -> broadcast to (N_pop, N_trees, N_trees)
-        dx = pop_x[:, :, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :]  # (N_pop, N_trees, N_trees)
-        dy = pop_y[:, :, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :]  # (N_pop, N_trees, N_trees)
-        
-        # Angular distance: wrap difference to [-pi, pi]
+        dx = pop_x[:, :, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :]
+        dy = pop_y[:, :, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :]
         dtheta = pop_theta[:, :, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :]
-        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi  # Wrap to [-pi, pi]
+        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
+        cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)
         
-        # Total distance (Euclidean in x,y,theta space with weight=1 for all)
-        cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)  # (N_pop, N_trees, N_trees)
-        
-        # ---------------------------------------------------------
-        # Step 3: Solve assignment problem for each individual
-        # ---------------------------------------------------------
-        # Transfer all cost matrices to CPU in one go (single sync point),
-        # then solve all assignments on CPU using scipy (faster for small N).
-        
-        cost_matrices_cpu = cost_matrices.get()  # Single GPU->CPU transfer
-        transform_costs = np.empty(N_pop, dtype=np.float32)
-        for i in range(N_pop):
-            row_ind, col_ind = sp.optimize.linear_sum_assignment(cost_matrices_cpu[i])
-            transform_costs[i] = cost_matrices_cpu[i, row_ind, col_ind].sum()
-        
-        # Single element-wise minimum update
-        min_distances = cp.minimum(min_distances, cp.asarray(transform_costs))
+        all_cost_matrices.append(cost_matrices)
+    
+    # ---------------------------------------------------------
+    # Step 3: Solve assignment problems on GPU using RAFT
+    # ---------------------------------------------------------
+    # Stack all cost matrices on GPU: shape (8, N_pop, N_trees, N_trees)
+    # Then reshape to (8*N_pop, N_trees, N_trees) for batched solving
+    stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_trees)
+    batched = stacked.reshape(-1, N_trees, N_trees)    # (8*N_pop, N_trees, N_trees)
+    
+    # Solve all LAPs on GPU
+    _, all_assignment_costs = lap_batch.solve_lap_batch(batched)  # (8*N_pop,)
+    
+    # Reshape back and take minimum across transformations
+    all_costs_array = all_assignment_costs.reshape(8, N_pop)  # (8, N_pop)
+    min_distances = all_costs_array.min(axis=0)
     
     return min_distances
 
@@ -157,10 +147,12 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
 class Population(kgs.BaseClass):
     configuration: kgs.SolutionCollection = field(init=True, default=None)
     fitness: np.ndarray = field(init=True, default=None)
+    lineages: list = field(init=True, default=None)
 
     def _check_constraints(self):
         self.configuration.check_constraints()
         assert self.fitness.shape == (self.configuration.N_solutions,)
+        assert len(self.lineages) == self.configuration.N_solutions
 
     def set_dummy_fitness(self):
         self.fitness = np.zeros(self.configuration.N_solutions)
@@ -169,6 +161,7 @@ class Population(kgs.BaseClass):
         self.configuration.xyt = self.configuration.xyt[inds]
         self.configuration.h = self.configuration.h[inds]
         self.fitness = self.fitness[inds]
+        self.lineages = [self.lineages[i] for i in inds]
 
 
 # ============================================================
@@ -198,9 +191,10 @@ class InitializerRandomJiggled(Initializer):
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, np.pi]]]
         xyt = cp.array(xyt, dtype=np.float32)        
         h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=np.float32)
-        sol = kgs.SolutionCollection(xyt=xyt, h=h)
+        sol = kgs.SolutionCollection(xyt=xyt, h=h)        
         sol = self.jiggler.run_simulation(sol)
         population = Population(configuration=sol)
+        population.lineages = [ [i] for i in range(N_individuals) ]
         return population
 
 
@@ -217,9 +211,9 @@ class GA(kgs.BaseClass):
 
     # Hyperparameters
     population_size:int = field(init=True, default=1000)
-    selection_size:list[int] = field(init=True, default_factory=lambda: [1,2,3,4,6,8,10,12,14,16,18,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,500,1000])    
+    selection_size:list[int] = field(init=True, default_factory=lambda: [1,2,3,4,6,8,10,12,14,16,18,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,300,600,1000])    
     n_generations:int = field(init=True, default=5000)    
-    p_move: float = field(init=True, default=1.)
+    p_move: float = field(init=True, default=0.9)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     relaxers: list[pack_dynamics.Optimizer] = field(init=True, default=None)
@@ -264,6 +258,7 @@ class GA(kgs.BaseClass):
         for N_trees in self.N_trees_to_do:    
             self.initializer.seed = 200*self.seed + N_trees        
             population = self.initializer.initialize_population(self.population_size, N_trees)
+            population.check_constraints()
             self._relax_and_score(population)
             self.populations.append(population)    
 
@@ -272,9 +267,18 @@ class GA(kgs.BaseClass):
 
             # Selection and diversity maintenance
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
+                # plt.figure()
+                # plt.plot(np.sort(self.populations[i_N_trees].fitness))
+                # plt.pause(0.001)
                 best_id = np.argmin(self.populations[i_N_trees].fitness)                   
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
                 self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]                
+                if i_gen==0 or self.best_cost_per_generation[i_gen, i_N_trees]<self.best_cost_per_generation[i_gen-1, i_N_trees]:
+                    tree_list = kgs.TreeList()
+                    tree_list.xyt = self.populations[i_N_trees].configuration.xyt[best_id].get()
+                    pack_vis.visualize_tree_list(tree_list)
+                    plt.title(f'Generation: {i_gen}, cost: {self.best_cost_per_generation[i_gen, i_N_trees]}')
+                    plt.pause(0.001)
                 
                 current_pop = self.populations[i_N_trees]
                 current_pop.select_ids(np.argsort(current_pop.fitness))  # Sort by fitness
@@ -282,30 +286,42 @@ class GA(kgs.BaseClass):
                 current_h = current_pop.configuration.h  # (N_individuals, 3) - [size, x_offset, y_offset]
                 current_fitness = current_pop.fitness
 
+                max_sel = np.max(self.selection_size)
                 selected = np.zeros(self.population_size, dtype=bool)
-                diversity = np.inf*np.ones(self.population_size)
+                diversity = np.inf*np.ones(max_sel)
                 for sel_size in self.selection_size:
                     selected_id = np.argmax(diversity[:sel_size])
                     selected[selected_id] = True
-                    diversity = np.minimum(compute_genetic_diversity(cp.array(current_xyt), cp.array(current_xyt[selected_id])).get(), diversity)
+                    diversity = np.minimum(compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
                     #print(sel_size, diversity)
-                    assert(np.all(diversity[selected]<1e-4))
+                    assert(np.all(diversity[selected[:max_sel]]<1e-4))
                 current_pop.select_ids(np.where(selected)[0])
                 self.populations[i_N_trees] = current_pop
+                self.populations[i_N_trees].check_constraints()
+                # plt.figure()
+                # plt.plot(np.sort(self.populations[i_N_trees].fitness))
+                # plt.pause(0.001)
+                print(self.populations[i_N_trees].lineages)
+
+            
 
             # Offspring generation
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
                 current_pop = self.populations[i_N_trees]
+                old_pop = copy.deepcopy(current_pop)
                 parent_size = current_pop.configuration.N_solutions
                 new_xyt = np.empty((self.population_size, N_trees, 3), dtype=np.float32)
-                new_h = np.empty((self.population_size, 3), dtype=np.float32)
+                new_h = np.empty((self.population_size, 3), dtype=np.float32)    
+                new_lineages = [None]*self.population_size
                 new_xyt[:parent_size] = current_pop.configuration.xyt.get()
                 new_h[:parent_size] = current_pop.configuration.h.get()
+                new_lineages[:parent_size] = current_pop.lineages
                 for i_ind in np.arange(parent_size, self.population_size):
                     # Pick a random parent
                     parent_id = generator.integers(0, parent_size)
                     new_xyt[i_ind] = new_xyt[parent_id]
                     new_h[i_ind] = new_h[parent_id]
+                    new_lineages[i_ind] = new_lineages[parent_id]
                     if generator.uniform() < self.p_move:
                         tree_to_mutate = generator.integers(0, N_trees)
                         h_size = new_h[i_ind, 0]  # Square size
@@ -316,5 +332,10 @@ class GA(kgs.BaseClass):
                         new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta
                 current_pop.configuration.xyt = cp.array(new_xyt)
                 current_pop.configuration.h = cp.array(new_h)
+                current_pop.lineages = new_lineages
                 self._relax_and_score(current_pop)
+                current_pop.configuration.xyt[:parent_size] = old_pop.configuration.xyt
+                current_pop.configuration.h[:parent_size] = old_pop.configuration.h
+                current_pop.fitness[:parent_size] = old_pop.fitness
+                current_pop.check_constraints()
         
