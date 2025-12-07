@@ -10,6 +10,7 @@ import pack_basics
 import pack_vis
 import pack_cuda
 import pack_cuda_primitives_test
+import matplotlib.pyplot as plt
 pack_cuda.USE_FLOAT32 = True
 
 def run_all_tests():
@@ -27,10 +28,13 @@ def test_costs():
     tree_list = []
     tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=0)))
     tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=2)))
-    pack_vis.visualize_tree_list(tree_list[0])
-    pack_vis.visualize_tree_list(tree_list[1])
+    #tree_list.append(kgs.TreeList(x=[0.001,0.], y=[0.001,0.], theta=[0.,0.])) # almost overlapping trees
+    #tree_list.append(kgs.TreeList(x=[0.,0.], y=[0.,0.], theta=[0.,0.])) # overlapping trees
+    for ii in range(len(tree_list)):
+        pack_vis.visualize_tree_list(tree_list[ii])
+    plt.pause(0.001)
 
-    bounds = cp.array([[0.5, 0.2, 0.4],[2., -0.1, -0.15]])  # square bounds
+    bounds = cp.array([[0.5, 0.2, 0.4],[2., -0.1, -0.15],[2., -0.1, -0.15],[2., -0.1, -0.15]])  # square bounds
 
 
     for c in costs_to_test:
@@ -131,8 +135,8 @@ def test_costs():
         
         # Vectorized check: call with all xyt and bounds for this cost function
         print(f"  Vectorized check for {c.__class__.__name__}")
-        full_xyt = cp.concatenate(all_xyt, axis=0)
-        full_bounds = cp.concatenate(all_bounds, axis=0)
+        full_xyt = cp.concatenate(all_xyt[:2], axis=0)
+        full_bounds = cp.concatenate(all_bounds[:2], axis=0)
         print(full_bounds)
 
         # Compute vectorized results using kgs.SolutionCollection
@@ -146,7 +150,7 @@ def test_costs():
         vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)
         
         # Check each tree's results
-        for i in range(len(tree_list)):
+        for i in range(2):
             # Get stored individual outputs
             stored_ref = all_ref_outputs[i]
             stored_fast = all_fast_outputs[i]

@@ -235,7 +235,28 @@ class InitializerRandomJiggled(Initializer):
 @dataclass
 class Move(kgs.BaseClass):
     def do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
-        return self._do_move(population, individual_id, mate_id, generator)
+        move_descriptor =  self._do_move(population, individual_id, mate_id, generator)
+        # Check if any trees are within 1e-6 of each other -> error
+        # moved = population.configuration.xyt[individual_id]  # (N_trees, 3) (cupy)
+        # moved_arr = moved.get() if isinstance(moved, cp.ndarray) else np.array(moved)
+        # x = moved_arr[:, 0][:, None]
+        # y = moved_arr[:, 1][:, None]
+        # theta = moved_arr[:, 2][:, None]
+        # dx = x - x.T
+        # dy = y - y.T
+        # dtheta = theta - theta.T
+        # dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
+        # pairwise_dist = np.sqrt(dx**2 + dy**2 + dtheta**2)
+        # np.fill_diagonal(pairwise_dist, np.inf)
+        # min_dist = pairwise_dist.min()
+        # if min_dist < 1e-6:
+        #     pairwise_dist[pairwise_dist<1e-6] = 1e-6
+        #     plt.figure()
+        #     plt.imshow(np.log(pairwise_dist))
+        #     plt.colorbar()
+        #     plt.pause(0.001)
+        #     raise AssertionError(f"Two trees in individual {individual_id} are closer than 1e-6 (min_dist={min_dist})")
+        return move_descriptor
     def _do_move(move:'Move', population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
         raise NotImplementedError('Move subclass must implement do_move method')
 
@@ -249,7 +270,7 @@ class MoveSelector(Move):
             total_weight = sum([m[2] for m in self.moves])
             self._probabilities = np.array([m[2]/total_weight for m in self.moves], dtype=np.float32)
         chosen_id = generator.choice(len(self.moves), p=self._probabilities)
-        move_descriptor = self.moves[chosen_id][0]._do_move(population, individual_id, mate_id, generator)
+        move_descriptor = self.moves[chosen_id][0].do_move(population, individual_id, mate_id, generator)
         return [self.moves[chosen_id][1], move_descriptor]
 
 @dataclass
@@ -401,13 +422,13 @@ class Crossover(Move):
         center_x = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x
         center_y = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y
         
-        # Compute distances from all trees (of individual) to the random point
+        # Compute distances from all trees (of individual) to the random point (L-infinity for square selection)
         tree_positions = new_xyt[individual_id, :, :2].get()  # (N_trees, 2)
-        distances_individual = (tree_positions[:, 0] - center_x)**2 + (tree_positions[:, 1] - center_y)**2
+        distances_individual = np.maximum(np.abs(tree_positions[:, 0] - center_x), np.abs(tree_positions[:, 1] - center_y))
         
-        # Compute distances from all trees (of mate) to the random point
+        # Compute distances from all trees (of mate) to the random point (L-infinity for square selection)
         mate_positions = new_xyt[mate_id, :, :2].get()  # (N_trees, 2)
-        distances_mate = (mate_positions[:, 0] - center_x)**2 + (mate_positions[:, 1] - center_y)**2
+        distances_mate = np.maximum(np.abs(mate_positions[:, 0] - center_x), np.abs(mate_positions[:, 1] - center_y))
         
         # Find n trees closest to that point in individual (to be replaced)
         n_trees_to_replace = generator.integers(min(self.min_N_trees, N_trees), min(self.max_N_trees, N_trees) + 1)
@@ -416,10 +437,47 @@ class Crossover(Move):
         # Find n trees closest to that point in mate (to be copied from)
         mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
         
-        # Replace trees in individual with trees from mate
-        new_xyt[individual_id, individual_tree_ids, :] = new_xyt[mate_id, mate_tree_ids, :]
+        # Get mate trees to copy (make a copy to apply transformations)
+        mate_trees = new_xyt[mate_id, mate_tree_ids, :].copy()  # (n_trees_to_replace, 3) on GPU
         
-        return [(center_x, center_y), n_trees_to_replace]
+        # Random 0/90/180/270 rotation around the center point
+        rotation_choice = generator.integers(0, 4)  # 0, 1, 2, 3 -> 0, 90, 180, 270 degrees
+        rot_angle = rotation_choice * (np.pi / 2)
+        
+        # Random mirroring (across x-axis through center)
+        do_mirror = generator.integers(0, 2) == 1
+        
+        # Get positions relative to center
+        dx = mate_trees[:, 0] - center_x
+        dy = mate_trees[:, 1] - center_y
+        theta = mate_trees[:, 2]
+        
+        # Apply mirroring first (across x-axis through center)
+        # Position: y -> -y (relative to center)
+        # Theta: theta -> pi - theta (flip the tree orientation)
+        if do_mirror:
+            dy = -dy
+            theta = cp.pi - theta
+        
+        # Apply rotation
+        if rotation_choice != 0:
+            cos_a = np.cos(rot_angle)
+            sin_a = np.sin(rot_angle)
+            new_dx = dx * cos_a - dy * sin_a
+            new_dy = dx * sin_a + dy * cos_a
+            dx = new_dx
+            dy = new_dy
+            theta = theta + rot_angle
+        
+        # Convert back to absolute positions
+        mate_trees[:, 0] = center_x + dx
+        mate_trees[:, 1] = center_y + dy
+        mate_trees[:, 2] = theta
+        
+        # Replace trees in individual with transformed trees from mate
+        new_xyt[individual_id, individual_tree_ids, :] = mate_trees
+        
+        return [(center_x, center_y), n_trees_to_replace, rotation_choice, do_mirror]
 
 # ============================================================
 # Main GA algorithm

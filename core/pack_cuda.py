@@ -140,7 +140,8 @@ __device__ double overlap_ref_with_list_piece(
     const int n,
     const int pi,          // piece index to process (0-3)
     double3* d_ref,        // output: gradient w.r.t. ref pose (accumulated)
-    const int use_separation) // if non-zero, compute separation-based cost (sum of sep^2)
+    const int use_separation, // if non-zero, compute separation-based cost (sum of sep^2)
+    const int skip_index)  // index to skip (self-collision), use -1 to skip none
 {
     double sum = 0.0;
     
@@ -177,16 +178,16 @@ __device__ double overlap_ref_with_list_piece(
     
     // Loop over all trees in the list
     for (int i = 0; i < n; ++i) {
+        // Skip self-collision by index
+        if (i == skip_index) {
+            continue;
+        }
+
         // Read pose with strided access: [i, component]
         double3 other;
         other.x = xyt_Nx3[i * 3 + 0];
         other.y = xyt_Nx3[i * 3 + 1];
         other.z = xyt_Nx3[i * 3 + 2];
-
-        // Skip if poses are identical (self-collision)
-        if (other.x == ref.x && other.y == ref.y && other.z == ref.z) {
-            continue;
-        }
 
         // Early exit: check if tree centers are too far apart
         double dx = other.x - ref.x;
@@ -285,13 +286,14 @@ __device__ double overlap_ref_with_list_piece(
 
 // Compute sum of overlap areas between a reference tree `ref` and a list
 // of other trees provided as a flattened Nx3 array.
-// Always skips comparing ref with identical pose in the other list.
+// Always skips comparing ref with itself using skip_index.
 // Note: This function is currently unused but kept for potential future use.
 // It would need to be updated to handle gradients if used.
 __device__ double overlap_ref_with_list(
     const double3 ref,
     const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
-    const int n)
+    const int n,
+    const int skip_index)  // index to skip (self-collision), use -1 to skip none
 {
     double sum = 0.0;
     double3 d_ref_dummy;
@@ -302,7 +304,7 @@ __device__ double overlap_ref_with_list(
     // Sum across all 4 pieces
     for (int pi = 0; pi < MAX_PIECES; ++pi) {
         // Call with use_separation=0 (area mode)
-        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, &d_ref_dummy, 0);
+        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, &d_ref_dummy, 0, skip_index);
     }
     return sum;
 }
@@ -531,7 +533,7 @@ __device__ void overlap_list_total(
         // Each thread computes overlap (or separation) for one piece of the reference tree
         // The merged function computes both forward and backward passes
         double3* d_ref_output = (double3*)(&out_grads[tree_idx * 3]);
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation);
+        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx);
 
         // Atomic add for overlap sum
         atomicAdd(out_total, local_sum / 2.0);
