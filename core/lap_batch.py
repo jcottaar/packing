@@ -52,10 +52,10 @@ extern "C" __global__ void hungarian_kernel(
     
     // Kuhn-Munkres algorithm - process each row
     for (int i = 0; i < N; i++) {
-        // Arrays for path finding (on stack, assuming N <= 128)
-        int p[128];      // parent pointers for augmenting path
-        float minv[128]; // minimum slack to each column
-        bool used[128];  // columns used in current search
+        // Arrays for path finding (on stack, assuming N <= 200)
+        int p[200];      // parent pointers for augmenting path
+        float minv[200]; // minimum slack to each column
+        bool used[200];  // columns used in current search
         
         for (int j = 0; j < N; j++) {
             minv[j] = 1e30f;
@@ -163,7 +163,7 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray) -> tuple[cp.ndarray, cp.ndarr
         Shape (batch_size,). Total assignment cost for each problem.
     """
     batch_size, N, _ = cost_matrices_gpu.shape
-    assert N <= 128, f"N={N} exceeds maximum of 128"
+    assert N <= 200, f"N={N} exceeds maximum of 200"
     
     if cost_matrices_gpu.dtype != cp.float32:
         cost_matrices_gpu = cost_matrices_gpu.astype(cp.float32)

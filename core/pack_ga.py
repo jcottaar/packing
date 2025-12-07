@@ -162,6 +162,29 @@ class Population(kgs.BaseClass):
         self.configuration.h = self.configuration.h[inds]
         self.fitness = self.fitness[inds]
         self.lineages = [self.lineages[i] for i in inds]
+    
+    @classmethod
+    def create_empty(cls, N_individuals, N_trees):
+        xyt = cp.zeros((N_individuals, N_trees, 3), dtype=cp.float32)
+        h = cp.zeros((N_individuals, 3), dtype=cp.float32)
+        configuration = kgs.SolutionCollection(xyt=xyt, h=h)
+        population = cls(configuration=configuration)
+        population.fitness = np.zeros(N_individuals, dtype=np.float32)
+        population.lineages = [ None for _ in range(N_individuals) ]
+        return population
+
+    def create_clone(self, idx: int, other: 'Population', parent_id: int):
+        assert idx<self.configuration.N_solutions
+        self.configuration.xyt[idx] = other.configuration.xyt[parent_id]
+        self.configuration.h[idx] = other.configuration.h[parent_id]
+        self.fitness[idx] = other.fitness[parent_id]
+        self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
+
+    def merge(self, other:'Population'):
+        self.configuration.xyt = cp.concatenate([self.configuration.xyt, other.configuration.xyt], axis=0)
+        self.configuration.h = cp.concatenate([self.configuration.h, other.configuration.h], axis=0)
+        self.fitness = np.concatenate([self.fitness, other.fitness], axis=0)
+        self.lineages = self.lineages + other.lineages
 
 
 # ============================================================
@@ -211,9 +234,9 @@ class GA(kgs.BaseClass):
 
     # Hyperparameters
     population_size:int = field(init=True, default=1000)
-    selection_size:list = field(init=True, default_factory=lambda: [1,2,3,4,6,8,10,12,14,16,18,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,300,600,1000])    
+    selection_size:list = field(init=True, default_factory=lambda: [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500])
     n_generations:int = field(init=True, default=5000)    
-    p_move: float = field(init=True, default=0.5)
+    p_move: float = field(init=True, default=1.)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
@@ -279,9 +302,6 @@ class GA(kgs.BaseClass):
 
             # Selection and diversity maintenance
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
-                # plt.figure()
-                # plt.plot(np.sort(self.populations[i_N_trees].fitness))
-                # plt.pause(0.001)
                 best_id = np.argmin(self.populations[i_N_trees].fitness)                   
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
                 self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]                
@@ -295,8 +315,6 @@ class GA(kgs.BaseClass):
                 current_pop = self.populations[i_N_trees]
                 current_pop.select_ids(np.argsort(current_pop.fitness))  # Sort by fitness
                 current_xyt = current_pop.configuration.xyt  # (N_individuals, N_trees, 3)
-                current_h = current_pop.configuration.h  # (N_individuals, 3) - [size, x_offset, y_offset]
-                current_fitness = current_pop.fitness
 
                 max_sel = np.max(self.selection_size)
                 selected = np.zeros(self.population_size, dtype=bool)
@@ -310,57 +328,35 @@ class GA(kgs.BaseClass):
                 current_pop.select_ids(np.where(selected)[0])
                 self.populations[i_N_trees] = current_pop
                 self.populations[i_N_trees].check_constraints()
-                # plt.figure()
-                # plt.plot(np.sort(self.populations[i_N_trees].fitness))
-                # plt.pause(0.001)
                 print(self.populations[i_N_trees].lineages)
 
             
 
             # Offspring generation
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
-                current_pop = self.populations[i_N_trees]
-                old_pop = copy.deepcopy(current_pop)
-                parent_size = current_pop.configuration.N_solutions
-                new_xyt = np.empty((self.population_size, N_trees, 3), dtype=np.float32)
-                new_h = np.empty((self.population_size, 3), dtype=np.float32)    
-                new_lineages = [None]*self.population_size
-                new_xyt[:parent_size] = current_pop.configuration.xyt.get()
-                new_h[:parent_size] = current_pop.configuration.h.get()
-                new_lineages[:parent_size] = current_pop.lineages
-                for i_ind in np.arange(parent_size, self.population_size):
+                old_pop = self.populations[i_N_trees]
+                parent_size = old_pop.configuration.N_solutions
+                new_pop = Population.create_empty(self.population_size-parent_size, N_trees)
+
+                for i_ind in range(new_pop.configuration.N_solutions):
                     # Pick a random parent
                     parent_id = generator.integers(0, parent_size)
-                    new_xyt[i_ind] = new_xyt[parent_id]
-                    new_h[i_ind] = new_h[parent_id]
-                    new_lineages[i_ind] = new_lineages[parent_id]
+                    new_pop.create_clone(i_ind, old_pop, parent_id)                    
+                    new_h = new_pop.configuration.h
+                    new_xyt = new_pop.configuration.xyt
                     if generator.uniform() < self.p_move:
                         tree_to_mutate = generator.integers(0, N_trees)
-                        h_size = new_h[i_ind, 0]  # Square size
-                        h_offset_x = new_h[i_ind, 1]  # x offset
-                        h_offset_y = new_h[i_ind, 2]  # y offset
+                        h_size = new_h[i_ind, 0].get()  # Square size
+                        h_offset_x = new_h[i_ind, 1].get()  # x offset
+                        h_offset_y = new_h[i_ind, 2].get()  # y offset
                         new_xyt[i_ind, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
                         new_xyt[i_ind, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
-                        new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta
-                current_pop.configuration.xyt = cp.array(new_xyt)
-                current_pop.configuration.h = cp.array(new_h)
-                current_pop.lineages = new_lineages
-                self._rough_relax(current_pop)
-
-                # Annealing
-                #self._relax_and_score(current_pop);
-                #print(f'Before annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
-                self.annealer.seed = generator.integers(0, 1e6)
-                self.annealer.friction = generator.uniform(0.5, 2.0, size=self.population_size).astype(np.float32)
-                self.annealer.T_start = generator.uniform(-0.05,0.05, size=self.population_size).astype(np.float32)
-                self.annealer.T_start[self.annealer.T_start<0] = 0.
-                self.annealer.tau = generator.uniform(0.5,2.0, size=self.population_size).astype(np.float32)
-                current_pop.configuration = self.annealer.run_simulation(current_pop.configuration)
-                self._relax_and_score(current_pop)
-                #print(f'After annealing: min cost: {np.min(current_pop.fitness):.6f}, avg cost: {np.mean(current_pop.fitness):.6f}')
-                
-                current_pop.configuration.xyt[:parent_size] = old_pop.configuration.xyt
-                current_pop.configuration.h[:parent_size] = old_pop.configuration.h
-                current_pop.fitness[:parent_size] = old_pop.fitness
+                        new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta                
+                self._rough_relax(new_pop)
+                self._relax_and_score(new_pop)
+                old_pop.merge(new_pop)
+                current_pop = old_pop
+                 
                 current_pop.check_constraints()
+                self.populations[i_N_trees] = current_pop
         
