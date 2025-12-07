@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 
+
 print('stop final relax at some point')
 
 
@@ -149,6 +150,14 @@ class Population(kgs.BaseClass):
     fitness: np.ndarray = field(init=True, default=None)
     lineages: list = field(init=True, default=None)
 
+    # Lineages is a list of lists, each list gives the history for an individual. Each element is a move, itself a list:
+    # - First element describes the move (format up to the move itself, often including choices and perhaps some KPI)
+    # - Second element is a list of fitness values:
+    #  - Before the move
+    #  - After the move
+    #  - After rough relax
+    #  - After fine relax
+
     def _check_constraints(self):
         self.configuration.check_constraints()
         assert self.fitness.shape == (self.configuration.N_solutions,)
@@ -217,7 +226,7 @@ class InitializerRandomJiggled(Initializer):
         sol = kgs.SolutionCollection(xyt=xyt, h=h)        
         sol = self.jiggler.run_simulation(sol)
         population = Population(configuration=sol)
-        population.lineages = [ [i] for i in range(N_individuals) ]
+        population.lineages = [ [['init', [np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
         return population
 
 
@@ -231,6 +240,7 @@ class GA(kgs.BaseClass):
     # Configuration
     N_trees_to_do: np.ndarray = field(init=True, default=None)
     seed: int = field(init=True, default=42)
+    plot_fitness_predictors: bool = field(init=True, default=False)
 
     # Hyperparameters
     population_size:int = field(init=True, default=1000)
@@ -270,19 +280,33 @@ class GA(kgs.BaseClass):
         # relaxer.n_iterations *= 2
         # self.relaxers.append(relaxer)
 
-    def _rough_relax(self, population:Population):
+
+    def _relax_and_score(self, population:Population):        
         sol = population.configuration
+        costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
+        for i in range(len(costs)):
+            population.lineages[i][-1][1][1]= costs[i]
         for relaxer in self.rough_relaxers:
             sol = relaxer.run_simulation(sol)
-        population.configuration = sol
-
-    def _relax_and_score(self, population:Population):
-        sol = population.configuration
+        costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
+        for i in range(len(costs)):
+            population.lineages[i][-1][1][2]= costs[i]
         for relaxer in self.fine_relaxers:
             sol = relaxer.run_simulation(sol)
-        costs = self.fitness_cost.compute_cost_allocate(sol)[0]
+        costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
+        for i in range(len(costs)):
+            population.lineages[i][-1][1][3]= costs[i]
         population.configuration = sol
-        population.fitness = costs.get()
+        population.fitness = costs
+        if self.plot_fitness_predictors:
+            fig,ax = plt.subplots(1,3,figsize=(12,4))
+            y_vals = [x[-1][1][3] for x in population.lineages]
+            for ii in range(3):
+                x_vals = [x[-1][1][ii] for x in population.lineages]
+                plt.sca(ax[ii])
+                plt.scatter(x_vals, y_vals)
+                plt.grid(True)
+            plt.pause(0.001)
 
     def run(self):
         self.check_constraints()
@@ -293,7 +317,6 @@ class GA(kgs.BaseClass):
             self.initializer.seed = 200*self.seed + N_trees        
             population = self.initializer.initialize_population(self.population_size, N_trees)
             population.check_constraints()
-            self._rough_relax(population)
             self._relax_and_score(population)
             self.populations.append(population)    
 
@@ -352,7 +375,7 @@ class GA(kgs.BaseClass):
                         new_xyt[i_ind, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
                         new_xyt[i_ind, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
                         new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta                
-                self._rough_relax(new_pop)
+                    new_pop.lineages[i_ind].append(['dummy', [new_pop.fitness[i_ind],0.,0.,0.]])  # Placeholder for move description
                 self._relax_and_score(new_pop)
                 old_pop.merge(new_pop)
                 current_pop = old_pop
