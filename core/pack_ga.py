@@ -241,6 +241,7 @@ class GA(kgs.BaseClass):
     N_trees_to_do: np.ndarray = field(init=True, default=None)
     seed: int = field(init=True, default=42)
     plot_fitness_predictors: bool = field(init=True, default=False)
+    plot_diversity_matrix: bool = field(init=True, default=False)
 
     # Hyperparameters
     population_size:int = field(init=True, default=1000)
@@ -351,7 +352,16 @@ class GA(kgs.BaseClass):
                 current_pop.select_ids(np.where(selected)[0])
                 self.populations[i_N_trees] = current_pop
                 self.populations[i_N_trees].check_constraints()
-                print(self.populations[i_N_trees].lineages)
+                # Compute diversity matrix
+                diversity_matrix = np.zeros((self.populations[i_N_trees].configuration.N_solutions, self.populations[i_N_trees].configuration.N_solutions), dtype=np.float32)
+                for i in range(self.populations[i_N_trees].configuration.N_solutions):
+                    diversity_matrix[:,i] = compute_genetic_diversity(cp.array(self.populations[i_N_trees].configuration.xyt), cp.array(self.populations[i_N_trees].configuration.xyt[i])).get()
+                if self.plot_diversity_matrix:
+                    plt.figure(figsize=(6,6))
+                    plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix))
+                    plt.colorbar(label='Diversity distance')
+                    plt.title(f'Diversity matrix, Generation {i_gen}, Trees {N_trees}')
+                    plt.pause(0.001)
 
             
 
