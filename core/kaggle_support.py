@@ -251,14 +251,20 @@ def create_center_tree():
                         Polygon([(trunk_w / 2 * sf, base_y * sf), (trunk_w / 2 * sf, trunk_bottom_y * sf), (-trunk_w / 2 * sf, trunk_bottom_y * sf), (-trunk_w / 2 * sf, base_y * sf)])  ]
 
 
-    # Get centroid
-    centroid = Point((0,0))
+    # Compute the polygon centroid and recenter geometry so centroid is at origin.
+    centroid = initial_polygon.centroid
+    cx, cy = centroid.x, centroid.y
+    if (cx, cy) != (0.0, 0.0):
+        initial_polygon = affinity.translate(initial_polygon, xoff=-cx, yoff=-cy)
+        convex_breakdown = [affinity.translate(p, xoff=-cx, yoff=-cy) for p in convex_breakdown]
 
-    # Find maximum distance from centroid to any vertex
+    # Find maximum distance from centroid (now at origin) to any vertex
     max_radius = 0.0
+    origin = Point(0, 0)
     for x, y in initial_polygon.exterior.coords[:-1]:  # skip closing vertex
-        dist = Point(x, y).distance(centroid)
-        max_radius = max(max_radius, dist)
+        dist = Point(x, y).distance(origin)
+        if dist > max_radius:
+            max_radius = dist
     return initial_polygon, convex_breakdown, max_radius
 center_tree, convex_breakdown, tree_max_radius = create_center_tree()
 center_tree_prepped = prep(center_tree)
@@ -409,3 +415,27 @@ class SolutionCollection(BaseClass):
         
         # Update h: [size, x_offset, y_offset]
         self.h = cp.stack([size, x_center, y_center], axis=1)  # (n_solutions, 3)
+# --- Recenter the tree geometry around its true centroid ---
+# The original `create_center_tree` used (0,0) as a fixed centroid.
+# Ensure the center of rotation is the actual centroid by translating
+# `center_tree` and every polygon in `convex_breakdown` so the centroid
+# lies at the origin, then recompute derived globals used elsewhere.
+_orig_centroid = center_tree.centroid
+_cx, _cy = _orig_centroid.x, _orig_centroid.y
+if (_cx, _cy) != (0.0, 0.0):
+    center_tree = affinity.translate(center_tree, xoff=-_cx, yoff=-_cy)
+    convex_breakdown = [affinity.translate(p, xoff=-_cx, yoff=-_cy) for p in convex_breakdown]
+
+# Recompute maximum radius (distance from centroid at origin to any vertex)
+tree_max_radius = 0.0
+_origin = Point(0, 0)
+for x, y in center_tree.exterior.coords[:-1]:
+    d = Point(x, y).distance(_origin)
+    if d > tree_max_radius:
+        tree_max_radius = d
+
+# Update prepared geometry, area, and vertex arrays used in vectorized ops
+center_tree_prepped = prep(center_tree)
+tree_area = center_tree.area
+tree_vertices = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float64)
+tree_vertices32 = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float32)

@@ -226,9 +226,36 @@ class InitializerRandomJiggled(Initializer):
         sol = kgs.SolutionCollection(xyt=xyt, h=h)        
         sol = self.jiggler.run_simulation(sol)
         population = Population(configuration=sol)
-        population.lineages = [ [['init', [np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
+        population.lineages = [ [['InitializerRandomJiggled', [np.inf, np.inf, np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
         return population
+    
 
+# ============================================================
+# Moves
+# ============================================================
+@dataclass
+class Move(kgs.BaseClass):
+    def do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+        return self._do_move(population, individual_id, mate_id, generator)
+    def _do_move(move:'Move', population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+        raise NotImplementedError('Move subclass must implement do_move method')
+
+@dataclass
+class MoveRandomTree(Move):
+    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
+        new_h = population.configuration.h
+        new_xyt = population.configuration.xyt
+        move_descriptor = []
+        tree_to_mutate = generator.integers(0, new_xyt.shape[1])
+        h_size = new_h[individual_id, 0].get()  # Square size
+        h_offset_x = new_h[individual_id, 1].get()  # x offset
+        h_offset_y = new_h[individual_id, 2].get()  # y offset
+        move_descriptor.append(new_xyt[individual_id, tree_to_mutate].get())
+        new_xyt[individual_id, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
+        new_xyt[individual_id, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
+        new_xyt[individual_id, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta  
+        move_descriptor.append(new_xyt[individual_id, tree_to_mutate].get())       
+        
 
 
 # ============================================================
@@ -247,13 +274,12 @@ class GA(kgs.BaseClass):
     population_size:int = field(init=True, default=1000)
     selection_size:list = field(init=True, default_factory=lambda: [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500])
     n_generations:int = field(init=True, default=5000)    
-    p_move: float = field(init=True, default=1.)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
 
-    annealer: pack_dynamics.DynamicsAnneal = field(init=True, default_factory=pack_dynamics.DynamicsAnneal)
+    move: Move = field(init=True, default=None)
 
     # Outputs
     populations: list = field(init=True, default_factory=list)
@@ -276,6 +302,8 @@ class GA(kgs.BaseClass):
         relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
         relaxer.n_iterations *= 2
         self.fine_relaxers.append(relaxer)
+
+        self.move = MoveRandomTree()
         # relaxer = pack_dynamics.Optimizer()
         # relaxer.cost = pack_cost.CollisionCostSeparation(scaling=1.)
         # relaxer.n_iterations *= 2
@@ -286,25 +314,25 @@ class GA(kgs.BaseClass):
         sol = population.configuration
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
-            population.lineages[i][-1][1][1]= costs[i]
+            population.lineages[i][-1][1][3]= costs[i]
         for relaxer in self.rough_relaxers:
             sol = relaxer.run_simulation(sol)
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
-            population.lineages[i][-1][1][2]= costs[i]
+            population.lineages[i][-1][1][4]= costs[i]
         for relaxer in self.fine_relaxers:
             sol = relaxer.run_simulation(sol)
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
-            population.lineages[i][-1][1][3]= costs[i]
+            population.lineages[i][-1][1][5]= costs[i]
         population.configuration = sol
         population.fitness = costs
         if self.plot_fitness_predictors:
             fig,ax = plt.subplots(1,3,figsize=(12,4))
-            y_vals = [x[-1][1][3] for x in population.lineages]
-            for ii in range(3):
+            y_vals = [x[-1][1][5] for x in population.lineages]
+            for i_ax,ii in enumerate([0,3,4]):
                 x_vals = [x[-1][1][ii] for x in population.lineages]
-                plt.sca(ax[ii])
+                plt.sca(ax[i_ax])
                 plt.scatter(x_vals, y_vals)
                 plt.grid(True)
             plt.pause(0.001)
@@ -374,18 +402,31 @@ class GA(kgs.BaseClass):
                 for i_ind in range(new_pop.configuration.N_solutions):
                     # Pick a random parent
                     parent_id = generator.integers(0, parent_size)
-                    new_pop.create_clone(i_ind, old_pop, parent_id)                    
-                    new_h = new_pop.configuration.h
-                    new_xyt = new_pop.configuration.xyt
-                    if generator.uniform() < self.p_move:
-                        tree_to_mutate = generator.integers(0, N_trees)
-                        h_size = new_h[i_ind, 0].get()  # Square size
-                        h_offset_x = new_h[i_ind, 1].get()  # x offset
-                        h_offset_y = new_h[i_ind, 2].get()  # y offset
-                        new_xyt[i_ind, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
-                        new_xyt[i_ind, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
-                        new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta                
-                    new_pop.lineages[i_ind].append(['dummy', [new_pop.fitness[i_ind],0.,0.,0.]])  # Placeholder for move description
+                    # Pick a random mate, but preferring champions
+                    # pick a mate, where the worst (last) individual gets weight 1, the next best weight 2, etc. (DISABLED FOR NOW)
+                    weights = 0*np.arange(parent_size, 0, -1, dtype=float)+1  # best has largest weight
+                    weights[parent_id] = 0.0
+                    probs = weights / weights.sum()
+                    mate_id = generator.choice(parent_size, p=probs)
+
+                    new_pop.create_clone(i_ind, old_pop, parent_id) 
+                    move_descriptor = self.move.do_move(new_pop, i_ind, mate_id, generator)                  
+                    new_pop.lineages[i_ind].append([move_descriptor, [old_pop.fitness[parent_id],old_pop.fitness[mate_id],diversity_matrix[parent_id, mate_id],0.,0.,0.]])  # Placeholder for move description
+
+
+
+                    # new_pop.create_clone(i_ind, old_pop, parent_id)                    
+                    # new_h = new_pop.configuration.h
+                    # new_xyt = new_pop.configuration.xyt
+                    # if generator.uniform() < self.p_move:
+                    #     tree_to_mutate = generator.integers(0, N_trees)
+                    #     h_size = new_h[i_ind, 0].get()  # Square size
+                    #     h_offset_x = new_h[i_ind, 1].get()  # x offset
+                    #     h_offset_y = new_h[i_ind, 2].get()  # y offset
+                    #     new_xyt[i_ind, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
+                    #     new_xyt[i_ind, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
+                    #     new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta                
+                    # new_pop.lineages[i_ind].append(['dummy', [new_pop.fitness[i_ind],0.,0.,0.]])  # Placeholder for move description
                 self._relax_and_score(new_pop)
                 old_pop.merge(new_pop)
                 current_pop = old_pop
