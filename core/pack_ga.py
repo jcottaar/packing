@@ -310,7 +310,7 @@ class JiggleCluster(Move):
         distances = (tree_positions[:, 0] - center_x)**2 + (tree_positions[:, 1] - center_y)**2
         
         # Find min to max trees closest to that point
-        n_trees_to_jiggle = generator.integers(self.min_N_trees, min(self.max_N_trees, N_trees) + 1)
+        n_trees_to_jiggle = generator.integers(min(self.max_N_trees, N_trees), min(self.max_N_trees, N_trees) + 1)
         closest_tree_ids = np.argsort(distances)[:n_trees_to_jiggle]
         
         move_descriptor = [(center_x, center_y), n_trees_to_jiggle]
@@ -384,6 +384,42 @@ class Twist(Move):
         
         return [(center_x, center_y), max_twist_angle, radius]
 
+@ dataclass
+class Crossover(Move):
+    # Replaces a number of trees closest to a given point with trees from another individual
+    min_N_trees: int = field(init=True, default=4)
+    max_N_trees: int = field(init=True, default=20)
+    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+        new_h = population.configuration.h
+        new_xyt = population.configuration.xyt
+        N_trees = new_xyt.shape[1]
+        
+        # Pick a random center point inside the square defined by h
+        h_size = new_h[individual_id, 0].get()  # Square size
+        h_offset_x = new_h[individual_id, 1].get()  # x offset
+        h_offset_y = new_h[individual_id, 2].get()  # y offset
+        center_x = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x
+        center_y = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y
+        
+        # Compute distances from all trees (of individual) to the random point
+        tree_positions = new_xyt[individual_id, :, :2].get()  # (N_trees, 2)
+        distances_individual = (tree_positions[:, 0] - center_x)**2 + (tree_positions[:, 1] - center_y)**2
+        
+        # Compute distances from all trees (of mate) to the random point
+        mate_positions = new_xyt[mate_id, :, :2].get()  # (N_trees, 2)
+        distances_mate = (mate_positions[:, 0] - center_x)**2 + (mate_positions[:, 1] - center_y)**2
+        
+        # Find n trees closest to that point in individual (to be replaced)
+        n_trees_to_replace = generator.integers(min(self.min_N_trees, N_trees), min(self.max_N_trees, N_trees) + 1)
+        individual_tree_ids = np.argsort(distances_individual)[:n_trees_to_replace]
+        
+        # Find n trees closest to that point in mate (to be copied from)
+        mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
+        
+        # Replace trees in individual with trees from mate
+        new_xyt[individual_id, individual_tree_ids, :] = new_xyt[mate_id, mate_tree_ids, :]
+        
+        return [(center_x, center_y), n_trees_to_replace]
 
 # ============================================================
 # Main GA algorithm
@@ -439,6 +475,7 @@ class GA(kgs.BaseClass):
         self.move.moves.append( [JiggleCluster(max_xy_move=0.1, max_theta_move=np.pi), 'JiggleClusterBig', 1.0] )
         self.move.moves.append( [Translate(), 'Translate', 1.0] )
         self.move.moves.append( [Twist(), 'Twist', 1.0] )
+        self.move.moves.append( [Crossover(), 'Crossover', 4.0] )
         # relaxer = pack_dynamics.Optimizer()
         # relaxer.cost = pack_cost.CollisionCostSeparation(scaling=1.)
         # relaxer.n_iterations *= 2
