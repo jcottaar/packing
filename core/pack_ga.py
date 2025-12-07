@@ -234,8 +234,8 @@ class InitializerRandomJiggled(Initializer):
 # ============================================================
 @dataclass
 class Move(kgs.BaseClass):
-    def do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
-        move_descriptor =  self._do_move(population, individual_id, mate_id, generator)
+    def do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+        move_descriptor =  self._do_move(population, old_pop, individual_id, mate_id, generator)
         # Check if any trees are within 1e-6 of each other -> error
         # moved = population.configuration.xyt[individual_id]  # (N_trees, 3) (cupy)
         # moved_arr = moved.get() if isinstance(moved, cp.ndarray) else np.array(moved)
@@ -256,26 +256,24 @@ class Move(kgs.BaseClass):
         #     plt.colorbar()
         #     plt.pause(0.001)
         #     raise AssertionError(f"Two trees in individual {individual_id} are closer than 1e-6 (min_dist={min_dist})")
-        return move_descriptor
-    def _do_move(move:'Move', population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
-        raise NotImplementedError('Move subclass must implement do_move method')
+        return move_descriptor    
 
 @dataclass  
 class MoveSelector(Move):
     moves: list = field(init=True, default_factory=list) # each move is [Move, name, weight]
     _probabilities: np.ndarray = field(init=False, default=None)
 
-    def _do_move(self, population, individual_id, mate_id, generator):
+    def _do_move(self, population, old_pop, individual_id, mate_id, generator):
         if self._probabilities is None:
             total_weight = sum([m[2] for m in self.moves])
             self._probabilities = np.array([m[2]/total_weight for m in self.moves], dtype=np.float32)
         chosen_id = generator.choice(len(self.moves), p=self._probabilities)
-        move_descriptor = self.moves[chosen_id][0].do_move(population, individual_id, mate_id, generator)
+        move_descriptor = self.moves[chosen_id][0].do_move(population, old_pop, individual_id, mate_id, generator)
         return [self.moves[chosen_id][1], move_descriptor]
 
 @dataclass
 class MoveRandomTree(Move):
-    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
+    def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         move_descriptor = []
@@ -294,7 +292,7 @@ class MoveRandomTree(Move):
 class JiggleRandomTree(Move):
     max_xy_move: float = field(init=True, default=0.1)
     max_theta_move: float = field(init=True, default=np.pi)
-    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
+    def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
         new_xyt = population.configuration.xyt
         move_descriptor = []
         tree_to_mutate = generator.integers(0, new_xyt.shape[1])        
@@ -314,7 +312,7 @@ class JiggleCluster(Move):
     max_theta_move: float = field(init=True, default=np.pi)
     min_N_trees: int = field(init=True, default=2)
     max_N_trees: int = field(init=True, default=5)
-    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
+    def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
@@ -350,7 +348,7 @@ class JiggleCluster(Move):
 
 @dataclass
 class Translate(Move):
-    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+    def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         h_size = new_h[individual_id, 0].get().item()  # Square size
@@ -366,7 +364,7 @@ class Twist(Move):
     # Twist trees around a center. Angle of twist decreases linearly with distance from center
     min_radius: float = field(init=True, default=0.)
     max_radius: float = field(init=True, default=2.)
-    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+    def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         
@@ -410,7 +408,7 @@ class Crossover(Move):
     # Replaces a number of trees closest to a given point with trees from another individual
     min_N_trees: int = field(init=True, default=4)
     max_N_trees: int = field(init=True, default=20)
-    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+    def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
@@ -419,16 +417,20 @@ class Crossover(Move):
         h_size = new_h[individual_id, 0].get()  # Square size
         h_offset_x = new_h[individual_id, 1].get()  # x offset
         h_offset_y = new_h[individual_id, 2].get()  # y offset
-        center_x = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x
-        center_y = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y
+        offset_x = generator.uniform(-h_size / 2, h_size / 2)
+        offset_y = generator.uniform(-h_size / 2, h_size / 2)
+        mate_center_x = offset_x + old_pop.configuration.h[mate_id, 1].get()  # x offset
+        mate_center_y = offset_y + old_pop.configuration.h[mate_id, 2].get()  # y offset
+        center_x = offset_x + h_offset_x
+        center_y = offset_y + h_offset_y
         
         # Compute distances from all trees (of individual) to the random point (L-infinity for square selection)
         tree_positions = new_xyt[individual_id, :, :2].get()  # (N_trees, 2)
         distances_individual = np.maximum(np.abs(tree_positions[:, 0] - center_x), np.abs(tree_positions[:, 1] - center_y))
         
         # Compute distances from all trees (of mate) to the random point (L-infinity for square selection)
-        mate_positions = new_xyt[mate_id, :, :2].get()  # (N_trees, 2)
-        distances_mate = np.maximum(np.abs(mate_positions[:, 0] - center_x), np.abs(mate_positions[:, 1] - center_y))
+        mate_positions = old_pop.configuration.xyt[mate_id, :, :2].get()  # (N_trees, 2)
+        distances_mate = np.maximum(np.abs(mate_positions[:, 0] - mate_center_x), np.abs(mate_positions[:, 1] - mate_center_y))
         
         # Find n trees closest to that point in individual (to be replaced)
         n_trees_to_replace = generator.integers(min(self.min_N_trees, N_trees), min(self.max_N_trees, N_trees) + 1)
@@ -438,7 +440,7 @@ class Crossover(Move):
         mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
         
         # Get mate trees to copy (make a copy to apply transformations)
-        mate_trees = new_xyt[mate_id, mate_tree_ids, :].copy()  # (n_trees_to_replace, 3) on GPU
+        mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()  # (n_trees_to_replace, 3) on GPU
         
         # Random 0/90/180/270 rotation around the center point
         rotation_choice = generator.integers(0, 4)  # 0, 1, 2, 3 -> 0, 90, 180, 270 degrees
@@ -473,9 +475,106 @@ class Crossover(Move):
         mate_trees[:, 0] = center_x + dx
         mate_trees[:, 1] = center_y + dy
         mate_trees[:, 2] = theta
+
+        # # Add a check for mate_trees overlapping with new trees. If this happens ,plot the origina llayout (see example elsewhere), the mate layout, and the resulting layout after crossover, then raise an error.
+        # # Check for duplicate trees after crossover (trees that are too close to each other)
+        # all_trees = new_xyt[individual_id].get()  # (N_trees, 3)
+        # n_all = all_trees.shape[0]
+        
+        # # Create a mask for trees that will be replaced vs those that remain
+        # remaining_mask = np.ones(n_all, dtype=bool)
+        # remaining_mask[individual_tree_ids] = False
+        
+        # remaining_trees = all_trees[remaining_mask]  # Trees that stay
+        # incoming_trees = mate_trees.get()  # Trees being added
+        
+        # # Check distances between incoming trees and remaining trees
+        # if len(remaining_trees) > 0 and len(incoming_trees) > 0:
+        #     dx = incoming_trees[:, 0][:, None] - remaining_trees[:, 0][None, :]
+        #     dy = incoming_trees[:, 1][:, None] - remaining_trees[:, 1][None, :]
+        #     dtheta = incoming_trees[:, 2][:, None] - remaining_trees[:, 2][None, :]
+        #     dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
+        #     pairwise_dist = np.sqrt(dx**2 + dy**2 + dtheta**2)
+        #     min_dist = pairwise_dist.min()
+            
+        #     print(min_dist)
+        #     if min_dist < 1e-6:
+        #         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                
+        #         # Original individual layout
+        #         tree_list_orig = kgs.TreeList()
+        #         tree_list_orig.xyt = population.configuration.xyt[individual_id].get()
+        #         plt.sca(axes[0])
+        #         pack_vis.visualize_tree_list(tree_list_orig)
+        #         plt.title(f'Original individual {individual_id}')
+                
+        #         # Mate layout
+        #         tree_list_mate = kgs.TreeList()
+        #         tree_list_mate.xyt = old_pop.configuration.xyt[mate_id].get()
+        #         plt.sca(axes[1])
+        #         pack_vis.visualize_tree_list(tree_list_mate)
+        #         plt.title(f'Mate {mate_id}')
+                
+        #         # Show the problematic crossover result
+        #         plt.sca(axes[2])
+        #         result_trees = all_trees.copy()
+        #         result_trees[individual_tree_ids] = incoming_trees
+        #         tree_list_result = kgs.TreeList()
+        #         tree_list_result.xyt = result_trees
+        #         pack_vis.visualize_tree_list(tree_list_result)
+        #         plt.title(f'Crossover result (min_dist={min_dist:.2e})')
+                
+        #         plt.tight_layout()
+        #         plt.pause(0.001)
+                
+        #         raise AssertionError(f"Crossover created overlapping trees: min_dist={min_dist:.2e} < 1e-6")
         
         # Replace trees in individual with transformed trees from mate
         new_xyt[individual_id, individual_tree_ids, :] = mate_trees
+
+        # # Check for overlapping trees in the final result
+        # final_trees = new_xyt[individual_id].get()  # (N_trees, 3)
+        # x = final_trees[:, 0][:, None]
+        # y = final_trees[:, 1][:, None]
+        # theta = final_trees[:, 2][:, None]
+        # dx = x - x.T
+        # dy = y - y.T
+        # dtheta = theta - theta.T
+        # dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
+        # pairwise_dist = np.sqrt(dx**2 + dy**2 + dtheta**2)
+        # np.fill_diagonal(pairwise_dist, np.inf)
+        # min_dist = pairwise_dist.min()
+        # print('x', min_dist)
+        
+        # if min_dist < 1e-6:
+        #     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+        #     # Original individual layout (before crossover - approximate by showing current state)
+        #     tree_list_orig = kgs.TreeList()
+        #     tree_list_orig.xyt = population.configuration.xyt[individual_id].get()
+        #     plt.sca(axes[0])
+        #     pack_vis.visualize_tree_list(tree_list_orig)
+        #     plt.title(f'Individual {individual_id} after crossover')
+            
+        #     # Mate layout
+        #     tree_list_mate = kgs.TreeList()
+        #     tree_list_mate.xyt = old_pop.configuration.xyt[mate_id].get()
+        #     plt.sca(axes[1])
+        #     pack_vis.visualize_tree_list(tree_list_mate)
+        #     plt.title(f'Mate {mate_id}')
+            
+        #     # Show pairwise distance matrix
+        #     plt.sca(axes[2])
+        #     pairwise_dist_plot = pairwise_dist.copy()
+        #     pairwise_dist_plot[pairwise_dist_plot == np.inf] = np.nan
+        #     plt.imshow(np.log10(pairwise_dist_plot + 1e-10), cmap='viridis')
+        #     plt.colorbar(label='log10(distance)')
+        #     plt.title(f'Pairwise distances (min={min_dist:.2e})')
+            
+        #     plt.tight_layout()
+        #     plt.pause(0.001)
+            
+        #     raise AssertionError(f"Crossover resulted in overlapping trees: min_dist={min_dist:.2e} < 1e-6")
         
         return [(center_x, center_y), n_trees_to_replace, rotation_choice, do_mirror]
 
@@ -542,11 +641,12 @@ class GA(kgs.BaseClass):
     def _score(self, sol:kgs.SolutionCollection):
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
-            if np.isnan(costs[i]) or costs[i]>10:
+            if np.isnan(costs[i]) or costs[i]>1000:
                 tree_list = kgs.TreeList()
                 tree_list.xyt = sol.xyt[i].get()
                 pack_vis.visualize_tree_list(tree_list)
                 plt.title(f'Invalid solution with cost {costs[i]}')
+                raise AssertionError(f'Invalid solution with cost {costs[i]}')
         return costs
 
 
@@ -650,7 +750,7 @@ class GA(kgs.BaseClass):
                     mate_id = generator.choice(parent_size, p=probs)
 
                     new_pop.create_clone(i_ind, old_pop, parent_id) 
-                    move_descriptor = self.move.do_move(new_pop, i_ind, mate_id, generator)                  
+                    move_descriptor = self.move.do_move(new_pop, old_pop, i_ind, mate_id, generator)                  
                     new_pop.lineages[i_ind].append([move_descriptor, [old_pop.fitness[parent_id],old_pop.fitness[mate_id],diversity_matrix[parent_id, mate_id],0.,0.,0.]])  # Placeholder for move description
 
 
