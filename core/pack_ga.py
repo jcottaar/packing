@@ -209,8 +209,7 @@ class Initializer(kgs.BaseClass):
         assert population.configuration.N_solutions == N_individuals
         assert population.configuration.N_trees == N_trees
         population.check_constraints()
-        return population
-        pass
+        return population        
 
 @dataclass
 class InitializerRandomJiggled(Initializer):
@@ -240,6 +239,19 @@ class Move(kgs.BaseClass):
     def _do_move(move:'Move', population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
         raise NotImplementedError('Move subclass must implement do_move method')
 
+@dataclass  
+class MoveSelector(Move):
+    moves: list = field(init=True, default_factory=list) # each move is [Move, name, weight]
+    _probabilities: np.ndarray = field(init=False, default=None)
+
+    def _do_move(self, population, individual_id, mate_id, generator):
+        if self._probabilities is None:
+            total_weight = sum([m[2] for m in self.moves])
+            self._probabilities = np.array([m[2]/total_weight for m in self.moves], dtype=np.float32)
+        chosen_id = generator.choice(len(self.moves), p=self._probabilities)
+        move_descriptor = self.moves[chosen_id][0]._do_move(population, individual_id, mate_id, generator)
+        return [self.moves[chosen_id][1], move_descriptor]
+
 @dataclass
 class MoveRandomTree(Move):
     def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
@@ -254,8 +266,123 @@ class MoveRandomTree(Move):
         new_xyt[individual_id, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
         new_xyt[individual_id, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
         new_xyt[individual_id, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta  
-        move_descriptor.append(new_xyt[individual_id, tree_to_mutate].get())       
+        move_descriptor.append(new_xyt[individual_id, tree_to_mutate].get()) 
+        return move_descriptor  
+
+@dataclass
+class JiggleRandomTree(Move):
+    max_xy_move: float = field(init=True, default=0.1)
+    max_theta_move: float = field(init=True, default=np.pi)
+    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
+        new_xyt = population.configuration.xyt
+        move_descriptor = []
+        tree_to_mutate = generator.integers(0, new_xyt.shape[1])        
+        move_descriptor.append(new_xyt[individual_id, tree_to_mutate].get())
+        offset = [generator.uniform(-self.max_xy_move, self.max_xy_move),
+                  generator.uniform(-self.max_xy_move, self.max_xy_move),
+                    generator.uniform(-self.max_theta_move, self.max_theta_move)]
+        new_xyt[individual_id, tree_to_mutate, 0] += offset[0]  # x
+        new_xyt[individual_id, tree_to_mutate, 1] += offset[1]  # y
+        new_xyt[individual_id, tree_to_mutate, 2] += offset[2]  # theta
+        move_descriptor.append(offset)
+        return move_descriptor   
+
+@dataclass
+class JiggleCluster(Move):
+    max_xy_move: float = field(init=True, default=0.1)
+    max_theta_move: float = field(init=True, default=np.pi)
+    min_N_trees: int = field(init=True, default=2)
+    max_N_trees: int = field(init=True, default=5)
+    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
+        new_h = population.configuration.h
+        new_xyt = population.configuration.xyt
+        N_trees = new_xyt.shape[1]
         
+        # Pick a random point inside the square defined by h
+        h_size = new_h[individual_id, 0].get()  # Square size
+        h_offset_x = new_h[individual_id, 1].get()  # x offset
+        h_offset_y = new_h[individual_id, 2].get()  # y offset
+        center_x = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x
+        center_y = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y
+        
+        # Compute distances from all trees to the random point
+        tree_positions = new_xyt[individual_id, :, :2].get()  # (N_trees, 2)
+        distances = (tree_positions[:, 0] - center_x)**2 + (tree_positions[:, 1] - center_y)**2
+        
+        # Find min to max trees closest to that point
+        n_trees_to_jiggle = generator.integers(self.min_N_trees, min(self.max_N_trees, N_trees) + 1)
+        closest_tree_ids = np.argsort(distances)[:n_trees_to_jiggle]
+        
+        move_descriptor = [(center_x, center_y), n_trees_to_jiggle]
+        
+        # Jiggle each selected tree independently
+        for tree_id in closest_tree_ids:
+            offset = [generator.uniform(-self.max_xy_move, self.max_xy_move),
+                      generator.uniform(-self.max_xy_move, self.max_xy_move),
+                      generator.uniform(-self.max_theta_move, self.max_theta_move)]
+            new_xyt[individual_id, tree_id, 0] += offset[0]  # x
+            new_xyt[individual_id, tree_id, 1] += offset[1]  # y
+            new_xyt[individual_id, tree_id, 2] += offset[2]  # theta
+            move_descriptor.append(offset)
+        
+        return move_descriptor
+
+@dataclass
+class Translate(Move):
+    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+        new_h = population.configuration.h
+        new_xyt = population.configuration.xyt
+        h_size = new_h[individual_id, 0].get().item()  # Square size
+        offset_x = generator.uniform(-h_size / 2, h_size / 2)
+        offset_y = generator.uniform(-h_size / 2, h_size / 2)
+        new_xyt[individual_id, :, 0] = cp.mod(new_xyt[individual_id, :, 0]+offset_x, h_size) - h_size/2
+        new_xyt[individual_id, :, 1] = cp.mod(new_xyt[individual_id, :, 1]+offset_y, h_size) - h_size/2
+        #new_xyt[individual_id, :, 0]        
+        return [(offset_x, offset_y)]
+    
+@dataclass
+class Twist(Move):
+    # Twist trees around a center. Angle of twist decreases linearly with distance from center
+    min_radius: float = field(init=True, default=0.)
+    max_radius: float = field(init=True, default=2.)
+    def _do_move(self, population:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+        new_h = population.configuration.h
+        new_xyt = population.configuration.xyt
+        
+        # Pick a random center point inside the square defined by h
+        h_size = new_h[individual_id, 0].get()  # Square size
+        h_offset_x = new_h[individual_id, 1].get()  # x offset
+        h_offset_y = new_h[individual_id, 2].get()  # y offset
+        center_x = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x
+        center_y = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y
+        
+        # Random twist angle at center and radius
+        max_twist_angle = generator.uniform(-np.pi, np.pi)
+        radius = generator.uniform(self.min_radius, self.max_radius)
+        
+        # Get tree positions
+        tree_x = new_xyt[individual_id, :, 0]  # (N_trees,) on GPU
+        tree_y = new_xyt[individual_id, :, 1]  # (N_trees,) on GPU
+        
+        # Compute distances from center
+        dx = tree_x - center_x
+        dy = tree_y - center_y
+        distances = cp.sqrt(dx**2 + dy**2)
+        
+        # Twist angle decreases linearly with distance, zero at radius
+        twist_angles = max_twist_angle * cp.maximum(0, 1 - distances / radius)
+        
+        # Apply rotation around center point
+        cos_angles = cp.cos(twist_angles)
+        sin_angles = cp.sin(twist_angles)
+        new_x = center_x + dx * cos_angles - dy * sin_angles
+        new_y = center_y + dx * sin_angles + dy * cos_angles
+        
+        new_xyt[individual_id, :, 0] = new_x
+        new_xyt[individual_id, :, 1] = new_y
+        new_xyt[individual_id, :, 2] += twist_angles  # Also rotate the trees themselves
+        
+        return [(center_x, center_y), max_twist_angle, radius]
 
 
 # ============================================================
@@ -303,7 +430,15 @@ class GA(kgs.BaseClass):
         relaxer.n_iterations *= 2
         self.fine_relaxers.append(relaxer)
 
-        self.move = MoveRandomTree()
+        self.move = MoveSelector()
+        self.move.moves = []
+        self.move.moves.append( [MoveRandomTree(), 'MoveRandomTree', 1.0] )
+        self.move.moves.append( [JiggleRandomTree(max_xy_move=0.05, max_theta_move=np.pi/6), 'JiggleTreeSmall', 1.0] ) 
+        self.move.moves.append( [JiggleRandomTree(max_xy_move=0.1, max_theta_move=np.pi), 'JiggleTreeBig', 1.0] ) 
+        self.move.moves.append( [JiggleCluster(max_xy_move=0.05, max_theta_move=np.pi/6), 'JiggleClusterSmall', 1.0] )
+        self.move.moves.append( [JiggleCluster(max_xy_move=0.1, max_theta_move=np.pi), 'JiggleClusterBig', 1.0] )
+        self.move.moves.append( [Translate(), 'Translate', 1.0] )
+        self.move.moves.append( [Twist(), 'Twist', 1.0] )
         # relaxer = pack_dynamics.Optimizer()
         # relaxer.cost = pack_cost.CollisionCostSeparation(scaling=1.)
         # relaxer.n_iterations *= 2
