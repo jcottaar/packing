@@ -539,20 +539,30 @@ class GA(kgs.BaseClass):
         # relaxer.n_iterations *= 2
         # self.relaxers.append(relaxer)
 
+    def _score(self, sol:kgs.SolutionCollection):
+        costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
+        for i in range(len(costs)):
+            if np.isnan(costs[i]) or costs[i]>10:
+                tree_list = kgs.TreeList()
+                tree_list.xyt = sol.xyt[i].get()
+                pack_vis.visualize_tree_list(tree_list)
+                plt.title(f'Invalid solution with cost {costs[i]}')
+        return costs
+
 
     def _relax_and_score(self, population:Population):        
         sol = population.configuration
-        costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
+        costs = self._score(sol)
         for i in range(len(costs)):
             population.lineages[i][-1][1][3]= costs[i]
         for relaxer in self.rough_relaxers:
             sol = relaxer.run_simulation(sol)
-        costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
+        costs = self._score(sol)
         for i in range(len(costs)):
             population.lineages[i][-1][1][4]= costs[i]
         for relaxer in self.fine_relaxers:
             sol = relaxer.run_simulation(sol)
-        costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
+        costs = self._score(sol)
         for i in range(len(costs)):
             population.lineages[i][-1][1][5]= costs[i]
         population.configuration = sol
