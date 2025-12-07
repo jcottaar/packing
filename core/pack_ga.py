@@ -403,180 +403,102 @@ class Twist(Move):
         
         return [(center_x, center_y), max_twist_angle, radius]
 
-@ dataclass
+
+@dataclass
 class Crossover(Move):
-    # Replaces a number of trees closest to a given point with trees from another individual
+    """Replaces trees near a random point with transformed trees from a mate individual.
+    
+    Selects n trees closest to a random center point (using L-infinity distance for 
+    square selection) and replaces them with the n closest trees from the mate,
+    applying a random rotation (0/90/180/270°) and optional mirroring.
+    """
     min_N_trees: int = field(init=True, default=4)
     max_N_trees: int = field(init=True, default=20)
-    def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
+
+    def _do_move(self, population: Population, old_pop: Population, individual_id: int, 
+                 mate_id: int, generator: np.random.Generator):
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
         
-        # Pick a random center point inside the square defined by h
-        h_size = new_h[individual_id, 0].get()  # Square size
-        h_offset_x = new_h[individual_id, 1].get()  # x offset
-        h_offset_y = new_h[individual_id, 2].get()  # y offset
+        # Get bounding box parameters (transfer from GPU once)
+        h_params = new_h[individual_id].get()  # [size, offset_x, offset_y]
+        h_size, h_offset_x, h_offset_y = h_params[0], h_params[1], h_params[2]
+        mate_h_params = old_pop.configuration.h[mate_id].get()
+        
+        # Pick a random center point inside the individual's square
         offset_x = generator.uniform(-h_size / 2, h_size / 2)
         offset_y = generator.uniform(-h_size / 2, h_size / 2)
-        mate_center_x = offset_x + old_pop.configuration.h[mate_id, 1].get()  # x offset
-        mate_center_y = offset_y + old_pop.configuration.h[mate_id, 2].get()  # y offset
         center_x = offset_x + h_offset_x
         center_y = offset_y + h_offset_y
         
-        # Compute distances from all trees (of individual) to the random point (L-infinity for square selection)
-        tree_positions = new_xyt[individual_id, :, :2].get()  # (N_trees, 2)
-        distances_individual = np.maximum(np.abs(tree_positions[:, 0] - center_x), np.abs(tree_positions[:, 1] - center_y))
+        # Pick mate center at random position with same distance from edge as individual
+        # Distance from edge: h_size/2 - |offset|, so |mate_offset| = |offset| but sign is random
+        mate_h_size = mate_h_params[0]
+        mate_offset_x = abs(offset_x) * (mate_h_size / h_size) * generator.choice([-1, 1])
+        mate_offset_y = abs(offset_y) * (mate_h_size / h_size) * generator.choice([-1, 1])
+        mate_center_x = mate_offset_x + mate_h_params[1]
+        mate_center_y = mate_offset_y + mate_h_params[2]
         
-        # Compute distances from all trees (of mate) to the random point (L-infinity for square selection)
-        mate_positions = old_pop.configuration.xyt[mate_id, :, :2].get()  # (N_trees, 2)
-        distances_mate = np.maximum(np.abs(mate_positions[:, 0] - mate_center_x), np.abs(mate_positions[:, 1] - mate_center_y))
+        # Find trees closest to center using L-infinity distance (square selection)
+        tree_positions = new_xyt[individual_id, :, :2].get()
+        mate_positions = old_pop.configuration.xyt[mate_id, :, :2].get()
         
-        # Find n trees closest to that point in individual (to be replaced)
-        n_trees_to_replace = generator.integers(min(self.min_N_trees, N_trees), min(self.max_N_trees, N_trees) + 1)
+        distances_individual = np.maximum(
+            np.abs(tree_positions[:, 0] - center_x),
+            np.abs(tree_positions[:, 1] - center_y)
+        )
+        distances_mate = np.maximum(
+            np.abs(mate_positions[:, 0] - mate_center_x),
+            np.abs(mate_positions[:, 1] - mate_center_y)
+        )
+        
+        # Select n closest trees from each
+        n_trees_to_replace = generator.integers(
+            min(self.min_N_trees, N_trees), 
+            min(self.max_N_trees, N_trees) + 1
+        )
         individual_tree_ids = np.argsort(distances_individual)[:n_trees_to_replace]
-        
-        # Find n trees closest to that point in mate (to be copied from)
         mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
         
-        # Get mate trees to copy (make a copy to apply transformations)
-        mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()  # (n_trees_to_replace, 3) on GPU
-        
-        # Random 0/90/180/270 rotation around the center point
-        rotation_choice = generator.integers(0, 4)  # 0, 1, 2, 3 -> 0, 90, 180, 270 degrees
-        rot_angle = rotation_choice * (np.pi / 2)
-        
-        # Random mirroring (across x-axis through center)
+        # Copy mate trees and apply random transformation
+        mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()
+        rotation_choice = generator.integers(0, 4)  # 0, 1, 2, 3 -> 0°, 90°, 180°, 270°
         do_mirror = generator.integers(0, 2) == 1
         
-        # Get positions relative to center
-        dx = mate_trees[:, 0] - center_x
-        dy = mate_trees[:, 1] - center_y
-        theta = mate_trees[:, 2]
+        self._apply_transformation(
+            mate_trees, center_x, center_y, rotation_choice, do_mirror
+        )
         
-        # Apply mirroring first (across x-axis through center)
-        # Position: y -> -y (relative to center)
-        # Theta: theta -> pi - theta (flip the tree orientation)
+        # Replace trees in individual
+        new_xyt[individual_id, individual_tree_ids, :] = mate_trees
+        
+        return [(center_x, center_y), n_trees_to_replace, rotation_choice, do_mirror]
+
+    def _apply_transformation(self, trees: cp.ndarray, center_x: float, center_y: float,
+                              rotation_choice: int, do_mirror: bool):
+        """Apply in-place rotation and mirroring transformation to trees around center."""
+        # Get positions relative to center
+        dx = trees[:, 0] - center_x
+        dy = trees[:, 1] - center_y
+        theta = trees[:, 2]
+        
+        # Apply mirroring (across x-axis through center): y -> -y, theta -> pi - theta
         if do_mirror:
             dy = -dy
             theta = cp.pi - theta
         
-        # Apply rotation
+        # Apply rotation (0°, 90°, 180°, or 270°)
         if rotation_choice != 0:
-            cos_a = np.cos(rot_angle)
-            sin_a = np.sin(rot_angle)
-            new_dx = dx * cos_a - dy * sin_a
-            new_dy = dx * sin_a + dy * cos_a
-            dx = new_dx
-            dy = new_dy
+            rot_angle = rotation_choice * (np.pi / 2)
+            cos_a, sin_a = np.cos(rot_angle), np.sin(rot_angle)
+            dx, dy = dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a
             theta = theta + rot_angle
         
         # Convert back to absolute positions
-        mate_trees[:, 0] = center_x + dx
-        mate_trees[:, 1] = center_y + dy
-        mate_trees[:, 2] = theta
-
-        # # Add a check for mate_trees overlapping with new trees. If this happens ,plot the origina llayout (see example elsewhere), the mate layout, and the resulting layout after crossover, then raise an error.
-        # # Check for duplicate trees after crossover (trees that are too close to each other)
-        # all_trees = new_xyt[individual_id].get()  # (N_trees, 3)
-        # n_all = all_trees.shape[0]
-        
-        # # Create a mask for trees that will be replaced vs those that remain
-        # remaining_mask = np.ones(n_all, dtype=bool)
-        # remaining_mask[individual_tree_ids] = False
-        
-        # remaining_trees = all_trees[remaining_mask]  # Trees that stay
-        # incoming_trees = mate_trees.get()  # Trees being added
-        
-        # # Check distances between incoming trees and remaining trees
-        # if len(remaining_trees) > 0 and len(incoming_trees) > 0:
-        #     dx = incoming_trees[:, 0][:, None] - remaining_trees[:, 0][None, :]
-        #     dy = incoming_trees[:, 1][:, None] - remaining_trees[:, 1][None, :]
-        #     dtheta = incoming_trees[:, 2][:, None] - remaining_trees[:, 2][None, :]
-        #     dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
-        #     pairwise_dist = np.sqrt(dx**2 + dy**2 + dtheta**2)
-        #     min_dist = pairwise_dist.min()
-            
-        #     print(min_dist)
-        #     if min_dist < 1e-6:
-        #         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-                
-        #         # Original individual layout
-        #         tree_list_orig = kgs.TreeList()
-        #         tree_list_orig.xyt = population.configuration.xyt[individual_id].get()
-        #         plt.sca(axes[0])
-        #         pack_vis.visualize_tree_list(tree_list_orig)
-        #         plt.title(f'Original individual {individual_id}')
-                
-        #         # Mate layout
-        #         tree_list_mate = kgs.TreeList()
-        #         tree_list_mate.xyt = old_pop.configuration.xyt[mate_id].get()
-        #         plt.sca(axes[1])
-        #         pack_vis.visualize_tree_list(tree_list_mate)
-        #         plt.title(f'Mate {mate_id}')
-                
-        #         # Show the problematic crossover result
-        #         plt.sca(axes[2])
-        #         result_trees = all_trees.copy()
-        #         result_trees[individual_tree_ids] = incoming_trees
-        #         tree_list_result = kgs.TreeList()
-        #         tree_list_result.xyt = result_trees
-        #         pack_vis.visualize_tree_list(tree_list_result)
-        #         plt.title(f'Crossover result (min_dist={min_dist:.2e})')
-                
-        #         plt.tight_layout()
-        #         plt.pause(0.001)
-                
-        #         raise AssertionError(f"Crossover created overlapping trees: min_dist={min_dist:.2e} < 1e-6")
-        
-        # Replace trees in individual with transformed trees from mate
-        new_xyt[individual_id, individual_tree_ids, :] = mate_trees
-
-        # # Check for overlapping trees in the final result
-        # final_trees = new_xyt[individual_id].get()  # (N_trees, 3)
-        # x = final_trees[:, 0][:, None]
-        # y = final_trees[:, 1][:, None]
-        # theta = final_trees[:, 2][:, None]
-        # dx = x - x.T
-        # dy = y - y.T
-        # dtheta = theta - theta.T
-        # dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
-        # pairwise_dist = np.sqrt(dx**2 + dy**2 + dtheta**2)
-        # np.fill_diagonal(pairwise_dist, np.inf)
-        # min_dist = pairwise_dist.min()
-        # print('x', min_dist)
-        
-        # if min_dist < 1e-6:
-        #     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-            
-        #     # Original individual layout (before crossover - approximate by showing current state)
-        #     tree_list_orig = kgs.TreeList()
-        #     tree_list_orig.xyt = population.configuration.xyt[individual_id].get()
-        #     plt.sca(axes[0])
-        #     pack_vis.visualize_tree_list(tree_list_orig)
-        #     plt.title(f'Individual {individual_id} after crossover')
-            
-        #     # Mate layout
-        #     tree_list_mate = kgs.TreeList()
-        #     tree_list_mate.xyt = old_pop.configuration.xyt[mate_id].get()
-        #     plt.sca(axes[1])
-        #     pack_vis.visualize_tree_list(tree_list_mate)
-        #     plt.title(f'Mate {mate_id}')
-            
-        #     # Show pairwise distance matrix
-        #     plt.sca(axes[2])
-        #     pairwise_dist_plot = pairwise_dist.copy()
-        #     pairwise_dist_plot[pairwise_dist_plot == np.inf] = np.nan
-        #     plt.imshow(np.log10(pairwise_dist_plot + 1e-10), cmap='viridis')
-        #     plt.colorbar(label='log10(distance)')
-        #     plt.title(f'Pairwise distances (min={min_dist:.2e})')
-            
-        #     plt.tight_layout()
-        #     plt.pause(0.001)
-            
-        #     raise AssertionError(f"Crossover resulted in overlapping trees: min_dist={min_dist:.2e} < 1e-6")
-        
-        return [(center_x, center_y), n_trees_to_replace, rotation_choice, do_mirror]
+        trees[:, 0] = center_x + dx
+        trees[:, 1] = center_y + dy
+        trees[:, 2] = theta
 
 # ============================================================
 # Main GA algorithm
