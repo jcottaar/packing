@@ -563,7 +563,7 @@ class GA(kgs.BaseClass):
     def _score(self, sol:kgs.SolutionCollection):
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
-            if np.isnan(costs[i]) or costs[i]>1000:
+            if np.isnan(costs[i]) or costs[i]>1e6:
                 tree_list = kgs.TreeList()
                 tree_list.xyt = sol.xyt[i].get()
                 pack_vis.visualize_tree_list(tree_list)
@@ -574,6 +574,7 @@ class GA(kgs.BaseClass):
 
     def _relax_and_score(self, population:Population):        
         sol = population.configuration
+        sol.snap()
         costs = self._score(sol)
         for i in range(len(costs)):
             population.lineages[i][-1][1][3]= costs[i]

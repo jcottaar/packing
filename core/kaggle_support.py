@@ -414,7 +414,9 @@ class SolutionCollection(BaseClass):
         size = cp.maximum(width, height)  # (n_solutions,)
         
         # Update h: [size, x_offset, y_offset]
-        self.h = cp.stack([size, x_center, y_center], axis=1)  # (n_solutions, 3)
+        self.xyt[:,0] -= x_center[:, cp.newaxis]
+        self.xyt[:,1] -= y_center[:, cp.newaxis]
+        self.h = cp.stack([size, 0*size, 0*size], axis=1)  # (n_solutions, 3)
 # --- Recenter the tree geometry around its true centroid ---
 # The original `create_center_tree` used (0,0) as a fixed centroid.
 # Ensure the center of rotation is the actual centroid by translating
