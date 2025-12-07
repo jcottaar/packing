@@ -461,12 +461,6 @@ class Crossover(Move):
         individual_tree_ids = np.argsort(distances_individual)[:n_trees_to_replace]
         mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
         
-        # Replace centers with center of mass of selected trees
-        center_x = tree_positions[individual_tree_ids, 0].mean()
-        center_y = tree_positions[individual_tree_ids, 1].mean()
-        mate_center_x = mate_positions[mate_tree_ids, 0].mean()
-        mate_center_y = mate_positions[mate_tree_ids, 1].mean()
-        
         # Copy mate trees and apply random transformation
         mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()
         rotation_choice = generator.integers(0, 4)  # 0, 1, 2, 3 -> 0°, 90°, 180°, 270°
