@@ -532,6 +532,7 @@ class GA(kgs.BaseClass):
     seed: int = field(init=True, default=42)
     plot_fitness_predictors: bool = field(init=True, default=False)
     plot_diversity_matrix: bool = field(init=True, default=False)
+    plot_champions: bool = field(init=True, default=True)
 
     # Hyperparameters
     population_size:int = field(init=True, default=1000)
@@ -641,10 +642,11 @@ class GA(kgs.BaseClass):
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
                 best_pop = copy.deepcopy(self.populations[i_N_trees])
                 best_pop.select_ids([best_id])
-                print(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(best_pop.configuration)[0].get(), 
-                      pack_cost.CollisionCostSeparation().compute_cost_allocate(best_pop.configuration)[0].get())
+                print(best_pop.configuration.h)
+                #print(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(best_pop.configuration)[0].get(), 
+                #      pack_cost.CollisionCostSeparation().compute_cost_allocate(best_pop.configuration)[0].get())
                 self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]
-                if i_gen==0 or self.best_cost_per_generation[i_gen, i_N_trees]<self.best_cost_per_generation[i_gen-1, i_N_trees]:
+                if (i_gen==0 or self.best_cost_per_generation[i_gen, i_N_trees]<self.best_cost_per_generation[i_gen-1, i_N_trees]) and self.plot_champions:
                     pack_vis_sol.pack_vis_sol(self.populations[i_N_trees].configuration, solution_idx=best_id)
                     plt.title(f'Generation: {i_gen}, cost: {self.best_cost_per_generation[i_gen, i_N_trees]}')
                     plt.pause(0.001)
