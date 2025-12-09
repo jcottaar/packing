@@ -63,6 +63,8 @@ def test_costs():
             sol_fast.xyt = cp.array(xyt_single,dtype=cp.float32)
             sol_fast.h = cp.array(b_single,dtype=cp.float32)
             cost_fast, grad_fast, grad_bound_fast = c.compute_cost_allocate(sol_fast)
+            cost_fast_no_grad = c.compute_cost_allocate(sol_fast, evaluate_gradient=False)[0]
+            assert cp.all(cost_fast_no_grad == cost_fast)
             
             # Store all outputs
             all_ref_outputs.append((cost_ref, grad_ref, grad_bound_ref))
@@ -74,9 +76,8 @@ def test_costs():
             if not isinstance(c, pack_cost.CostDummy):
                 assert cost_ref > 0
             assert cp.allclose(cost_ref, cost_fast, rtol=1e-6), f"Cost mismatch: {cost_ref} vs {cost_fast}"
-            assert cp.allclose(grad_ref, grad_fast, rtol=1e-2, atol=1e-2), f"Gradient mismatch: {grad_ref} vs {grad_fast}"
-            assert cp.allclose(grad_bound_ref, grad_bound_fast, rtol=1e-2, atol=1e-2), f"Bound gradient mismatch: {grad_bound_ref} vs {grad_bound_fast}"
-            print('back to 1e-4 later, also below')
+            assert cp.allclose(grad_ref, grad_fast, rtol=1e-4, atol=1e-4), f"Gradient mismatch: {grad_ref} vs {grad_fast}"
+            assert cp.allclose(grad_bound_ref, grad_bound_fast, rtol=1e-4, atol=1e-4), f"Bound gradient mismatch: {grad_bound_ref} vs {grad_bound_fast}"
 
             # Now check gradients via finite differences
             def _get_cost(obj, xyt_arr):
@@ -104,7 +105,7 @@ def test_costs():
 
             grad_fast_flat = cp.asarray(grad_fast).ravel()
             max_diff = cp.max(cp.abs(grad_num - grad_fast_flat)).get().item()
-            assert cp.allclose(grad_num, grad_fast_flat, rtol=1e-2, atol=1e-2), f"Finite-diff gradient mismatch (max diff {max_diff})"
+            assert cp.allclose(grad_num, grad_fast_flat, rtol=1e-4, atol=1e-4), f"Finite-diff gradient mismatch (max diff {max_diff})"
 
             # Check bound gradient via finite differences
             def _get_cost_bound(obj, bound_arr):
@@ -131,7 +132,7 @@ def test_costs():
 
             grad_bound_fast_flat = cp.asarray(grad_bound_fast).ravel()
             max_diff_bound = cp.max(cp.abs(grad_bound_num - grad_bound_fast_flat)).get().item()
-            assert cp.allclose(grad_bound_num, grad_bound_fast_flat, rtol=1e-2, atol=1e-2), f"Finite-diff bound gradient mismatch (max diff {max_diff_bound})"
+            assert cp.allclose(grad_bound_num, grad_bound_fast_flat, rtol=1e-4, atol=1e-4), f"Finite-diff bound gradient mismatch (max diff {max_diff_bound})"
         
         # Vectorized check: call with all xyt and bounds for this cost function
         print(f"  Vectorized check for {c.__class__.__name__}")
@@ -178,6 +179,21 @@ def test_costs():
                 f"Vectorized fast bound grad mismatch for {c.__class__.__name__} tree {i}"
         
         print(f"  ✓ Vectorized results exactly match individual calls")
+
+        
+        # Timing comparisons
+        kgs.debugging_mode = 0
+        n_repeats = 100
+        import time
+        for evaluate_gradient in [False, True]:
+            start = time.time()
+            for _ in range(n_repeats):
+                c.compute_cost(sol_fast, cost_fast, grad_fast, grad_bound_fast, evaluate_gradient=evaluate_gradient)
+            end = time.time()
+            time_taken = (end - start) / n_repeats
+            print(f'Time taken for {c.__class__.__name__} single (evaluate_gradient={evaluate_gradient}): {time_taken*1000:.3f} ms')
+        kgs.debugging_mode = 2
+
 
 if __name__ == "__main__":
     run_all_tests()

@@ -33,27 +33,29 @@ class Cost(kgs.BaseClass):
             cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(sol, sol.xyt[i], sol.h[i])
         return cost,grad_xyt,grad_bound
     
-    def compute_cost_allocate(self, sol:kgs.SolutionCollection):
+    def compute_cost_allocate(self, sol:kgs.SolutionCollection, evaluate_gradient:bool=True):
         # Allocates gradient arrays and calls compute_cost
         cost = cp.zeros(sol.N_solutions, dtype=sol.xyt.dtype)
+        # Always allocate arrays for gradients
         grad_xyt = cp.zeros_like(sol.xyt)
         grad_bound = cp.zeros_like(sol.h)
-        self.compute_cost(sol, cost, grad_xyt, grad_bound)
+        self.compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient=evaluate_gradient)
         return cost, grad_xyt, grad_bound
     
-    def compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+    def compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool=True):
         # Subclass can implement faster version with preallocated gradients
-        self._compute_cost(sol, cost, grad_xyt, grad_bound)
+        self._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         cost *= self.scaling
-        grad_xyt *= self.scaling
-        grad_bound *= self.scaling
+        if evaluate_gradient:
+            grad_xyt *= self.scaling
+            grad_bound *= self.scaling
     
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # Subclass can implement faster version with preallocated gradients
         for i in range(sol.N_solutions):
-            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol, sol.xyt[i], sol.h[i])
+            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol, sol.xyt[i], sol.h[i], evaluate_gradient)
     
-    def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h):
+    def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h, evaluate_gradient):
         return self._compute_cost_single_ref(sol, xyt, h)
 
 @dataclass 
@@ -76,7 +78,7 @@ class CostCompound(Cost):
             total_grad_bound += c_grad_bound
         return total_cost, total_grad, total_grad_bound
 
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         cost[:] = 0
         grad_xyt[:] = 0
         grad_bound[:] = 0
@@ -94,7 +96,7 @@ class CostCompound(Cost):
             self._temp_cost[:] = 0
             self._temp_grad_xyt[:] = 0
             self._temp_grad_bound[:] = 0
-            c.compute_cost(sol, self._temp_cost, self._temp_grad_xyt, self._temp_grad_bound)
+            c.compute_cost(sol, self._temp_cost, self._temp_grad_xyt, self._temp_grad_bound, evaluate_gradient)
             cost += self._temp_cost
             grad_xyt += self._temp_grad_xyt
             grad_bound += self._temp_grad_bound
@@ -148,10 +150,13 @@ class CollisionCostOverlappingArea(CollisionCost):
                 grad[j] = cp.array((area_plus - area_minus) / (2 * epsilon))
         return area, grad
 
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # use_separation=False -> run overlap area path
         assert isinstance(sol, kgs.SolutionCollectionSquare)
-        pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt)
+        if evaluate_gradient:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt)
+        else:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost)
         grad_bound[:] = 0
 
 @dataclass
@@ -491,13 +496,16 @@ class CollisionCostSeparation(CollisionCost):
 
         return cp.array(total_sep_squared), total_grad
     
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # use_separation=True -> run separation (sum-of-squares) path
         assert isinstance(sol, kgs.SolutionCollectionSquare)
         if self.use_max or self.TEMP_use_kernel:
-            super()._compute_cost(sol, cost, grad_xyt, grad_bound)
+            super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         else:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt)
+            if evaluate_gradient:
+                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt)
+            else:
+                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost)
             grad_bound[:] = 0
     
 
@@ -578,11 +586,9 @@ class AreaCost(Cost):
         cost, grad_bound = sol.compute_cost_single_ref(h)
         return cost, cp.zeros_like(xyt), grad_bound
     
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
-        cost[:] = sol.h[:,0]**2
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool):
         grad_xyt[:] = 0
-        grad_bound[:] = 0
-        grad_bound[:,0] = 2.0*sol.h[:,0]
+        sol.compute_cost(sol, cost, grad_bound)        
 
 @dataclass
 class BoundaryDistanceCost(Cost):
@@ -714,16 +720,20 @@ class BoundaryDistanceCost(Cost):
         
         return cp.array(total_cost), grad, grad_bound
     
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         assert isinstance(sol, kgs.SolutionCollectionSquare)
         if self.use_kernel:
-            pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_bound)
+            if evaluate_gradient:
+                pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_bound)
+            else:
+                pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, out_cost=cost)
         else:
-            super()._compute_cost(sol, cost, grad_xyt, grad_bound)
+            super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
             
-    def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h):
+    def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h, evaluate_gradient):
         # xyt is (n_trees, 3), h is (3,): [square_size, x_offset, y_offset]
         # Use kgs.tree_vertices (precomputed center tree vertices) for efficient vectorized computation
+        # evaluate_gradient is ignored
     
         b = float(h[0].get().item())
         half = b / 2.0
