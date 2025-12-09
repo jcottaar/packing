@@ -109,24 +109,79 @@ class CostDummy(Cost):
 
 @dataclass    
 class CollisionCost(Cost):
-    
+
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
         # Compute collision cost for all pairs of trees
-        assert not sol.periodic
         n_trees = sol.N_trees
         tree_list = kgs.TreeList()
         tree_list.xyt = xyt
         trees = tree_list.get_trees()
         total_cost = cp.array(0.0)
         total_grad = cp.zeros_like(xyt)
-        for i in range(n_trees):
-            this_xyt = xyt[i]            
-            other_xyt = cp.delete(xyt, i, axis=0)
-            this_tree = trees[i]
-            other_trees = [t for t in trees if t is not this_tree]
-            this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees)        
-            total_cost += this_cost/2
-            total_grad[i] += this_grads
+
+        if sol.periodic:
+            # Get crystal axes: shape (1, 2, 2) for single solution
+            crystal_axes = cp.zeros((1, 2, 2), dtype=xyt.dtype)
+            sol.get_crystal_axes(crystal_axes)
+            a_vec = crystal_axes[0, 0, :]  # First lattice vector
+            b_vec = crystal_axes[0, 1, :]  # Second lattice vector
+
+            # Convert to numpy for shapely operations
+            a_vec_np = a_vec.get()
+            b_vec_np = b_vec.get()
+
+            for i in range(n_trees):
+                this_xyt = xyt[i]
+                this_tree = trees[i]
+
+                # Collect all other trees including periodic images
+                other_trees_all = []
+                other_xyt_all = []
+
+                # Loop over 3x3 grid of periodic cells
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        print(dx,dy)
+                        shift = dx * a_vec_np + dy * b_vec_np
+
+                        for j in range(n_trees):
+                            # Skip self-interaction in origin cell only
+                            if dx == 0 and dy == 0:
+                                if i == j:
+                                    continue
+
+                            # Translate tree j by the lattice shift
+                            tree_j_shifted = shapely.affinity.translate(trees[j], xoff=shift[0], yoff=shift[1])
+                            other_trees_all.append(tree_j_shifted)
+
+                            # Create shifted pose for xyt2 (needed by CollisionCostSeparation)
+                            xyt_j_shifted = xyt[j].copy()
+                            xyt_j_shifted[0] += cp.array(shift[0])  # x += shift_x
+                            xyt_j_shifted[1] += cp.array(shift[1])  # y += shift_y
+                            # theta unchanged
+                            other_xyt_all.append(xyt_j_shifted)
+
+                # Stack into array for xyt2
+                if len(other_xyt_all) > 0:
+                    other_xyt = cp.stack(other_xyt_all, axis=0)
+                else:
+                    other_xyt = cp.zeros((0, 3), dtype=xyt.dtype)
+
+                # Compute cost for this tree vs all others (including periodic images)
+                this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees_all)
+                total_cost += this_cost / 2
+                total_grad[i] += this_grads
+        else:
+            # Non-periodic: original implementation
+            for i in range(n_trees):
+                this_xyt = xyt[i]
+                other_xyt = cp.delete(xyt, i, axis=0)
+                this_tree = trees[i]
+                other_trees = [t for t in trees if t is not this_tree]
+                this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees)
+                total_cost += this_cost/2
+                total_grad[i] += this_grads
+
         return total_cost, total_grad, cp.zeros_like(h)
     
 class CollisionCostOverlappingArea(CollisionCost):
@@ -152,12 +207,16 @@ class CollisionCostOverlappingArea(CollisionCost):
 
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # use_separation=False -> run overlap area path
-        assert not sol.periodic
-        if evaluate_gradient:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt)
+        if sol.periodic:
+            # Fall back to reference implementation for periodic boundaries
+            super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         else:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost)
-        grad_bound[:] = 0
+            # Use fast CUDA implementation for non-periodic
+            if evaluate_gradient:
+                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt)
+            else:
+                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost)
+            grad_bound[:] = 0
 
 @dataclass
 class CollisionCostSeparation(CollisionCost):
@@ -503,10 +562,11 @@ class CollisionCostSeparation(CollisionCost):
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # use_separation=True -> run separation (sum-of-squares) path
-        assert not sol.periodic
-        if self.use_max or self.TEMP_use_kernel:
+        if sol.periodic or self.use_max or self.TEMP_use_kernel:
+            # Fall back to reference implementation for periodic boundaries or special modes
             super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         else:
+            # Use fast CUDA implementation
             if evaluate_gradient:
                 pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt)
             else:
