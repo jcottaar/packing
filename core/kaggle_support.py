@@ -60,13 +60,17 @@ os.makedirs(data_dir, exist_ok=True)
 os.makedirs(temp_dir, exist_ok=True)
 
 
-# if not env=='kaggle':
-#     import git 
-#     repo = git.Repo(search_parent_directories=True)
-#     git_commit_id = repo.head.object.hexsha
-# else:
-#     git_commit_id = 'kaggle'
-
+'''
+Precision control
+'''
+USE_FLOAT32, dtype_cp, dtype_np = None, None, None
+def set_float32(use_float32:bool):
+    global USE_FLOAT32, dtype_cp, dtype_np
+    if use_float32:
+        USE_FLOAT32, dtype_cp, dtype_np = True, cp.float32, np.float32
+    else:
+        USE_FLOAT32, dtype_cp, dtype_np = False, cp.float64, np.float64
+set_float32(True)
 
 '''
 Helper classes and functions
@@ -269,7 +273,7 @@ def create_center_tree():
 center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset = create_center_tree()
 center_tree_prepped = prep(center_tree)
 tree_area = center_tree.area
-tree_vertices = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float64)
+tree_vertices64 = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float64)
 tree_vertices32 = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float32)
 
 
@@ -392,7 +396,7 @@ class SolutionCollectionSquare(SolutionCollection):
     def snap(self):
         """Set h such that for each solution it's the smallest possible square containing all trees.
         Vectorized implementation using tree_vertices32.
-        Assumes xyt is cp.float32.
+        Assumes xyt is kgs.dtype_cp.
         """
         # xyt shape: (n_solutions, n_trees, 3)
         # tree_vertices32 shape: (n_vertices, 2)

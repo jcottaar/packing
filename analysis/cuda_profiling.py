@@ -17,7 +17,7 @@ def make_input(N):
     x = rng.uniform(-5.0, 5.0, size=N)
     y = rng.uniform(-5.0, 5.0, size=N)
     t = rng.uniform(-math.pi, math.pi, size=N)
-    xyt = np.stack([x, y, t], axis=1).astype(np.float64)
+    xyt = np.stack([x, y, t], axis=1).astype(kgs.dtype_np)
     return xyt
 
 def run_trial(num_streams, iters_per_stream, xyt1_np, xyt2_np):
@@ -38,7 +38,7 @@ def run_trial(num_streams, iters_per_stream, xyt1_np, xyt2_np):
 
     # Precreate per-stream outputs
     streams = [cp.cuda.Stream(non_blocking=True) for _ in range(num_streams)]
-    out_totals = [cp.zeros(1, dtype=cp.float64) for _ in range(num_streams)]
+    out_totals = [cp.zeros(1, dtype=kgs.dtype_cp) for _ in range(num_streams)]
 
     # Warmup single call per stream to get JIT/compilation out of the way
     for s_idx, stream in enumerate(streams):

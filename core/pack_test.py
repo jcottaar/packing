@@ -11,10 +11,13 @@ import pack_vis
 import pack_cuda
 import pack_cuda_primitives_test
 import matplotlib.pyplot as plt
-pack_cuda.USE_FLOAT32 = True
+
+CUDA_float32 = True
+kgs.set_float32(CUDA_float32)
+pack_cuda._ensure_initialized()
 
 def run_all_tests():
-    kgs.debugging_mode = 2
+    kgs.debugging_mode = 2    
     pack_cuda_primitives_test.run_all_tests()
     test_costs()
     print("All tests passed.")
@@ -23,8 +26,9 @@ def test_costs():
     print('Testing cost computation and gradients')
     costs_to_test = [pack_cost.CostDummy(), pack_cost.AreaCost(), pack_cost.CollisionCostSeparation(scaling=5., use_max=False),
                      pack_cost.BoundaryDistanceCost(use_kernel=False), pack_cost.BoundaryDistanceCost(use_kernel=True, scaling=5.), pack_cost.CollisionCostOverlappingArea(scaling=3.), 
-                     pack_cost.CostCompound(scaling = 1.5, costs=[pack_cost.AreaCost(), pack_cost.BoundaryDistanceCost()]), pack_cost.CollisionCostSeparation(use_max=False, TEMP_use_kernel=True), ]
+                     pack_cost.CostCompound(scaling = 1.5, costs=[pack_cost.AreaCost(), pack_cost.BoundaryDistanceCost()])]
 
+    kgs.set_float32(False)
     tree_list = []
     tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=0)))
     tree_list.append(pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=2)))
@@ -60,8 +64,9 @@ def test_costs():
             # First, check that compute_cost and compute_cost_ref agree (new API: accept SolutionCollectionSquare)
             cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(sol_single)
             sol_fast = kgs.SolutionCollectionSquare()
-            sol_fast.xyt = cp.array(xyt_single,dtype=cp.float32)
-            sol_fast.h = cp.array(b_single,dtype=cp.float32)
+            kgs.set_float32(CUDA_float32)
+            sol_fast.xyt = cp.array(xyt_single,dtype=kgs.dtype_cp)
+            sol_fast.h = cp.array(b_single,dtype=kgs.dtype_cp)
             cost_fast, grad_fast, grad_bound_fast = c.compute_cost_allocate(sol_fast)
             cost_fast_no_grad = c.compute_cost_allocate(sol_fast, evaluate_gradient=False)[0]
             assert cp.all(cost_fast_no_grad == cost_fast)
@@ -78,6 +83,8 @@ def test_costs():
             assert cp.allclose(cost_ref, cost_fast, rtol=1e-6), f"Cost mismatch: {cost_ref} vs {cost_fast}"
             assert cp.allclose(grad_ref, grad_fast, rtol=1e-4, atol=1e-4), f"Gradient mismatch: {grad_ref} vs {grad_fast}"
             assert cp.allclose(grad_bound_ref, grad_bound_fast, rtol=1e-4, atol=1e-4), f"Bound gradient mismatch: {grad_bound_ref} vs {grad_bound_fast}"
+
+            kgs.set_float32(False)
 
             # Now check gradients via finite differences
             def _get_cost(obj, xyt_arr):
@@ -144,10 +151,12 @@ def test_costs():
         full_sol = kgs.SolutionCollectionSquare()
         full_sol.xyt = full_xyt
         full_sol.h = full_bounds
+        kgs.set_float32(False)
         vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_sol)
+        kgs.set_float32(CUDA_float32)
         full_sol_fast = kgs.SolutionCollectionSquare()
-        full_sol_fast.xyt = cp.array(full_xyt,dtype=cp.float32)
-        full_sol_fast.h = cp.array(full_bounds,dtype=cp.float32)
+        full_sol_fast.xyt = cp.array(full_xyt,dtype=kgs.dtype_cp)
+        full_sol_fast.h = cp.array(full_bounds,dtype=kgs.dtype_cp)
         vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)
         
         # Check each tree's results

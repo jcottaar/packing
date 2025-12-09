@@ -20,6 +20,9 @@ import subprocess
 import shutil
 
 import pack_cuda_primitives
+import kaggle_support as kgs
+kgs.set_float32(False)
+print(kgs.USE_FLOAT32)
 
 # ---------------------------------------------------------------------------
 # Module State - Lazy Initialization
@@ -387,23 +390,23 @@ def line_intersection_fwd_bwd(
     if p2.shape[0] != n or q1.shape[0] != n or q2.shape[0] != n:
         raise ValueError(f"Batch size mismatch: p1={n}, p2={p2.shape[0]}, q1={q1.shape[0]}, q2={q2.shape[0]}")
     
-    if p1.dtype != cp.float64 or p2.dtype != cp.float64 or q1.dtype != cp.float64 or q2.dtype != cp.float64:
+    if p1.dtype != kgs.dtype_cp or p2.dtype != kgs.dtype_cp or q1.dtype != kgs.dtype_cp or q2.dtype != kgs.dtype_cp:
         raise ValueError("All inputs must be float64")
     
     if not (p1.flags.c_contiguous and p2.flags.c_contiguous and q1.flags.c_contiguous and q2.flags.c_contiguous):
         raise ValueError("All inputs must be C-contiguous")
     
     # Allocate outputs
-    out = cp.zeros((n, 2), dtype=cp.float64)
+    out = cp.zeros((n, 2), dtype=kgs.dtype_cp)
     
     if compute_gradients:
-        d_p1 = cp.zeros((n, 2), dtype=cp.float64)
-        d_p2 = cp.zeros((n, 2), dtype=cp.float64)
-        d_q1 = cp.zeros((n, 2), dtype=cp.float64)
-        d_q2 = cp.zeros((n, 2), dtype=cp.float64)
+        d_p1 = cp.zeros((n, 2), dtype=kgs.dtype_cp)
+        d_p2 = cp.zeros((n, 2), dtype=kgs.dtype_cp)
+        d_q1 = cp.zeros((n, 2), dtype=kgs.dtype_cp)
+        d_q2 = cp.zeros((n, 2), dtype=kgs.dtype_cp)
     else:
         # Use dummy arrays (won't be written to)
-        dummy = cp.zeros((1, 2), dtype=cp.float64)
+        dummy = cp.zeros((1, 2), dtype=kgs.dtype_cp)
         d_p1 = d_p2 = d_q1 = d_q2 = dummy
     
     # Launch kernel
@@ -493,25 +496,25 @@ def clip_against_edge_fwd_bwd(
     n_batch = len(in_polygons)
     if n_batch == 0:
         if compute_gradients:
-            return [], ([], cp.array([], dtype=cp.float64).reshape(0, 2), 
-                        cp.array([], dtype=cp.float64).reshape(0, 2))
+            return [], ([], cp.array([], dtype=kgs.dtype_cp).reshape(0, 2), 
+                        cp.array([], dtype=kgs.dtype_cp).reshape(0, 2))
         else:
             return [], None
     
     # Validate inputs
-    assert edge_A.shape == (n_batch, 2) and edge_A.dtype == cp.float64
-    assert edge_B.shape == (n_batch, 2) and edge_B.dtype == cp.float64
+    assert edge_A.shape == (n_batch, 2) and edge_A.dtype == kgs.dtype_cp
+    assert edge_B.shape == (n_batch, 2) and edge_B.dtype == kgs.dtype_cp
     
     # Find max input size and pad
     max_n_in = max(poly.shape[0] for poly in in_polygons)
     
     # Create padded input array
-    in_pts_flat = cp.zeros((n_batch, max_n_in, 2), dtype=cp.float64)
+    in_pts_flat = cp.zeros((n_batch, max_n_in, 2), dtype=kgs.dtype_cp)
     n_in = cp.zeros(n_batch, dtype=cp.int32)
     
     for i, poly in enumerate(in_polygons):
         assert poly.ndim == 2 and poly.shape[1] == 2
-        assert poly.dtype == cp.float64
+        assert poly.dtype == kgs.dtype_cp
         n_verts = poly.shape[0]
         n_in[i] = n_verts
         in_pts_flat[i, :n_verts, :] = poly
@@ -519,16 +522,16 @@ def clip_against_edge_fwd_bwd(
     in_pts_flat = in_pts_flat.reshape(n_batch, max_n_in * 2)
     
     # Allocate outputs
-    out_pts_flat = cp.zeros((n_batch, 8 * 2), dtype=cp.float64)  # MAX_INTERSECTION_VERTS=8
+    out_pts_flat = cp.zeros((n_batch, 8 * 2), dtype=kgs.dtype_cp)  # MAX_INTERSECTION_VERTS=8
     n_out = cp.zeros(n_batch, dtype=cp.int32)
     
     if compute_gradients:
-        d_in_pts_flat = cp.zeros((n_batch, max_n_in * 2), dtype=cp.float64)
-        d_edge_A = cp.zeros((n_batch, 2), dtype=cp.float64)
-        d_edge_B = cp.zeros((n_batch, 2), dtype=cp.float64)
+        d_in_pts_flat = cp.zeros((n_batch, max_n_in * 2), dtype=kgs.dtype_cp)
+        d_edge_A = cp.zeros((n_batch, 2), dtype=kgs.dtype_cp)
+        d_edge_B = cp.zeros((n_batch, 2), dtype=kgs.dtype_cp)
     else:
         # Use dummy arrays (won't be written to)
-        dummy = cp.zeros((1,), dtype=cp.float64)
+        dummy = cp.zeros((1,), dtype=kgs.dtype_cp)
         d_in_pts_flat = dummy
         d_edge_A = dummy.reshape(1, 1)
         d_edge_B = dummy.reshape(1, 1)
@@ -625,10 +628,10 @@ def test_line_intersection():
     def compute_intersection(p1_val, p2_val, q1_val, q2_val):
         """Helper to compute intersection on CPU."""
         result, _ = line_intersection_fwd_bwd(
-            cp.array([p1_val], dtype=cp.float64),
-            cp.array([p2_val], dtype=cp.float64),
-            cp.array([q1_val], dtype=cp.float64),
-            cp.array([q2_val], dtype=cp.float64)
+            cp.array([p1_val], dtype=kgs.dtype_cp),
+            cp.array([p2_val], dtype=kgs.dtype_cp),
+            cp.array([q1_val], dtype=kgs.dtype_cp),
+            cp.array([q2_val], dtype=kgs.dtype_cp)
         )
         return result.get()[0]
     
@@ -638,19 +641,19 @@ def test_line_intersection():
     for idx, (p1_val, p2_val, q1_val, q2_val) in enumerate(test_data):
         # Run forward+backward pass for this case
         intersection_with_grad, (d_p1, d_p2, d_q1, d_q2) = line_intersection_fwd_bwd(
-            cp.array([p1_val], dtype=cp.float64),
-            cp.array([p2_val], dtype=cp.float64),
-            cp.array([q1_val], dtype=cp.float64),
-            cp.array([q2_val], dtype=cp.float64),
+            cp.array([p1_val], dtype=kgs.dtype_cp),
+            cp.array([p2_val], dtype=kgs.dtype_cp),
+            cp.array([q1_val], dtype=kgs.dtype_cp),
+            cp.array([q2_val], dtype=kgs.dtype_cp),
             compute_gradients=True
         )
         
         # Run forward-only pass
         intersection_no_grad, grads = line_intersection_fwd_bwd(
-            cp.array([p1_val], dtype=cp.float64),
-            cp.array([p2_val], dtype=cp.float64),
-            cp.array([q1_val], dtype=cp.float64),
-            cp.array([q2_val], dtype=cp.float64),
+            cp.array([p1_val], dtype=kgs.dtype_cp),
+            cp.array([p2_val], dtype=kgs.dtype_cp),
+            cp.array([q1_val], dtype=kgs.dtype_cp),
+            cp.array([q2_val], dtype=kgs.dtype_cp),
             compute_gradients=False
         )
         
@@ -774,9 +777,9 @@ def test_clip_against_edge():
     
     for idx, (poly_np, edge_A_np, edge_B_np) in enumerate(test_cases):
         # Convert to CuPy
-        poly = cp.array(poly_np, dtype=cp.float64)
-        edge_A = cp.array([edge_A_np], dtype=cp.float64)
-        edge_B = cp.array([edge_B_np], dtype=cp.float64)
+        poly = cp.array(poly_np, dtype=kgs.dtype_cp)
+        edge_A = cp.array([edge_A_np], dtype=kgs.dtype_cp)
+        edge_B = cp.array([edge_B_np], dtype=kgs.dtype_cp)
         
         # Forward+backward pass
         out_polys_with_grad, (d_in_polys, d_edge_A, d_edge_B) = clip_against_edge_fwd_bwd(
@@ -820,14 +823,14 @@ def test_clip_against_edge():
                 
                 # Compute forward passes
                 out_plus, _ = clip_against_edge_fwd_bwd(
-                    [cp.array(poly_plus, dtype=cp.float64)],
-                    cp.array([edge_A_np], dtype=cp.float64),
-                    cp.array([edge_B_np], dtype=cp.float64)
+                    [cp.array(poly_plus, dtype=kgs.dtype_cp)],
+                    cp.array([edge_A_np], dtype=kgs.dtype_cp),
+                    cp.array([edge_B_np], dtype=kgs.dtype_cp)
                 )
                 out_minus, _ = clip_against_edge_fwd_bwd(
-                    [cp.array(poly_minus, dtype=cp.float64)],
-                    cp.array([edge_A_np], dtype=cp.float64),
-                    cp.array([edge_B_np], dtype=cp.float64)
+                    [cp.array(poly_minus, dtype=kgs.dtype_cp)],
+                    cp.array([edge_A_np], dtype=kgs.dtype_cp),
+                    cp.array([edge_B_np], dtype=kgs.dtype_cp)
                 )
                 
                 # Check if topology changed (number of vertices)
@@ -851,14 +854,14 @@ def test_clip_against_edge():
             edge_A_minus[coord_idx] -= eps
             
             out_plus, _ = clip_against_edge_fwd_bwd(
-                [cp.array(poly_np, dtype=cp.float64)],
-                cp.array([edge_A_plus], dtype=cp.float64),
-                cp.array([edge_B_np], dtype=cp.float64)
+                [cp.array(poly_np, dtype=kgs.dtype_cp)],
+                cp.array([edge_A_plus], dtype=kgs.dtype_cp),
+                cp.array([edge_B_np], dtype=kgs.dtype_cp)
             )
             out_minus, _ = clip_against_edge_fwd_bwd(
-                [cp.array(poly_np, dtype=cp.float64)],
-                cp.array([edge_A_minus], dtype=cp.float64),
-                cp.array([edge_B_np], dtype=cp.float64)
+                [cp.array(poly_np, dtype=kgs.dtype_cp)],
+                cp.array([edge_A_minus], dtype=kgs.dtype_cp),
+                cp.array([edge_B_np], dtype=kgs.dtype_cp)
             )
             
             if len(out_plus[0]) != len(out_polys[0]) or len(out_minus[0]) != len(out_polys[0]):
@@ -877,14 +880,14 @@ def test_clip_against_edge():
             edge_B_minus[coord_idx] -= eps
             
             out_plus, _ = clip_against_edge_fwd_bwd(
-                [cp.array(poly_np, dtype=cp.float64)],
-                cp.array([edge_A_np], dtype=cp.float64),
-                cp.array([edge_B_plus], dtype=cp.float64)
+                [cp.array(poly_np, dtype=kgs.dtype_cp)],
+                cp.array([edge_A_np], dtype=kgs.dtype_cp),
+                cp.array([edge_B_plus], dtype=kgs.dtype_cp)
             )
             out_minus, _ = clip_against_edge_fwd_bwd(
-                [cp.array(poly_np, dtype=cp.float64)],
-                cp.array([edge_A_np], dtype=cp.float64),
-                cp.array([edge_B_minus], dtype=cp.float64)
+                [cp.array(poly_np, dtype=kgs.dtype_cp)],
+                cp.array([edge_A_np], dtype=kgs.dtype_cp),
+                cp.array([edge_B_minus], dtype=kgs.dtype_cp)
             )
             
             if len(out_plus[0]) != len(out_polys[0]) or len(out_minus[0]) != len(out_polys[0]):
@@ -942,7 +945,7 @@ def polygon_area_fwd_bwd(
     
     batch_size = len(polygons)
     if batch_size == 0:
-        return cp.array([], dtype=cp.float64), [] if compute_gradients else None
+        return cp.array([], dtype=kgs.dtype_cp), [] if compute_gradients else None
     
     # Determine max_n_verts
     max_n_verts = max(poly.shape[0] for poly in polygons)
@@ -954,19 +957,19 @@ def polygon_area_fwd_bwd(
     n_verts = cp.array(n_verts_list, dtype=cp.int32)
     
     # Flatten vertices
-    verts_flat = cp.zeros((batch_size, max_n_verts * 2), dtype=cp.float64)
+    verts_flat = cp.zeros((batch_size, max_n_verts * 2), dtype=kgs.dtype_cp)
     for i, poly in enumerate(polygons):
         n = poly.shape[0]
         verts_flat[i, :n*2] = poly.flatten()
     
     # Allocate outputs
-    areas = cp.zeros(batch_size, dtype=cp.float64)
+    areas = cp.zeros(batch_size, dtype=kgs.dtype_cp)
     
     if compute_gradients:
-        d_verts_flat = cp.zeros((batch_size, max_n_verts * 2), dtype=cp.float64)
+        d_verts_flat = cp.zeros((batch_size, max_n_verts * 2), dtype=kgs.dtype_cp)
     else:
         # Use dummy array (won't be written to)
-        d_verts_flat = cp.zeros((1,), dtype=cp.float64)
+        d_verts_flat = cp.zeros((1,), dtype=kgs.dtype_cp)
     
     # Launch kernel
     threads_per_block = 256
@@ -1006,19 +1009,19 @@ def sat_separation_with_grad_pose_fwd_bwd(
     n1 = int(verts1.shape[0])
     n2 = int(verts2.shape[0])
 
-    verts1_flat = cp.zeros((n1 * 2,), dtype=cp.float64)
+    verts1_flat = cp.zeros((n1 * 2,), dtype=kgs.dtype_cp)
     verts1_flat[:n1*2] = verts1.flatten()
 
-    verts2_flat = cp.zeros((n2 * 2,), dtype=cp.float64)
+    verts2_flat = cp.zeros((n2 * 2,), dtype=kgs.dtype_cp)
     verts2_flat[:n2*2] = verts2.flatten()
 
-    out_sep = cp.zeros((1,), dtype=cp.float64)
+    out_sep = cp.zeros((1,), dtype=kgs.dtype_cp)
     if compute_gradients:
-        out_dx = cp.zeros((1,), dtype=cp.float64)
-        out_dy = cp.zeros((1,), dtype=cp.float64)
-        out_dtheta = cp.zeros((1,), dtype=cp.float64)
+        out_dx = cp.zeros((1,), dtype=kgs.dtype_cp)
+        out_dy = cp.zeros((1,), dtype=kgs.dtype_cp)
+        out_dtheta = cp.zeros((1,), dtype=kgs.dtype_cp)
     else:
-        out_dx = out_dy = out_dtheta = cp.zeros((1,), dtype=cp.float64)
+        out_dx = out_dy = out_dtheta = cp.zeros((1,), dtype=kgs.dtype_cp)
 
     # Launch single-thread kernel
     _sat_separation_kernel(
@@ -1075,7 +1078,7 @@ def test_polygon_area():
     
     # Test each case
     for idx, poly_np in enumerate(test_cases):
-        poly_gpu = cp.array(poly_np, dtype=cp.float64)
+        poly_gpu = cp.array(poly_np, dtype=kgs.dtype_cp)
         
         # Forward+backward
         areas_with_grad, grads = polygon_area_fwd_bwd([poly_gpu], compute_gradients=True)
@@ -1103,8 +1106,8 @@ def test_polygon_area():
                 poly_minus = poly_np.copy()
                 poly_minus[vert_idx, coord_idx] -= eps
                 
-                areas_plus, _ = polygon_area_fwd_bwd([cp.array(poly_plus, dtype=cp.float64)])
-                areas_minus, _ = polygon_area_fwd_bwd([cp.array(poly_minus, dtype=cp.float64)])
+                areas_plus, _ = polygon_area_fwd_bwd([cp.array(poly_plus, dtype=kgs.dtype_cp)])
+                areas_minus, _ = polygon_area_fwd_bwd([cp.array(poly_minus, dtype=kgs.dtype_cp)])
                 
                 fd_grad = (float(areas_plus[0]) - float(areas_minus[0])) / (2 * eps)
                 analytical = d_verts[vert_idx, coord_idx]
@@ -1118,6 +1121,7 @@ def test_polygon_area():
 
 def run_all_tests():
     """Run all primitive tests."""
+    kgs.set_float32(False)
     test_line_intersection()
     test_clip_against_edge()
     test_polygon_area()

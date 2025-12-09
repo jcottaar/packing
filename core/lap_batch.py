@@ -165,16 +165,16 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray) -> tuple[cp.ndarray, cp.ndarr
     batch_size, N, _ = cost_matrices_gpu.shape
     assert N <= 200, f"N={N} exceeds maximum of 200"
     
-    if cost_matrices_gpu.dtype != cp.float32:
-        cost_matrices_gpu = cost_matrices_gpu.astype(cp.float32)
+    if cost_matrices_gpu.dtype != kgs.dtype_cp:
+        cost_matrices_gpu = cost_matrices_gpu.astype(kgs.dtype_cp)
     cost_matrices_gpu = cp.ascontiguousarray(cost_matrices_gpu)
     
     costs_work = cp.empty_like(cost_matrices_gpu)
     row_match = cp.full((batch_size, N), -1, dtype=cp.int32)
     col_match = cp.full((batch_size, N), -1, dtype=cp.int32)
-    u = cp.zeros((batch_size, N), dtype=cp.float32)
-    v = cp.zeros((batch_size, N), dtype=cp.float32)
-    total_costs = cp.empty(batch_size, dtype=cp.float32)
+    u = cp.zeros((batch_size, N), dtype=kgs.dtype_cp)
+    v = cp.zeros((batch_size, N), dtype=kgs.dtype_cp)
+    total_costs = cp.empty(batch_size, dtype=kgs.dtype_cp)
     
     # One block per problem, ONE thread per block
     _hungarian_kernel(

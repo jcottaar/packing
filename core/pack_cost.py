@@ -432,10 +432,15 @@ class CollisionCostSeparation(CollisionCost):
                 for (pb_world, pb_world2) in pieces_b:
                     if self.TEMP_use_kernel:
                         import pack_cuda_primitives_test
+                        raise NotImplementedError("TEMP_use_kernel path not fully integrated.")
                         sep, grad = pack_cuda_primitives_test.sat_separation_with_grad_pose_fwd_bwd(
-                            cp.array(pa_local),
-                            cp.array(pb_world2),
-                            x1, y1, np.cos(th1), np.sin(th1),
+                            cp.array(pa_local, dtype=cp.float64),
+                            cp.array(pb_world2, dtype=cp.float64),
+                            # convert these to float64
+                            cp.array(x1, dtype=cp.float64),
+                            cp.array(y1, dtype=cp.float64),
+                            cp.array(np.cos(th1), dtype=cp.float64),
+                            cp.array(np.sin(th1), dtype=cp.float64),
                             compute_gradients=True
                         )
                         dsep_dx, dsep_dy, dsep_dtheta = grad
@@ -754,8 +759,8 @@ class BoundaryDistanceCost(Cost):
         sin_t = cp.sin(theta)  # (n_trees, 1)
         
         # kgs.tree_vertices is on GPU as CuPy array (n_vertices, 2)
-        vx = kgs.tree_vertices[:, 0]  # (n_vertices,)
-        vy = kgs.tree_vertices[:, 1]  # (n_vertices,)
+        vx = kgs.tree_vertices64[:, 0]  # (n_vertices,)
+        vy = kgs.tree_vertices64[:, 1]  # (n_vertices,)
         
         # Apply rotation and translation: R @ v + t for each tree
         # Rotated vertices: (n_trees, n_vertices) via broadcasting

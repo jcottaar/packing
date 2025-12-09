@@ -57,17 +57,17 @@ class Optimizer(kgs.BaseClass):
             tree_list = kgs.TreeList()
 
         # Pre-allocate gradient arrays once (float32 for efficiency)
-        total_cost = cp.zeros(n_ensembles, dtype=cp.float32)
-        total_grad = cp.zeros_like(xyt, dtype=cp.float32)
-        bound_grad = cp.zeros_like(h, dtype=cp.float32)
+        total_cost = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
+        total_grad = cp.zeros_like(xyt, dtype=kgs.dtype_cp)
+        bound_grad = cp.zeros_like(h, dtype=kgs.dtype_cp)
 
-        t_total0 = np.float32(0.)   
-        t_last_plot = np.float32(-np.inf)
+        t_total0 = kgs.dtype_np(0.)   
+        t_last_plot = kgs.dtype_np(-np.inf)
         
         # For second-order lookahead, store previous gradients
         if self.use_lookahead:
-            prev_grad = cp.zeros_like(xyt, dtype=cp.float32)
-            prev_bound_grad = cp.zeros_like(h, dtype=cp.float32)
+            prev_grad = cp.zeros_like(xyt, dtype=kgs.dtype_cp)
+            prev_bound_grad = cp.zeros_like(h, dtype=kgs.dtype_cp)
             
         for i_iteration in range(self.n_iterations):
             dt = self.dt
@@ -155,15 +155,15 @@ class Dynamics(kgs.BaseClass):
             tree_list = kgs.TreeList()
 
         # Pre-allocate gradient arrays once (float32 for efficiency)
-        total_cost0 = cp.zeros(n_ensembles, dtype=cp.float32)
-        total_grad0 = cp.zeros_like(sol.xyt, dtype=cp.float32)
-        bound_grad0 = cp.zeros_like(sol.h, dtype=cp.float32)
-        total_cost1 = cp.zeros(n_ensembles, dtype=cp.float32)
-        total_grad1 = cp.zeros_like(sol.xyt, dtype=cp.float32)
-        bound_grad1 = cp.zeros_like(sol.h, dtype=cp.float32)
+        total_cost0 = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
+        total_grad0 = cp.zeros_like(sol.xyt, dtype=kgs.dtype_cp)
+        bound_grad0 = cp.zeros_like(sol.h, dtype=kgs.dtype_cp)
+        total_cost1 = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
+        total_grad1 = cp.zeros_like(sol.xyt, dtype=kgs.dtype_cp)
+        bound_grad1 = cp.zeros_like(sol.h, dtype=kgs.dtype_cp)
 
-        t_total0 = np.float32(0.)      
-        t_last_plot = np.float32(-np.inf)  
+        t_total0 = kgs.dtype_np(0.)      
+        t_last_plot = kgs.dtype_np(-np.inf)  
         velocity_xyt = cp.zeros_like(sol.xyt)
         velocity_h = cp.zeros_like(sol.h)
         prev_cost_0_scaling = 0.
@@ -256,10 +256,10 @@ class DynamicsInitialize(Dynamics):
             self.cost1.costs[0] = pack_cost.BoundaryCost(scaling=self.scaling_boundary)
         if self.use_separation_overlap:
             self.cost1.costs[1] = pack_cost.CollisionCostSeparation(scaling=self.scaling_overlap)   
-        t_total = np.float32(0.)
-        dt = np.float32(self.dt)
+        t_total = kgs.dtype_np(0.)
+        dt = kgs.dtype_np(self.dt)
         phase = 'init'
-        t_this_phase = np.float32(0.)        
+        t_this_phase = kgs.dtype_np(0.)        
         rounds_done = 0
         self.dt_list = []
         self.friction_list = []
@@ -365,7 +365,7 @@ class DynamicsAnneal(Dynamics):
         assert tau.shape == (n_ensembles,), f"tau shape {tau.shape} != ({n_ensembles},)"
         
         # Build schedule lists
-        dt = np.float32(self.dt)
+        dt = kgs.dtype_np(self.dt)
         n_steps = int(np.ceil(self.total_time / dt))
         
         self.dt_list = []
@@ -379,10 +379,10 @@ class DynamicsAnneal(Dynamics):
             # Handle tau=0 or very small tau (instant decay to 0)
             temperature = np.where(tau > 1e-8, T_start * np.exp(-t / tau), 0.)
             
-            self.dt_list.append(np.full(n_ensembles, dt, dtype=np.float32))
-            self.friction_list.append(friction.astype(np.float32))
-            self.temperature_list.append(temperature.astype(np.float32))
-            self.cost_0_scaling_list.append(np.zeros(n_ensembles, dtype=np.float32))  # No cost0 scaling
+            self.dt_list.append(np.full(n_ensembles, dt, dtype=kgs.dtype_np))
+            self.friction_list.append(friction.astype(kgs.dtype_np))
+            self.temperature_list.append(temperature.astype(kgs.dtype_np))
+            self.cost_0_scaling_list.append(np.zeros(n_ensembles, dtype=kgs.dtype_np))  # No cost0 scaling
         
         # Convert to cupy arrays with shape (n_ensembles, n_steps)
         self.dt_list = cp.array(np.stack(self.dt_list, axis=1))
@@ -428,9 +428,9 @@ class OptimizerGraph(Optimizer):
         n_trees = xyt.shape[1]
 
         # Pre-allocate gradient arrays once (float32 for efficiency)
-        total_cost = cp.zeros(n_ensembles, dtype=cp.float32)
-        total_grad = cp.zeros_like(xyt, dtype=cp.float32)
-        bound_grad = cp.zeros_like(h, dtype=cp.float32)
+        total_cost = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
+        total_grad = cp.zeros_like(xyt, dtype=kgs.dtype_cp)
+        bound_grad = cp.zeros_like(h, dtype=kgs.dtype_cp)
 
         # warmup cost compute
         pack_cost.skip_allocations = False

@@ -12,7 +12,7 @@ which returns the overlap area between pose-1 and pose-2, computed on the GPU.
 
 All inputs (x1, y1, theta1, x2, y2, theta2) are expected to be **scalars**
 (Python floats or NumPy scalars). The function returns a single CuPy scalar
-(cp.float64).
+(kgs.dtype_cp).
 """
 
 from __future__ import annotations
@@ -51,11 +51,6 @@ import shutil
 
 CONVEX_PIECES: list[Polygon] = kgs.convex_breakdown
 MAX_RADIUS = kgs.tree_max_radius
-
-# Global variable to control floating point precision
-# Set this to 'float32' or 'float64' BEFORE calling any functions
-# Default is 'float64' for maximum precision
-USE_FLOAT32 = True  # Set to True to use float32 instead of float64
 
 
 # ---------------------------------------------------------------------------
@@ -938,7 +933,7 @@ def _build_convex_piece_arrays(polys: list[Polygon]) -> tuple[np.ndarray, np.nda
         # convention used by the clipping kernel (cross >= 0 is "inside").
         poly_ccw = orient(poly, sign=1.0)
 
-        coords = np.asarray(poly_ccw.exterior.coords[:-1], dtype=np.float64)  # drop closing vertex
+        coords = np.asarray(poly_ccw.exterior.coords[:-1], dtype=kgs.dtype_np)  # drop closing vertex
         nverts = coords.shape[0]
 
         if nverts < 3:
@@ -950,7 +945,7 @@ def _build_convex_piece_arrays(polys: list[Polygon]) -> tuple[np.ndarray, np.nda
 
         # Pad to MAX_VERTS_PER_PIECE by repeating the last vertex so the GPU
         # layout is fixed-size for each piece.
-        padded = np.empty((MAX_VERTS_PER_PIECE, 2), dtype=np.float64)
+        padded = np.empty((MAX_VERTS_PER_PIECE, 2), dtype=kgs.dtype_np)
         padded[:nverts, :] = coords
         padded[nverts:, :] = coords[-1]
 
@@ -986,7 +981,7 @@ def _ensure_initialized() -> None:
     _num_pieces = piece_nverts.shape[0]
 
     # Keep host copies for reference (not used by kernels anymore)
-    _piece_xy_d = cp.asarray(piece_xy_flat, dtype=cp.float64)
+    _piece_xy_d = cp.asarray(piece_xy_flat, dtype=kgs.dtype_cp)
     _piece_nverts_d = cp.asarray(piece_nverts, dtype=cp.int32)
 
     # Persist the CUDA source to a stable .cu file inside kgs.temp_dir
@@ -996,7 +991,7 @@ def _ensure_initialized() -> None:
 
     # Perform search-replace to switch between float32 and float64
     cuda_src = _CUDA_SRC
-    if USE_FLOAT32:
+    if kgs.USE_FLOAT32:
         # Replace double with float throughout the CUDA code
         cuda_src = cuda_src.replace('double', 'float')
         # Fix double3 -> float3
@@ -1043,8 +1038,8 @@ def _ensure_initialized() -> None:
 
     # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
     # Convert to appropriate dtype if using float32
-    if USE_FLOAT32:
-        piece_xy_flat_device = piece_xy_flat.astype(np.float32)
+    if kgs.USE_FLOAT32:
+        piece_xy_flat_device = piece_xy_flat.astype(kgs.dtype_np)
     else:
         piece_xy_flat_device = piece_xy_flat
     
@@ -1056,14 +1051,11 @@ def _ensure_initialized() -> None:
 
     # Copy tree vertices to constant memory for boundary distance computation
     # Get tree vertices from kgs.tree_vertices (should be CuPy array on GPU)
-    tree_verts = kgs.tree_vertices.get()  # Convert to NumPy for copying to constant memory
+    tree_verts = kgs.tree_vertices64.get()  # Convert to NumPy for copying to constant memory
     tree_verts_flat = tree_verts.ravel()  # Flatten (n_vertices, 2) to 1D array
     n_tree_verts = tree_verts.shape[0]
     
-    if USE_FLOAT32:
-        tree_verts_flat_device = tree_verts_flat.astype(np.float32)
-    else:
-        tree_verts_flat_device = tree_verts_flat
+    tree_verts_flat_device = tree_verts_flat.astype(kgs.dtype_np)
     
     const_tree_vertices_xy_ptr = _raw_module.get_global('const_tree_vertices_xy')
     const_n_tree_vertices_ptr = _raw_module.get_global('const_n_tree_vertices')
@@ -1108,8 +1100,8 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
         return
     
     if kgs.debugging_mode >= 2:
-        # Determine expected dtype based on USE_FLOAT32
-        expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
+        # Determine expected dtype based on kgs.USE_FLOAT32
+        expected_dtype = kgs.dtype_cp if kgs.USE_FLOAT32 else kgs.dtype_cp
         
         # Assert inputs are 3D arrays
         if xyt1.ndim != 3 or xyt1.shape[2] != 3:
@@ -1212,8 +1204,8 @@ def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray
         return
     
     if kgs.debugging_mode >= 2:
-        # Determine expected dtype based on USE_FLOAT32
-        expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
+        # Determine expected dtype based on kgs.USE_FLOAT32
+        expected_dtype = kgs.dtype_cp if kgs.USE_FLOAT32 else kgs.dtype_cp
         
         # Assert inputs are correct shape
         if xyt.ndim != 3 or xyt.shape[2] != 3:
@@ -1322,8 +1314,8 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: c
         return
     
     if kgs.debugging_mode >= 2:
-        # Determine expected dtype based on USE_FLOAT32
-        expected_dtype = cp.float32 if USE_FLOAT32 else cp.float64
+        # Determine expected dtype based on kgs.USE_FLOAT32
+        expected_dtype = kgs.dtype_cp if kgs.USE_FLOAT32 else kgs.dtype_cp
         
         # Assert inputs are correct shape
         if xyt.ndim != 3 or xyt.shape[2] != 3:

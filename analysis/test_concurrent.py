@@ -164,7 +164,7 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         total_ensembles = num_streams * num_blocks_per_stream
         
         # Create ensemble data lists (each ensemble has n_threads elements)
-        input_list = [cp.random.randn(n_threads, dtype=cp.float32) for _ in range(total_ensembles)]
+        input_list = [cp.random.randn(n_threads, dtype=kgs.dtype_cp) for _ in range(total_ensembles)]
         n_list = [n_threads] * total_ensembles
         
         # Warmup
@@ -185,8 +185,8 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         total_ensembles = num_streams * num_blocks_per_stream
         
         # Create ensemble data lists (each ensemble has n_threads elements)
-        input_list = [cp.random.randn(n_threads, dtype=cp.float32) for _ in range(total_ensembles)]
-        output_list = [cp.zeros(n_threads, dtype=cp.float32) for _ in range(total_ensembles)]
+        input_list = [cp.random.randn(n_threads, dtype=kgs.dtype_cp) for _ in range(total_ensembles)]
+        output_list = [cp.zeros(n_threads, dtype=kgs.dtype_cp) for _ in range(total_ensembles)]
         n_list = [n_threads] * total_ensembles
         
         # Create device arrays of pointers
@@ -219,7 +219,7 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         total_ensembles = num_streams * num_blocks_per_stream
         
         # Determine dtype
-        dtype = cp.float32 if pack_cuda.USE_FLOAT32 else cp.float64
+        dtype = kgs.dtype_cp if pack_cuda.USE_FLOAT32 else kgs.dtype_cp
         
         # Create ensemble data as 3D arrays (n_ensembles, n_trees, 3)
         xyt1 = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))
@@ -242,7 +242,7 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         total_ensembles = num_streams * num_blocks_per_stream
         
         # Determine dtype
-        dtype = cp.float32 if pack_cuda.USE_FLOAT32 else cp.float64
+        dtype = kgs.dtype_cp if pack_cuda.USE_FLOAT32 else kgs.dtype_cp
         
         # Create ensemble data as 3D array (n_ensembles, n_trees, 3)
         xyt = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))
@@ -265,7 +265,7 @@ def run_trial_multi_stream(num_streams, iters_per_stream, num_blocks_per_stream,
         num_trees = n_threads // 4
         total_ensembles = num_streams * num_blocks_per_stream
         
-        dtype = cp.float32 if pack_cuda.USE_FLOAT32 else cp.float64
+        dtype = kgs.dtype_cp if pack_cuda.USE_FLOAT32 else kgs.dtype_cp
         
         # Pre-allocate single 3D array (n_ensembles, n_trees, 3) in C-contiguous layout
         xyt = cp.ascontiguousarray(cp.random.randn(total_ensembles, num_trees, 3).astype(dtype))

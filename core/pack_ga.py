@@ -79,7 +79,7 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     ]
     
     # Initialize result: will store minimum distance across all transformations
-    min_distances = cp.full(N_pop, cp.inf, dtype=cp.float32)
+    min_distances = cp.full(N_pop, cp.inf, dtype=kgs.dtype_cp)
     
     # Reference coordinates (fixed, not transformed)
     ref_x = reference_xyt[:, 0]      # (N_trees,)
@@ -174,11 +174,11 @@ class Population(kgs.BaseClass):
     
     @classmethod
     def create_empty(cls, N_individuals, N_trees):
-        xyt = cp.zeros((N_individuals, N_trees, 3), dtype=cp.float32)
-        h = cp.zeros((N_individuals, 3), dtype=cp.float32)
+        xyt = cp.zeros((N_individuals, N_trees, 3), dtype=kgs.dtype_cp)
+        h = cp.zeros((N_individuals, 3), dtype=kgs.dtype_cp)
         configuration = kgs.SolutionCollectionSquare(xyt=xyt, h=h)
         population = cls(configuration=configuration)
-        population.fitness = np.zeros(N_individuals, dtype=np.float32)
+        population.fitness = np.zeros(N_individuals, dtype=kgs.dtype_np)
         population.lineages = [ None for _ in range(N_individuals) ]
         return population
 
@@ -220,8 +220,8 @@ class InitializerRandomJiggled(Initializer):
         size_setup_scaled = self.size_setup * np.sqrt(N_trees)
         xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=(N_individuals, N_trees, 3))
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, np.pi]]]
-        xyt = cp.array(xyt, dtype=np.float32)        
-        h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=np.float32)
+        xyt = cp.array(xyt, dtype=kgs.dtype_np)        
+        h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)
         sol = kgs.SolutionCollectionSquare(xyt=xyt, h=h)        
         sol = self.jiggler.run_simulation(sol)
         population = Population(configuration=sol)
@@ -266,7 +266,7 @@ class MoveSelector(Move):
     def _do_move(self, population, old_pop, individual_id, mate_id, generator):
         if self._probabilities is None:
             total_weight = sum([m[2] for m in self.moves])
-            self._probabilities = np.array([m[2]/total_weight for m in self.moves], dtype=np.float32)
+            self._probabilities = np.array([m[2]/total_weight for m in self.moves], dtype=kgs.dtype_np)
         chosen_id = generator.choice(len(self.moves), p=self._probabilities)
         move_descriptor = self.moves[chosen_id][0].do_move(population, old_pop, individual_id, mate_id, generator)
         return [self.moves[chosen_id][1], move_descriptor]
@@ -653,7 +653,7 @@ class GA(kgs.BaseClass):
                 self.populations[i_N_trees] = current_pop
                 self.populations[i_N_trees].check_constraints()
                 # Compute diversity matrix
-                diversity_matrix = np.zeros((self.populations[i_N_trees].configuration.N_solutions, self.populations[i_N_trees].configuration.N_solutions), dtype=np.float32)
+                diversity_matrix = np.zeros((self.populations[i_N_trees].configuration.N_solutions, self.populations[i_N_trees].configuration.N_solutions), dtype=kgs.dtype_np)
                 for i in range(self.populations[i_N_trees].configuration.N_solutions):
                     diversity_matrix[:,i] = compute_genetic_diversity(cp.array(self.populations[i_N_trees].configuration.xyt), cp.array(self.populations[i_N_trees].configuration.xyt[i])).get()
                 if self.plot_diversity_matrix:
