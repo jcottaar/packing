@@ -1,0 +1,36 @@
+{
+  // Python interpreter settings
+  "python.defaultInterpreterPath": "/home/jcottaar/miniconda3/envs/rapids-25.10/bin/python",
+  "python.terminal.activateEnvironment": true,
+
+  // Jupyter settings
+  "jupyter.notebookFileRoot": "${workspaceFolder}",
+
+  // File watcher fixes for WSL2
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/*/**": true,
+    "**/__pycache__/**": true,
+    "**/.ipynb_checkpoints/**": true
+  },
+  "remote.WSL.fileWatcher.polling": true,
+  "files.useExperimentalFileWatcher": true,
+
+  // Python analysis settings
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/core"
+  ],
+
+  // Terminal settings - auto-activate conda environment
+  "terminal.integrated.env.linux": {
+    "CONDA_DEFAULT_ENV": "rapids-25.10"
+  },
+  "terminal.integrated.profiles.linux": {
+    "bash": {
+      "path": "bash",
+      "args": ["-c", "source ~/.bashrc && conda activate rapids-25.10 && exec bash"]
+    }
+  },
+  "terminal.integrated.defaultProfile.linux": "bash"
+}
