@@ -38,8 +38,7 @@ class Optimizer(kgs.BaseClass):
                                         pack_cost.CollisionCostOverlappingArea(scaling=1.)])
 
     @typechecked
-    @kgs.profile_each_line
-    def run_simulation(self, sol:kgs.SolutionCollectionSquare):
+    def run_simulation(self, sol:kgs.SolutionCollection):
         # Initial configuration
 
         sol.check_constraints()

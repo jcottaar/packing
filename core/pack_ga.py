@@ -229,7 +229,9 @@ class InitializerRandomJiggled(Initializer):
         else:
             assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
             sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)               
+        sol.snap()
         sol = self.jiggler.run_simulation(sol)
+        sol.snap()
         population = Population(configuration=sol)
         population.lineages = [ [['InitializerRandomJiggled', [np.inf, np.inf, np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
         return population
@@ -597,6 +599,7 @@ class GA(kgs.BaseClass):
             population.lineages[i][-1][1][3]= costs[i]
         for relaxer in self.rough_relaxers:
             sol = relaxer.run_simulation(sol)
+        sol.snap()
         costs = self._score(sol)
         for i in range(len(costs)):
             population.lineages[i][-1][1][4]= costs[i]
@@ -626,7 +629,7 @@ class GA(kgs.BaseClass):
             self.initializer.seed = 200*self.seed + int(N_trees)
             population = self.initializer.initialize_population(self.population_size, N_trees)
             population.check_constraints()
-            self._relax_and_score(population)
+            self._relax_and_score(population)            
             self.populations.append(population)    
 
         self.best_cost_per_generation = np.zeros((self.n_generations, len(self.N_trees_to_do)))

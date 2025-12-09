@@ -144,8 +144,8 @@ class CollisionCost(Cost):
                 other_xyt_all = []
 
                 # Loop over 3x3 grid of periodic cells
-                for dx in [-1, 0, 1]:
-                    for dy in [-1, 0, 1]:
+                for dx in [-2,-1,0,1,2]:
+                    for dy in [-2,-1,0,1,2]:
                         shift = dx * a_vec_np + dy * b_vec_np
 
                         for j in range(n_trees):
@@ -187,8 +187,8 @@ class CollisionCost(Cost):
                 other_xyt_self = []
 
                 # Only include self-interactions (tree i with its periodic images)
-                for dx in [-1, 0, 1]:
-                    for dy in [-1, 0, 1]:
+                for dx in [-2,-1,0,1,2]:
+                    for dy in [-2,-1,0,1,2]:
                         if dx == 0 and dy == 0:
                             continue  # Skip origin
 
@@ -251,8 +251,8 @@ class CollisionCost(Cost):
                     other_trees_tmp = []
                     other_xyt_tmp = []
 
-                    for dx in [-1, 0, 1]:
-                        for dy in [-1, 0, 1]:
+                    for dx in [-2,-1,0,1,2]:
+                        for dy in [-2,-1,0,1,2]:
                             shift_tmp = dx * a_vec_tmp_np + dy * b_vec_tmp_np
                             for j in range(n_trees):
                                 if dx == 0 and dy == 0 and i == j:

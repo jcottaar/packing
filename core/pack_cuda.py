@@ -311,8 +311,8 @@ __device__ double overlap_ref_with_list_piece(
 
         if (use_crystal) {
             // Loop over 3x3 cell: cell_x and cell_y each go from -1 to 1
-            for (int cell_x = -1; cell_x <= 1; ++cell_x) {
-                for (int cell_y = -1; cell_y <= 1; ++cell_y) {
+            for (int cell_x = -2; cell_x <= 2; ++cell_x) {
+                for (int cell_y = -2; cell_y <= 2; ++cell_y) {
                     // Skip self-comparison at original position (0,0)
                     if (is_self && cell_x == 0 && cell_y == 0) {
                         continue;
