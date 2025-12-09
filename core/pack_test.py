@@ -49,7 +49,7 @@ def test_costs():
         for t, b in zip(tree_list, bounds):
             xyt_single = cp.array(t.xyt[None])
             b_single = b[None]
-            sol_single = kgs.SolutionCollection()
+            sol_single = kgs.SolutionCollectionSquare()
             sol_single.xyt = xyt_single
             sol_single.h = b_single
             
@@ -57,9 +57,9 @@ def test_costs():
             all_xyt.append(xyt_single)
             all_bounds.append(b_single)
             
-            # First, check that compute_cost and compute_cost_ref agree (new API: accept SolutionCollection)
+            # First, check that compute_cost and compute_cost_ref agree (new API: accept SolutionCollectionSquare)
             cost_ref, grad_ref, grad_bound_ref = c.compute_cost_ref(sol_single)
-            sol_fast = kgs.SolutionCollection()
+            sol_fast = kgs.SolutionCollectionSquare()
             sol_fast.xyt = cp.array(xyt_single,dtype=cp.float32)
             sol_fast.h = cp.array(b_single,dtype=cp.float32)
             cost_fast, grad_fast, grad_bound_fast = c.compute_cost_allocate(sol_fast)
@@ -80,7 +80,7 @@ def test_costs():
 
             # Now check gradients via finite differences
             def _get_cost(obj, xyt_arr):
-                sol_tmp = kgs.SolutionCollection()
+                sol_tmp = kgs.SolutionCollectionSquare()
                 sol_tmp.xyt = cp.array(xyt_arr[None])
                 sol_tmp.h = b_single
                 return obj.compute_cost_ref(sol_tmp)[0]
@@ -108,7 +108,7 @@ def test_costs():
 
             # Check bound gradient via finite differences
             def _get_cost_bound(obj, bound_arr):
-                sol_tmp = kgs.SolutionCollection()
+                sol_tmp = kgs.SolutionCollectionSquare()
                 sol_tmp.xyt = xyt_single
                 sol_tmp.h = cp.array(bound_arr[None])
                 return obj.compute_cost_ref(sol_tmp)[0]
@@ -139,12 +139,12 @@ def test_costs():
         full_bounds = cp.concatenate(all_bounds[:2], axis=0)
         print(full_bounds)
 
-        # Compute vectorized results using kgs.SolutionCollection
-        full_sol = kgs.SolutionCollection()
+        # Compute vectorized results using kgs.SolutionCollectionSquare
+        full_sol = kgs.SolutionCollectionSquare()
         full_sol.xyt = full_xyt
         full_sol.h = full_bounds
         vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_sol)
-        full_sol_fast = kgs.SolutionCollection()
+        full_sol_fast = kgs.SolutionCollectionSquare()
         full_sol_fast.xyt = cp.array(full_xyt,dtype=cp.float32)
         full_sol_fast.h = cp.array(full_bounds,dtype=cp.float32)
         vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)

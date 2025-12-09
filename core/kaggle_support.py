@@ -203,8 +203,8 @@ from typeguard import typechecked
 scale_factor = 1.
 def create_center_tree():
     """Initializes the Christmas tree"""    
-    shift = -0.5
-
+    shift=0.
+    
     trunk_w = 0.15
     trunk_h = 0.2
     base_w = 0.7
@@ -265,8 +265,8 @@ def create_center_tree():
         dist = Point(x, y).distance(origin)
         if dist > max_radius:
             max_radius = dist
-    return initial_polygon, convex_breakdown, max_radius
-center_tree, convex_breakdown, tree_max_radius = create_center_tree()
+    return initial_polygon, convex_breakdown, max_radius, (cx, cy)
+center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset = create_center_tree()
 center_tree_prepped = prep(center_tree)
 tree_area = center_tree.area
 tree_vertices = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float64)
@@ -333,7 +333,7 @@ class TreeList(BaseClass):
     
 '''Metric'''
 @dataclass
-class SolutionCollection(BaseClass):
+class SolutionCollectionSquare(BaseClass):
     xyt: cp.ndarray = field(default=None)  # (N,3) array of tree positions and angles
     h: cp.ndarray = field(default=None)      # (N,3) array; first column is square size, next two are offset
 
@@ -417,27 +417,3 @@ class SolutionCollection(BaseClass):
         self.xyt[:,:,0] -= x_center[:, cp.newaxis]
         self.xyt[:,:,1] -= y_center[:, cp.newaxis]
         self.h = cp.stack([size, 0*size, 0*size], axis=1)  # (n_solutions, 3)
-# --- Recenter the tree geometry around its true centroid ---
-# The original `create_center_tree` used (0,0) as a fixed centroid.
-# Ensure the center of rotation is the actual centroid by translating
-# `center_tree` and every polygon in `convex_breakdown` so the centroid
-# lies at the origin, then recompute derived globals used elsewhere.
-_orig_centroid = center_tree.centroid
-_cx, _cy = _orig_centroid.x, _orig_centroid.y
-if (_cx, _cy) != (0.0, 0.0):
-    center_tree = affinity.translate(center_tree, xoff=-_cx, yoff=-_cy)
-    convex_breakdown = [affinity.translate(p, xoff=-_cx, yoff=-_cy) for p in convex_breakdown]
-
-# Recompute maximum radius (distance from centroid at origin to any vertex)
-tree_max_radius = 0.0
-_origin = Point(0, 0)
-for x, y in center_tree.exterior.coords[:-1]:
-    d = Point(x, y).distance(_origin)
-    if d > tree_max_radius:
-        tree_max_radius = d
-
-# Update prepared geometry, area, and vertex arrays used in vectorized ops
-center_tree_prepped = prep(center_tree)
-tree_area = center_tree.area
-tree_vertices = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float64)
-tree_vertices32 = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float32)

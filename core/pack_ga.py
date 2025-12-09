@@ -20,7 +20,7 @@ import lap_batch
 print('stop final relax at some point')
 
 
-@kgs.profile_each_line
+
 def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
     """
     Compute the minimum-cost assignment distance between each individual in a population
@@ -146,7 +146,7 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
 
 @dataclass
 class Population(kgs.BaseClass):
-    configuration: kgs.SolutionCollection = field(init=True, default=None)
+    configuration: kgs.SolutionCollectionSquare = field(init=True, default=None)
     fitness: np.ndarray = field(init=True, default=None)
     lineages: list = field(init=True, default=None)
 
@@ -176,7 +176,7 @@ class Population(kgs.BaseClass):
     def create_empty(cls, N_individuals, N_trees):
         xyt = cp.zeros((N_individuals, N_trees, 3), dtype=cp.float32)
         h = cp.zeros((N_individuals, 3), dtype=cp.float32)
-        configuration = kgs.SolutionCollection(xyt=xyt, h=h)
+        configuration = kgs.SolutionCollectionSquare(xyt=xyt, h=h)
         population = cls(configuration=configuration)
         population.fitness = np.zeros(N_individuals, dtype=np.float32)
         population.lineages = [ None for _ in range(N_individuals) ]
@@ -222,7 +222,7 @@ class InitializerRandomJiggled(Initializer):
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, np.pi]]]
         xyt = cp.array(xyt, dtype=np.float32)        
         h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=np.float32)
-        sol = kgs.SolutionCollection(xyt=xyt, h=h)        
+        sol = kgs.SolutionCollectionSquare(xyt=xyt, h=h)        
         sol = self.jiggler.run_simulation(sol)
         population = Population(configuration=sol)
         population.lineages = [ [['InitializerRandomJiggled', [np.inf, np.inf, np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
@@ -569,7 +569,7 @@ class GA(kgs.BaseClass):
         # relaxer.n_iterations *= 2
         # self.relaxers.append(relaxer)
 
-    def _score(self, sol:kgs.SolutionCollection):
+    def _score(self, sol:kgs.SolutionCollectionSquare):
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
             if np.isnan(costs[i]) or costs[i]>1e6:
@@ -608,7 +608,7 @@ class GA(kgs.BaseClass):
                 plt.scatter(x_vals, y_vals)
                 plt.grid(True)
             plt.pause(0.001)
-
+            
     def run(self):
         self.check_constraints()
         generator = np.random.default_rng(seed=self.seed)
