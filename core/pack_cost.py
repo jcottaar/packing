@@ -109,25 +109,301 @@ class CostDummy(Cost):
 
 @dataclass    
 class CollisionCost(Cost):
-    
+
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
         # Compute collision cost for all pairs of trees
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
         n_trees = sol.N_trees
-        tree_list = kgs.TreeList()
-        tree_list.xyt = xyt
-        trees = tree_list.get_trees()
-        total_cost = cp.array(0.0)
-        total_grad = cp.zeros_like(xyt)
-        for i in range(n_trees):
-            this_xyt = xyt[i]            
-            other_xyt = cp.delete(xyt, i, axis=0)
-            this_tree = trees[i]
-            other_trees = [t for t in trees if t is not this_tree]
-            this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees)        
-            total_cost += this_cost/2
-            total_grad[i] += this_grads
-        return total_cost, total_grad, cp.zeros_like(h)
+
+        if sol.periodic:
+            # Periodic BC: use analytical gradients w.r.t. xyt (scatter pattern)
+            # but finite differences for h (lattice parameters)
+            tree_list = kgs.TreeList()
+            tree_list.xyt = xyt
+            trees = tree_list.get_trees()
+
+            # Get crystal axes
+            import copy
+            sol_here = copy.deepcopy(sol)
+            sol_here.h = h[None]
+            crystal_axes = cp.zeros((1, 2, 2), dtype=xyt.dtype)
+            sol_here.get_crystal_axes(crystal_axes)
+            a_vec = crystal_axes[0, 0, :]
+            b_vec = crystal_axes[0, 1, :]
+            a_vec_np = a_vec.get()
+            b_vec_np = b_vec.get()
+
+            total_cost = cp.array(0.0)
+            total_grad = cp.zeros_like(xyt)
+
+            for i in range(n_trees):
+                this_xyt = xyt[i]
+                this_tree = trees[i]
+
+                # Collect all other trees including periodic images (excluding ALL self-interactions)
+                other_trees_all = []
+                other_xyt_all = []
+
+                # Loop over 3x3 grid of periodic cells
+                for dx in [-2,-1,0,1,2]:
+                    for dy in [-2,-1,0,1,2]:
+                        shift = dx * a_vec_np + dy * b_vec_np
+
+                        for j in range(n_trees):
+                            # Skip ALL self-interactions (including periodic)
+                            if i == j:
+                                continue
+
+                            # Translate tree j by the lattice shift
+                            tree_j_shifted = shapely.affinity.translate(trees[j], xoff=shift[0], yoff=shift[1])
+                            other_trees_all.append(tree_j_shifted)
+
+                            # Create shifted pose for xyt2 (needed by CollisionCostSeparation)
+                            xyt_j_shifted = xyt[j].copy()
+                            xyt_j_shifted[0] += cp.array(shift[0])
+                            xyt_j_shifted[1] += cp.array(shift[1])
+                            other_xyt_all.append(xyt_j_shifted)
+
+                # Stack into array for xyt2
+                if len(other_xyt_all) > 0:
+                    other_xyt = cp.stack(other_xyt_all, axis=0)
+                else:
+                    other_xyt = cp.zeros((0, 3), dtype=xyt.dtype)
+
+                # Use subclass's _compute_cost_one_tree_ref (overlap area or separation)
+                # Get both cost and gradient
+                this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees_all)
+                total_cost += this_cost / 2
+                total_grad[i] += this_grads
+
+            # Handle self-interactions separately using finite differences
+            # Build helper function to compute cost with given xyt for a specific tree i
+            def _compute_cost_only_xyt(xyt_in, tree_idx):
+                tree_list_tmp = kgs.TreeList()
+                tree_list_tmp.xyt = xyt_in
+                trees_tmp = tree_list_tmp.get_trees()
+
+                this_tree_tmp = trees_tmp[tree_idx]
+                other_trees_self = []
+                other_xyt_self = []
+
+                # Only include self-interactions (tree i with its periodic images)
+                for dx in [-2,-1,0,1,2]:
+                    for dy in [-2,-1,0,1,2]:
+                        if dx == 0 and dy == 0:
+                            continue  # Skip origin
+
+                        shift = dx * a_vec_np + dy * b_vec_np
+                        tree_i_shifted = shapely.affinity.translate(trees_tmp[tree_idx], xoff=shift[0], yoff=shift[1])
+                        other_trees_self.append(tree_i_shifted)
+
+                        xyt_i_shifted = xyt_in[tree_idx].copy()
+                        xyt_i_shifted[0] += cp.array(shift[0])
+                        xyt_i_shifted[1] += cp.array(shift[1])
+                        other_xyt_self.append(xyt_i_shifted)
+
+                cost_tmp = 0.0
+                if len(other_xyt_self) > 0:
+                    other_xyt_arr = cp.stack(other_xyt_self, axis=0)
+                    this_cost_tmp, X = self._compute_cost_one_tree_ref(xyt_in[tree_idx], other_xyt_arr, this_tree_tmp, other_trees_self)
+                    cost_tmp = this_cost_tmp / 2
+
+                return cp.array(cost_tmp)
+
+            # # Add self-interaction cost to total (sum over all trees)
+            for i in range(n_trees):
+                self_interaction_cost = _compute_cost_only_xyt(xyt, i)
+                total_cost += self_interaction_cost
+
+            # Compute self-interaction gradients using finite differences
+            eps = 1e-6
+            for i in range(n_trees):
+                for j in [2]:  # theta only, x and y are 0
+                    xyt_plus = xyt.copy()
+                    xyt_minus = xyt.copy()
+                    xyt_plus[i, j] += eps
+                    xyt_minus[i, j] -= eps
+
+                    cost_plus = _compute_cost_only_xyt(xyt_plus, i)
+                    cost_minus = _compute_cost_only_xyt(xyt_minus, i)
+
+                    total_grad[i, j] += (cost_plus - cost_minus) / (2.0 * eps)
+
+            # Compute gradients w.r.t. h using finite differences
+            grad_h = cp.zeros_like(h)
+
+            def _compute_cost_only_h(h_in):
+                # Recompute cost with different h
+                tree_list_tmp = kgs.TreeList()
+                tree_list_tmp.xyt = xyt
+                trees_tmp = tree_list_tmp.get_trees()
+
+                crystal_axes_tmp = cp.zeros((1, 2, 2), dtype=xyt.dtype)
+                sol_tmp = type(sol)()
+                sol_tmp.xyt = cp.array([xyt])
+                sol_tmp.h = cp.array([h_in])
+                sol_tmp.get_crystal_axes(crystal_axes_tmp)
+                a_vec_tmp_np = crystal_axes_tmp[0, 0, :].get()
+                b_vec_tmp_np = crystal_axes_tmp[0, 1, :].get()
+
+                cost_tmp = 0.0
+                for i in range(n_trees):
+                    this_tree_tmp = trees_tmp[i]
+                    other_trees_tmp = []
+                    other_xyt_tmp = []
+
+                    for dx in [-2,-1,0,1,2]:
+                        for dy in [-2,-1,0,1,2]:
+                            shift_tmp = dx * a_vec_tmp_np + dy * b_vec_tmp_np
+                            for j in range(n_trees):
+                                if dx == 0 and dy == 0 and i == j:
+                                    continue
+                                tree_j_tmp = shapely.affinity.translate(trees_tmp[j], xoff=shift_tmp[0], yoff=shift_tmp[1])
+                                other_trees_tmp.append(tree_j_tmp)
+                                xyt_j_tmp = xyt[j].copy()
+                                xyt_j_tmp[0] += cp.array(shift_tmp[0])
+                                xyt_j_tmp[1] += cp.array(shift_tmp[1])
+                                other_xyt_tmp.append(xyt_j_tmp)
+
+                    if len(other_xyt_tmp) > 0:
+                        other_xyt_arr = cp.stack(other_xyt_tmp, axis=0)
+                    else:
+                        other_xyt_arr = cp.zeros((0, 3), dtype=xyt.dtype)
+
+                    this_cost_tmp, _ = self._compute_cost_one_tree_ref(xyt[i], other_xyt_arr, this_tree_tmp, other_trees_tmp)
+                    cost_tmp += this_cost_tmp / 2
+
+                return cp.array(cost_tmp)
+
+            for i in range(h.shape[0]):
+                h_plus = h.copy()
+                h_minus = h.copy()
+                h_plus[i] += eps
+                h_minus[i] -= eps
+
+                cost_plus = _compute_cost_only_h(h_plus)
+                cost_minus = _compute_cost_only_h(h_minus)
+
+                grad_h[i] = (cost_plus - cost_minus) / (2.0 * eps)
+
+            return total_cost, total_grad, grad_h
+        else:
+            # Non-periodic: use existing analytical approach
+            tree_list = kgs.TreeList()
+            tree_list.xyt = xyt
+            trees = tree_list.get_trees()
+            total_cost = cp.array(0.0)
+            total_grad = cp.zeros_like(xyt)
+
+            for i in range(n_trees):
+                this_xyt = xyt[i]
+                other_xyt = cp.delete(xyt, i, axis=0)
+                this_tree = trees[i]
+                other_trees = [t for t in trees if t is not this_tree]
+                this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees)
+                total_cost += this_cost/2
+                total_grad[i] += this_grads
+
+            return total_cost, total_grad, cp.zeros_like(h)
+        
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
+        if not sol.periodic:
+            self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
+        else:
+            crystal_axes = sol.get_crystal_axes_allocate().reshape(-1,4)
+            self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient, crystal_axes=crystal_axes)
+
+            # do finite gradient over the above to compute grad_xyt from self interactions, excluded above
+            # use only_self_interactions is true
+            # Compute missing self-interaction costs (kernel does not provide gradients for these).
+            eps = 1e-6
+
+            tmp_grad_dummy = None
+            tmp_bound_dummy = None
+
+            if evaluate_gradient:
+                # Compute theta-gradients for self-interactions by finite differences.
+                # Vectorized over the ensemble: perturb each tree's theta across all solutions.
+                n_trees = sol.N_trees
+                cost_plus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+                cost_minus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+
+                for t in range(n_trees):
+                    xyt_plus = sol.xyt.copy()
+                    xyt_minus = sol.xyt.copy()
+                    xyt_plus[:, t, 2] += eps
+                    xyt_minus[:, t, 2] -= eps
+
+                    sol_plus = type(sol)()
+                    sol_plus.xyt = xyt_plus
+                    sol_plus.h = sol.h
+                    sol_minus = type(sol)()
+                    sol_minus.xyt = xyt_minus
+                    sol_minus.h = sol.h
+
+                    # Only request costs for self-interactions
+                    self._compute_cost_internal(
+                        sol_plus,
+                        cost_plus,
+                        tmp_grad_dummy,
+                        tmp_bound_dummy,
+                        evaluate_gradient=False,
+                        crystal_axes=crystal_axes,
+                        only_self_interactions=True,
+                    )
+                    self._compute_cost_internal(
+                        sol_minus,
+                        cost_minus,
+                        tmp_grad_dummy,
+                        tmp_bound_dummy,
+                        evaluate_gradient=False,
+                        crystal_axes=crystal_axes,
+                        only_self_interactions=True,
+                    )
+
+                    grad_theta = (cost_plus - cost_minus) / (2.0 * eps)
+                    grad_xyt[:, t, 2] += grad_theta/2
+
+            if evaluate_gradient:
+
+                # Now, find gradients w.r.t. h using finite differences
+                # Vectorized finite-difference for grad w.r.t. h (no loop over solutions)
+                eps = 1e-6
+                grad_bound[:] = 0
+                n_bounds = sol.h.shape[1]
+
+                # Temporary arrays for compute_cost_internal outputs
+                tmp_grad_xyt = cp.zeros_like(sol.xyt)
+                tmp_grad_bound = cp.zeros_like(sol.h)
+
+                for k in range(n_bounds):
+                    # build perturbed h arrays for all solutions at once
+                    h_plus = sol.h.copy()
+                    h_minus = sol.h.copy()
+                    h_plus[:, k] += eps
+                    h_minus[:, k] -= eps
+
+                    # prepare solution-like objects to compute crystal axes for each perturbed ensemble
+                    sol_plus = type(sol)()
+                    sol_plus.xyt = sol.xyt
+                    sol_plus.h = h_plus
+                    crystal_axes_plus = sol_plus.get_crystal_axes_allocate().reshape(-1, 4)
+
+                    sol_minus = type(sol)()
+                    sol_minus.xyt = sol.xyt
+                    sol_minus.h = h_minus
+                    crystal_axes_minus = sol_minus.get_crystal_axes_allocate().reshape(-1, 4)
+
+                    # compute costs for all solutions in one call each
+                    cost_plus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+                    cost_minus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+
+                    self._compute_cost_internal(sol_plus, cost_plus, tmp_grad_xyt, tmp_grad_bound, evaluate_gradient=False, crystal_axes=crystal_axes_plus)
+                    self._compute_cost_internal(sol_minus, cost_minus, tmp_grad_xyt, tmp_grad_bound, evaluate_gradient=False, crystal_axes=crystal_axes_minus)
+
+                    # central difference across the ensemble (vectorized)
+                    grad_bound[:, k] = (cost_plus - cost_minus) / (2.0 * eps)
+        
+    
     
 class CollisionCostOverlappingArea(CollisionCost):
     # Collision cost based on overlapping area of two trees
@@ -150,14 +426,14 @@ class CollisionCostOverlappingArea(CollisionCost):
                 grad[j] = cp.array((area_plus - area_minus) / (2 * epsilon))
         return area, grad
 
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
-        # use_separation=False -> run overlap area path
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
+    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient, crystal_axes=None,
+                               only_self_interactions=False):
+        # Use fast CUDA implementation
         if evaluate_gradient:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            grad_bound[:] = 0
         else:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost)
-        grad_bound[:] = 0
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
 
 @dataclass
 class CollisionCostSeparation(CollisionCost):
@@ -501,17 +777,15 @@ class CollisionCostSeparation(CollisionCost):
 
         return cp.array(total_sep_squared), total_grad
     
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
-        # use_separation=True -> run separation (sum-of-squares) path
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
-        if self.use_max or self.TEMP_use_kernel:
-            super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
-        else:
-            if evaluate_gradient:
-                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt)
-            else:
-                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost)
+    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient, crystal_axes=None,
+                               only_self_interactions=False):
+        # Use fast CUDA implementation
+        if evaluate_gradient:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
             grad_bound[:] = 0
+        else:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+        
     
 
 @dataclass
@@ -601,7 +875,7 @@ class BoundaryDistanceCost(Cost):
     # Cost based on squared distance of vertices outside the square boundary
     # Per tree, use only the vertex with the maximum distance
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt,h):
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
+        assert not sol.periodic
         # xyt is (n_trees, 3), bound is (1,); compute squared distance for each vertex outside square
         b = float(h[0].get().item())
         half = b / 2.0
@@ -726,7 +1000,7 @@ class BoundaryDistanceCost(Cost):
         return cp.array(total_cost), grad, grad_bound
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
+        assert not sol.periodic
         if self.use_kernel:
             if evaluate_gradient:
                 pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_bound)

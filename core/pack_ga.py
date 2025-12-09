@@ -9,7 +9,7 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 import shapely
 import pack_cost
-import pack_vis
+import pack_vis_sol
 import pack_dynamics
 import copy
 import matplotlib.pyplot as plt
@@ -146,7 +146,7 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
 
 @dataclass
 class Population(kgs.BaseClass):
-    configuration: kgs.SolutionCollectionSquare = field(init=True, default=None)
+    configuration: kgs.SolutionCollection = field(init=True, default=None)
     fitness: np.ndarray = field(init=True, default=None)
     lineages: list = field(init=True, default=None)
 
@@ -172,12 +172,11 @@ class Population(kgs.BaseClass):
         self.fitness = self.fitness[inds]
         self.lineages = [self.lineages[i] for i in inds]
     
-    @classmethod
-    def create_empty(cls, N_individuals, N_trees):
+    def create_empty(self, N_individuals, N_trees):
         xyt = cp.zeros((N_individuals, N_trees, 3), dtype=kgs.dtype_cp)
         h = cp.zeros((N_individuals, 3), dtype=kgs.dtype_cp)
-        configuration = kgs.SolutionCollectionSquare(xyt=xyt, h=h)
-        population = cls(configuration=configuration)
+        configuration = type(self.configuration)(xyt=xyt, h=h)
+        population = type(self)(configuration=configuration)
         population.fitness = np.zeros(N_individuals, dtype=kgs.dtype_np)
         population.lineages = [ None for _ in range(N_individuals) ]
         return population
@@ -215,15 +214,24 @@ class Initializer(kgs.BaseClass):
 class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
+    base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
 
     def _initialize_population(self, N_individuals, N_trees):
+        self.check_constraints()
         size_setup_scaled = self.size_setup * np.sqrt(N_trees)
         xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=(N_individuals, N_trees, 3))
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, np.pi]]]
-        xyt = cp.array(xyt, dtype=kgs.dtype_np)        
-        h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)
-        sol = kgs.SolutionCollectionSquare(xyt=xyt, h=h)        
+        xyt = cp.array(xyt, dtype=kgs.dtype_np)    
+        sol = copy.deepcopy(self.base_solution)
+        sol.xyt = xyt    
+        if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
+            sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
+        else:
+            assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
+            sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)               
+        sol.snap()
         sol = self.jiggler.run_simulation(sol)
+        sol.snap()
         population = Population(configuration=sol)
         population.lineages = [ [['InitializerRandomJiggled', [np.inf, np.inf, np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
         return population
@@ -257,6 +265,10 @@ class Move(kgs.BaseClass):
         #     plt.pause(0.001)
         #     raise AssertionError(f"Two trees in individual {individual_id} are closer than 1e-6 (min_dist={min_dist})")
         return move_descriptor    
+    
+class NoOp(Move):
+    def _do_move(self, population, old_pop, individual_id, mate_id, generator):
+        return None
 
 @dataclass  
 class MoveSelector(Move):
@@ -569,13 +581,11 @@ class GA(kgs.BaseClass):
         # relaxer.n_iterations *= 2
         # self.relaxers.append(relaxer)
 
-    def _score(self, sol:kgs.SolutionCollectionSquare):
+    def _score(self, sol:kgs.SolutionCollection):
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
             if np.isnan(costs[i]) or costs[i]>1e6:
-                tree_list = kgs.TreeList()
-                tree_list.xyt = sol.xyt[i].get()
-                pack_vis.visualize_tree_list(tree_list)
+                pack_vis_sol.pack_vis_sol(sol, solution_idx=i)
                 plt.title(f'Invalid solution with cost {costs[i]}')
                 raise AssertionError(f'Invalid solution with cost {costs[i]}')
         return costs
@@ -589,6 +599,7 @@ class GA(kgs.BaseClass):
             population.lineages[i][-1][1][3]= costs[i]
         for relaxer in self.rough_relaxers:
             sol = relaxer.run_simulation(sol)
+        sol.snap()
         costs = self._score(sol)
         for i in range(len(costs)):
             population.lineages[i][-1][1][4]= costs[i]
@@ -615,10 +626,10 @@ class GA(kgs.BaseClass):
 
         # Initialize populations
         for N_trees in self.N_trees_to_do:    
-            self.initializer.seed = 200*self.seed + N_trees        
+            self.initializer.seed = 200*self.seed + int(N_trees)
             population = self.initializer.initialize_population(self.population_size, N_trees)
             population.check_constraints()
-            self._relax_and_score(population)
+            self._relax_and_score(population)            
             self.populations.append(population)    
 
         self.best_cost_per_generation = np.zeros((self.n_generations, len(self.N_trees_to_do)))
@@ -628,11 +639,13 @@ class GA(kgs.BaseClass):
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
                 best_id = np.argmin(self.populations[i_N_trees].fitness)                   
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
-                self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]                
+                best_pop = copy.deepcopy(self.populations[i_N_trees])
+                best_pop.select_ids([best_id])
+                print(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(best_pop.configuration)[0].get(), 
+                      pack_cost.CollisionCostSeparation().compute_cost_allocate(best_pop.configuration)[0].get())
+                self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]
                 if i_gen==0 or self.best_cost_per_generation[i_gen, i_N_trees]<self.best_cost_per_generation[i_gen-1, i_N_trees]:
-                    tree_list = kgs.TreeList()
-                    tree_list.xyt = self.populations[i_N_trees].configuration.xyt[best_id].get()
-                    pack_vis.visualize_tree_list(tree_list)
+                    pack_vis_sol.pack_vis_sol(self.populations[i_N_trees].configuration, solution_idx=best_id)
                     plt.title(f'Generation: {i_gen}, cost: {self.best_cost_per_generation[i_gen, i_N_trees]}')
                     plt.pause(0.001)
                 
@@ -669,7 +682,7 @@ class GA(kgs.BaseClass):
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
                 old_pop = self.populations[i_N_trees]
                 parent_size = old_pop.configuration.N_solutions
-                new_pop = Population.create_empty(self.population_size-parent_size, N_trees)
+                new_pop = old_pop.create_empty(self.population_size-parent_size, N_trees)
 
                 for i_ind in range(new_pop.configuration.N_solutions):
                     # Pick a random parent

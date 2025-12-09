@@ -73,6 +73,12 @@ extern "C" {
 #define MAX_INTERSECTION_VERTS 8
 #define MAX_RADIUS """ + str(MAX_RADIUS) + r"""
 
+// Struct to hold crystal axes (axis A and axis B, each with x and y components)
+struct CrystalAxes {
+    double ax, ay;  // Axis A vector
+    double bx, by;  // Axis B vector
+};
+
 // Constant memory for polygon vertices - cached on-chip, broadcast to all threads
 __constant__ double const_piece_xy[MAX_PIECES * MAX_VERTS_PER_PIECE * 2];
 __constant__ int const_piece_nverts[MAX_PIECES];
@@ -129,6 +135,114 @@ __device__ __forceinline__ void compute_tree_poly_and_aabb(
 // Compute overlap for a single piece (pi) of the reference tree against all pieces of trees in the list.
 // This enables parallelization across the 4 pieces of the reference tree.
 // Optionally computes gradients w.r.t. the reference pose when compute_grads is non-zero.
+// Process overlap/separation between one ref piece and all pieces of one other tree
+__device__ double process_tree_pair_piece(
+    const double3 ref,
+    const double3 other,
+    const int pi,
+    const d2* __restrict__ ref_poly,
+    const int n1,
+    const d2* __restrict__ ref_local_piece,
+    const double ref_aabb_min_x,
+    const double ref_aabb_max_x,
+    const double ref_aabb_min_y,
+    const double ref_aabb_max_y,
+    const double c_ref,
+    const double s_ref,
+    const int use_separation,
+    const int compute_grads,
+    double3* d_ref_local)  // output: accumulated gradient (modified in-place)
+{
+    // Early exit: check if tree centers are too far apart
+    double dx = other.x - ref.x;
+    double dy = other.y - ref.y;
+    double dist_sq = dx*dx + dy*dy;
+    double max_overlap_dist = 2.0 * MAX_RADIUS;
+
+    if (dist_sq > max_overlap_dist * max_overlap_dist) {
+        return 0.0;  // Trees too far apart to overlap
+    }
+
+    double total = 0.0;
+
+    // Process only the assigned piece (pi) against all pieces of other tree
+    for (int pj = 0; pj < MAX_PIECES; ++pj) {
+        int n2 = const_piece_nverts[pj];
+
+        // Compute only this piece of the other tree
+        d2 other_poly[MAX_VERTS_PER_PIECE];
+        double other_aabb_min_x;
+        double other_aabb_max_x;
+        double other_aabb_min_y;
+        double other_aabb_max_y;
+
+        compute_tree_poly_and_aabb(other, pj, other_poly, other_aabb_min_x, other_aabb_max_x,
+                                    other_aabb_min_y, other_aabb_max_y);
+
+        // AABB overlap test - early exit if no overlap
+        if (ref_aabb_max_x < other_aabb_min_x || other_aabb_max_x < ref_aabb_min_x ||
+            ref_aabb_max_y < other_aabb_min_y || other_aabb_max_y < ref_aabb_min_y) {
+            continue;  // No AABB overlap, skip expensive intersection
+        }
+
+        if (!use_separation) {
+            // Pass NULL for gradient outputs when not computing gradients
+            d2 d_ref_poly[MAX_VERTS_PER_PIECE];
+            d2 d_other_poly[MAX_VERTS_PER_PIECE];
+
+            double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
+                                                    compute_grads ? d_ref_poly : NULL,
+                                                    compute_grads ? d_other_poly : NULL);
+            total += area;
+
+            if (compute_grads) {
+                // Backward through transform for ref piece
+                double3 d_ref_pose_piece;
+                backward_transform_vertices(
+                    ref_local_piece, n1,
+                    d_ref_poly,
+                    c_ref, s_ref,
+                    &d_ref_pose_piece);
+
+                // Accumulate into local gradient
+                d_ref_local->x += d_ref_pose_piece.x;
+                d_ref_local->y += d_ref_pose_piece.y;
+                d_ref_local->z += d_ref_pose_piece.z;
+            }
+        } else {
+            // Separation-based primitive
+            double sep = 0.0;
+            double dsep_dx = 0.0;
+            double dsep_dy = 0.0;
+            double dsep_dtheta = 0.0;
+
+            // Pass NULL for gradient outputs when not computing gradients
+            sat_separation_with_grad_pose(
+                ref_local_piece, n1,
+                other_poly, n2,
+                ref.x, ref.y, c_ref, s_ref,
+                &sep,
+                compute_grads ? &dsep_dx : NULL,
+                compute_grads ? &dsep_dy : NULL,
+                compute_grads ? &dsep_dtheta : NULL);
+
+            // Only positive penetration contributes
+            if (sep > 0.0) {
+                total += sep * sep;
+
+                if (compute_grads) {
+                    // Gradient of sep^2: 2 * sep * dsep/dparam
+                    d_ref_local->x += 2.0 * sep * dsep_dx;
+                    d_ref_local->y += 2.0 * sep * dsep_dy;
+                    d_ref_local->z += 2.0 * sep * dsep_dtheta;
+                }
+            }
+        }
+    }
+
+    return total;
+}
+
 __device__ double overlap_ref_with_list_piece(
     const double3 ref,
     const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
@@ -137,26 +251,29 @@ __device__ double overlap_ref_with_list_piece(
     double3* d_ref,        // output: gradient w.r.t. ref pose (accumulated), can be NULL
     const int use_separation, // if non-zero, compute separation-based cost (sum of sep^2)
     const int skip_index,  // index to skip (self-collision), use -1 to skip none
-    const int compute_grads) // if non-zero, compute gradients
+    const int compute_grads, // if non-zero, compute gradients
+    const int use_crystal, // if non-zero, loop over 3x3 cell for each tree
+    const CrystalAxes crystal_axes, // crystal axes (only used if use_crystal is non-zero)
+    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
 {
     double sum = 0.0;
-    
+
     // Compute transform coefficients for ref tree
     double c_ref = 0.0, s_ref = 0.0;
     sincos(ref.z, &s_ref, &c_ref);
-    
+
     // Compute only the assigned ref piece
     d2 ref_poly[MAX_VERTS_PER_PIECE];
     double ref_aabb_min_x;
     double ref_aabb_max_x;
     double ref_aabb_min_y;
     double ref_aabb_max_y;
-    
+
     compute_tree_poly_and_aabb(ref, pi, ref_poly, ref_aabb_min_x, ref_aabb_max_x,
                                 ref_aabb_min_y, ref_aabb_max_y);
-    
+
     int n1 = const_piece_nverts[pi];
-    
+
     // Load local piece vertices from constant memory (needed for gradients or separation)
     d2 ref_local_piece[MAX_VERTS_PER_PIECE];
     if (compute_grads || use_separation) {
@@ -167,7 +284,7 @@ __device__ double overlap_ref_with_list_piece(
             ref_local_piece[v].y = const_piece_xy[base + 1];
         }
     }
-    
+
     // Accumulate gradients locally (only if computing gradients)
     double3 d_ref_local;
     if (compute_grads) {
@@ -175,110 +292,74 @@ __device__ double overlap_ref_with_list_piece(
         d_ref_local.y = 0.0;
         d_ref_local.z = 0.0;
     }
-    
+
     // Loop over all trees in the list
     for (int i = 0; i < n; ++i) {
-        // Skip self-collision by index
-        if (i == skip_index) {
+        // Read pose with strided access: [i, component]
+        double3 other_base;
+        other_base.x = xyt_Nx3[i * 3 + 0];
+        other_base.y = xyt_Nx3[i * 3 + 1];
+        other_base.z = xyt_Nx3[i * 3 + 2];
+
+        // Check if this is a self-comparison
+        int is_self = (i == skip_index) ? 1 : 0;
+
+        // If only_self_interactions is set, skip non-self interactions
+        if (only_self_interactions && !is_self) {
             continue;
         }
 
-        // Read pose with strided access: [i, component]
-        double3 other;
-        other.x = xyt_Nx3[i * 3 + 0];
-        other.y = xyt_Nx3[i * 3 + 1];
-        other.z = xyt_Nx3[i * 3 + 2];
-
-        // Early exit: check if tree centers are too far apart
-        double dx = other.x - ref.x;
-        double dy = other.y - ref.y;
-        double dist_sq = dx*dx + dy*dy;
-        double max_overlap_dist = 2.0 * MAX_RADIUS;
-        
-        if (dist_sq > max_overlap_dist * max_overlap_dist) {
-            continue;  // Trees too far apart to overlap
-        }
-        
-        double total = 0.0;
-
-        // Process only the assigned piece (pi) against all pieces of other tree
-        for (int pj = 0; pj < MAX_PIECES; ++pj) {
-            int n2 = const_piece_nverts[pj];
-            
-            // Compute only this piece of the other tree
-            d2 other_poly[MAX_VERTS_PER_PIECE];
-            double other_aabb_min_x;
-            double other_aabb_max_x;
-            double other_aabb_min_y;
-            double other_aabb_max_y;
-            
-            compute_tree_poly_and_aabb(other, pj, other_poly, other_aabb_min_x, other_aabb_max_x,
-                                        other_aabb_min_y, other_aabb_max_y);
-
-            // AABB overlap test - early exit if no overlap
-            if (ref_aabb_max_x < other_aabb_min_x || other_aabb_max_x < ref_aabb_min_x ||
-                ref_aabb_max_y < other_aabb_min_y || other_aabb_max_y < ref_aabb_min_y) {
-                continue;  // No AABB overlap, skip expensive intersection
-            }
-
-            if (!use_separation) {
-                // Pass NULL for gradient outputs when not computing gradients
-                d2 d_ref_poly[MAX_VERTS_PER_PIECE];
-                d2 d_other_poly[MAX_VERTS_PER_PIECE];
-
-                double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
-                                                        compute_grads ? d_ref_poly : NULL,
-                                                        compute_grads ? d_other_poly : NULL);
-                total += area;
-
-                if (compute_grads) {
-                    // Backward through transform for ref piece
-                    double3 d_ref_pose_piece;
-                    backward_transform_vertices(
-                        ref_local_piece, n1,
-                        d_ref_poly,
-                        c_ref, s_ref,
-                        &d_ref_pose_piece);
-
-                    // Accumulate into local gradient
-                    d_ref_local.x += d_ref_pose_piece.x;
-                    d_ref_local.y += d_ref_pose_piece.y;
-                    d_ref_local.z += d_ref_pose_piece.z;
-                }
-            } else {
-                // Separation-based primitive
-                double sep = 0.0;
-                double dsep_dx = 0.0;
-                double dsep_dy = 0.0;
-                double dsep_dtheta = 0.0;
-
-                // Pass NULL for gradient outputs when not computing gradients
-                sat_separation_with_grad_pose(
-                    ref_local_piece, n1,
-                    other_poly, n2,
-                    ref.x, ref.y, c_ref, s_ref,
-                    &sep,
-                    compute_grads ? &dsep_dx : NULL,
-                    compute_grads ? &dsep_dy : NULL,
-                    compute_grads ? &dsep_dtheta : NULL);
-
-                // Only positive penetration contributes
-                if (sep > 0.0) {
-                    total += sep * sep;
-
-                    if (compute_grads) {
-                        // Gradient of sep^2: 2 * sep * dsep/dparam
-                        d_ref_local.x += 2.0 * sep * dsep_dx;
-                        d_ref_local.y += 2.0 * sep * dsep_dy;
-                        d_ref_local.z += 2.0 * sep * dsep_dtheta;
+        if (use_crystal) {
+            // Loop over 3x3 cell: cell_x and cell_y each go from -1 to 1
+            for (int cell_x = -2; cell_x <= 2; ++cell_x) {
+                for (int cell_y = -2; cell_y <= 2; ++cell_y) {
+                    // Skip self-comparison at original position (0,0)
+                    if (is_self && cell_x == 0 && cell_y == 0) {
+                        continue;
                     }
+
+                    // Compute shifted position: other = other_base + cell_x * axis_A + cell_y * axis_B
+                    double3 other;
+                    other.x = other_base.x + cell_x * crystal_axes.ax + cell_y * crystal_axes.bx;
+                    other.y = other_base.y + cell_x * crystal_axes.ay + cell_y * crystal_axes.by;
+                    other.z = other_base.z;
+
+                    // For self-comparisons with periodic copies, don't accumulate gradients
+                    int compute_grads_here = (is_self) ? 0 : compute_grads;
+
+                    // Process this tree pair using the extracted subfunction
+                    double total = process_tree_pair_piece(
+                        ref, other, pi,
+                        ref_poly, n1, ref_local_piece,
+                        ref_aabb_min_x, ref_aabb_max_x,
+                        ref_aabb_min_y, ref_aabb_max_y,
+                        c_ref, s_ref,
+                        use_separation, compute_grads_here,
+                        &d_ref_local);
+
+                    sum += total;
                 }
             }
+        } else {
+            // No crystal: skip self-comparison entirely
+            if (is_self) {
+                continue;
+            }
+
+            // Process the original tree
+            double total = process_tree_pair_piece(
+                ref, other_base, pi,
+                ref_poly, n1, ref_local_piece,
+                ref_aabb_min_x, ref_aabb_max_x,
+                ref_aabb_min_y, ref_aabb_max_y,
+                c_ref, s_ref,
+                use_separation, compute_grads,
+                &d_ref_local);
+
+            sum += total;
         }
-        
-        sum += total;
     }
-    
+
     // Atomically accumulate the local gradient into the output (only if computing gradients)
     if (compute_grads && d_ref != NULL) {
         atomicAdd(&d_ref->x, d_ref_local.x);
@@ -286,26 +367,6 @@ __device__ double overlap_ref_with_list_piece(
         atomicAdd(&d_ref->z, d_ref_local.z);
     }
 
-    return sum;
-}
-
-// Compute sum of overlap areas between a reference tree `ref` and a list
-// of other trees provided as a flattened Nx3 array.
-// Always skips comparing ref with itself using skip_index.
-// Note: This function is currently unused but kept for potential future use.
-// It would need to be updated to handle gradients if used.
-__device__ double overlap_ref_with_list(
-    const double3 ref,
-    const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
-    const int n,
-    const int skip_index)  // index to skip (self-collision), use -1 to skip none
-{
-    double sum = 0.0;
-    
-    // Sum across all 4 pieces (no gradients needed)
-    for (int pi = 0; pi < MAX_PIECES; ++pi) {
-        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, NULL, 0, skip_index, 0);
-    }
     return sum;
 }
 
@@ -499,7 +560,10 @@ __device__ void overlap_list_total(
     const int n2,
     double* __restrict__ out_total,
     double* __restrict__ out_grads, // if non-NULL, write gradients to out_grads[n1*3]
-    const int use_separation) // non-zero -> use separation sum-of-squares path
+    const int use_separation, // non-zero -> use separation sum-of-squares path
+    const int use_crystal, // if non-zero, loop over 3x3 cell for each tree
+    const CrystalAxes crystal_axes, // crystal axes (only used if use_crystal is non-zero)
+    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
 {
     // Thread organization: 4 threads per tree
     // tid = tree_idx * 4 + piece_idx
@@ -525,16 +589,22 @@ __device__ void overlap_list_total(
             out_grads[tree_idx * 3 + 1] = 0.0;
             out_grads[tree_idx * 3 + 2] = 0.0;
         }
-        
+
         // Ensure initialization is complete before all threads start accumulating
         __syncthreads();
 
         // Each thread computes overlap (or separation) for one piece of the reference tree
         double3* d_ref_output = compute_grads ? (double3*)(&out_grads[tree_idx * 3]) : NULL;
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx, compute_grads);
+        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx, compute_grads, use_crystal, crystal_axes, only_self_interactions);
 
         // Atomic add for overlap sum
-        atomicAdd(out_total, local_sum / 2.0);
+        // If only_self_interactions, don't divide by 2 since we're not double-counting
+        // (each tree only computes its self-interaction once)
+        if (only_self_interactions) {
+            atomicAdd(out_total, local_sum);
+        } else {
+            atomicAdd(out_total, local_sum / 2.0);
+        }
     }
 }
 
@@ -551,6 +621,9 @@ __device__ void overlap_list_total(
 //   out_totals: array of output totals, one per ensemble
 //   out_grads_base: base pointer to gradient output [num_ensembles, n_trees, 3] (can be NULL)
 //   num_ensembles: number of ensembles to process
+//   use_separation: if non-zero, use separation-based cost
+//   use_crystal: if non-zero, loop over 3x3 cell for each tree
+//   crystal_axes_base: base pointer to crystal axes [num_ensembles, 4] (NULL if use_crystal is 0)
 __global__ void multi_overlap_list_total(
     const double* __restrict__ xyt1_base,      // base pointer to [num_ensembles, n_trees, 3]
     const double* __restrict__ xyt2_base,      // base pointer to [num_ensembles, n_trees, 3]
@@ -558,27 +631,46 @@ __global__ void multi_overlap_list_total(
     double* __restrict__ out_totals,           // [num_ensembles]
     double* __restrict__ out_grads_base,       // base pointer to [num_ensembles, n_trees, 3] (NULL allowed)
     const int num_ensembles,
-    const int use_separation)
+    const int use_separation,
+    const int use_crystal,
+    const double* __restrict__ crystal_axes_base, // base pointer to [num_ensembles, 4] (NULL if use_crystal is 0)
+    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
 {
     int ensemble_id = blockIdx.x;
-    
+
     if (ensemble_id >= num_ensembles) {
         return;  // Extra blocks beyond num_ensembles
     }
-    
+
     // Calculate offset for this ensemble's data using strided access
     // Layout: [num_ensembles, n_trees, 3]
     // Stride: each ensemble is n_trees*3 elements apart
     int ensemble_stride = n_trees * 3;
     const double* xyt1_ensemble = xyt1_base + ensemble_id * ensemble_stride;
     const double* xyt2_ensemble = xyt2_base + ensemble_id * ensemble_stride;
-    
+
+    // Load crystal axes for this ensemble
+    CrystalAxes crystal_axes;
+    if (use_crystal && crystal_axes_base != NULL) {
+        const double* axes = crystal_axes_base + ensemble_id * 4;
+        crystal_axes.ax = axes[0];
+        crystal_axes.ay = axes[1];
+        crystal_axes.bx = axes[2];
+        crystal_axes.by = axes[3];
+    } else {
+        // Initialize to zero (not used when use_crystal is 0)
+        crystal_axes.ax = 0.0;
+        crystal_axes.ay = 0.0;
+        crystal_axes.bx = 0.0;
+        crystal_axes.by = 0.0;
+    }
+
     // Parameters for overlap_list_total
     int n1 = n_trees;
     int n2 = n_trees;
     double* out_total = &out_totals[ensemble_id];
     double* out_grads = (out_grads_base != NULL) ? (out_grads_base + ensemble_id * ensemble_stride) : NULL;
-    
+
     // Initialize output
     if (threadIdx.x == 0) {
         *out_total = 0.0;
@@ -592,9 +684,9 @@ __global__ void multi_overlap_list_total(
         }
     }
     __syncthreads();
-    
+
     // Call overlap_list_total - it now reads (n_trees, 3) format directly
-    overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads, use_separation);
+    overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads, use_separation, use_crystal, crystal_axes, only_self_interactions);
 }
 
 // Multi-ensemble kernel for boundary: one block per ensemble
@@ -1071,9 +1163,9 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: bool, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, stream: cp.cuda.Stream | None = None):
+def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: bool, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, crystal_axes: cp.ndarray | None = None, only_self_interactions: bool = False, stream: cp.cuda.Stream | None = None):
     """Compute total overlap sum for multiple ensembles in parallel.
-    
+
     Parameters
     ----------
     xyt1 : cp.ndarray, shape (n_ensembles, n_trees, 3)
@@ -1087,53 +1179,72 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
         Preallocated array for output costs. Must be provided.
     out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
         Preallocated array for gradients. If None, gradients are not computed.
+    crystal_axes : cp.ndarray, shape (n_ensembles, 4), optional
+        Crystal axes for periodic boundary conditions. Each row contains [ax, ay, bx, by]
+        where (ax, ay) is axis A and (bx, by) is axis B. If provided, each tree will be
+        compared against a 3x3 grid of periodic images. If None, no periodic boundaries.
+    only_self_interactions : bool, optional
+        If True, only compute cost/gradients for self-interactions (tree with its own
+        periodic copies). Returns 0 if crystal_axes is None. Default is False.
+        Note: Gradients are NOT computed for self-interactions regardless of this flag.
     stream : cp.cuda.Stream, optional
         CUDA stream for kernel execution. If None, uses default stream.
     """
     _ensure_initialized()
-    
+
     num_ensembles = xyt1.shape[0]
     n_trees = xyt1.shape[1]
     dtype = xyt1.dtype
-    
+
     if num_ensembles == 0:
         return
-    
+
     if kgs.debugging_mode >= 2:
         # Determine expected dtype based on kgs.USE_FLOAT32
         expected_dtype = kgs.dtype_cp if kgs.USE_FLOAT32 else kgs.dtype_cp
-        
+
         # Assert inputs are 3D arrays
         if xyt1.ndim != 3 or xyt1.shape[2] != 3:
             raise ValueError(f"xyt1 must be shape (n_ensembles, n_trees, 3), got {xyt1.shape}")
         if xyt2.ndim != 3 or xyt2.shape[2] != 3:
             raise ValueError(f"xyt2 must be shape (n_ensembles, n_trees, 3), got {xyt2.shape}")
-        
+
         # Assert correct dtype
         if xyt1.dtype != expected_dtype:
             raise ValueError(f"xyt1 must have dtype {expected_dtype}, got {xyt1.dtype}")
         if xyt2.dtype != expected_dtype:
             raise ValueError(f"xyt2 must have dtype {expected_dtype}, got {xyt2.dtype}")
-        
+
         # Assert they are contiguous
         if not xyt1.flags.c_contiguous:
             raise ValueError("xyt1 must be C-contiguous")
         if not xyt2.flags.c_contiguous:
             raise ValueError("xyt2 must be C-contiguous")
-        
+
         # Validate matching dimensions
         if xyt1.shape[0] != xyt2.shape[0]:
             raise ValueError(f"xyt1 and xyt2 must have same number of ensembles: {xyt1.shape[0]} vs {xyt2.shape[0]}")
         if xyt1.shape[1] != xyt2.shape[1]:
             raise ValueError(f"xyt1 and xyt2 must have same number of trees: {xyt1.shape[1]} vs {xyt2.shape[1]}")
-        
+
         # Assert outputs are provided
         if out_cost is None:
             raise ValueError("out_cost must be provided")
         # Validate use_separation flag
         if not isinstance(use_separation, (bool, np.bool_)):
             raise ValueError("use_separation must be a boolean")
-        
+
+        # Validate crystal_axes if provided
+        if crystal_axes is not None:
+            if crystal_axes.ndim != 2 or crystal_axes.shape[1] != 4:
+                raise ValueError(f"crystal_axes must be shape (n_ensembles, 4), got {crystal_axes.shape}")
+            if crystal_axes.shape[0] != num_ensembles:
+                raise ValueError(f"crystal_axes must have {num_ensembles} rows, got {crystal_axes.shape[0]}")
+            if crystal_axes.dtype != dtype:
+                raise ValueError(f"crystal_axes must have dtype {dtype}, got {crystal_axes.dtype}")
+            if not crystal_axes.flags.c_contiguous:
+                raise ValueError("crystal_axes must be C-contiguous")
+
         # Validate output array shapes and types
         if out_cost.shape != (num_ensembles,):
             raise ValueError(f"out_cost must have shape ({num_ensembles},), got {out_cost.shape}")
@@ -1153,14 +1264,16 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
     out_cost[:] = 0
     if out_grads is not None:
         out_grads[:] = 0
-    
+
     # Launch kernel: one block per ensemble, n_trees * 4 threads per block
     blocks = num_ensembles
     threads_per_block = n_trees * 4
-    
-    # Pass null pointer if out_grads is None
+
+    # Pass null pointers for optional parameters
     out_grads_ptr = out_grads if out_grads is not None else np.intp(0)
-    
+    use_crystal = 1 if crystal_axes is not None else 0
+    crystal_axes_ptr = crystal_axes if crystal_axes is not None else np.intp(0)
+
     _multi_overlap_list_total_kernel(
         (blocks,),
         (threads_per_block,),
@@ -1172,6 +1285,9 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
             out_grads_ptr,
             np.int32(num_ensembles),
             np.int32(1 if use_separation else 0),
+            np.int32(use_crystal),
+            crystal_axes_ptr,
+            np.int32(1 if only_self_interactions else 0),
         ),
         stream=stream,
     )
