@@ -333,9 +333,16 @@ class TreeList(BaseClass):
     
 '''Metric'''
 @dataclass
-class SolutionCollectionSquare(BaseClass):
+class SolutionCollection(BaseClass):
     xyt: cp.ndarray = field(default=None)  # (N,3) array of tree positions and angles
-    h: cp.ndarray = field(default=None)      # (N,3) array; first column is square size, next two are offset
+    h: cp.ndarray = field(default=None)      # (N,_N_h_DOF) array
+
+    _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
+
+    def _check_constraints(self):
+        if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
+            raise ValueError("Solution: xyt must be an array with shape (N_solutions, N_trees, 3)")
+        assert self.h.shape == (self.xyt.shape[0],self._N_h_DOF)
 
     # add N_solutions and N_trees properties
     @property
@@ -353,12 +360,34 @@ class SolutionCollectionSquare(BaseClass):
             return 0
         arr = to_cpu(self.xyt)
         return int(np.asarray(arr).shape[1])
+    
+    # subclasses must implement: snap
+    
 
+@dataclass
+class SolutionCollectionSquare(SolutionCollection):
 
-    def _check_constraints(self):
-        if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
-            raise ValueError("Solution: xyt must be an array with shape (N_solutions, N_trees, 3)")
-        assert self.h.shape == (self.xyt.shape[0],3)
+    def __post_init__(self):
+        self._N_h_DOF = 3  # h = [size, x_offset, y_offset]
+        return super().__post_init__()
+    
+    def compute_cost_single_ref(self, h:cp.ndarray):
+        """Compute area cost and grad_bound for a single reference"""
+        cost = h[0]**2
+        # Build grad_bound on the GPU without implicitly converting via NumPy
+        grad_bound = cp.empty(3, dtype=h.dtype)
+        grad_bound[0] = 2.0 * h[0]
+        grad_bound[1] = 0
+        grad_bound[2] = 0
+        return cost, grad_bound
+    
+    def compute_cost(self, sol:SolutionCollection, cost:cp.ndarray, grad_bound:cp.ndarray):
+        """Compute area cost and grad_bound for multiple solutions"""
+        cost[:] = sol.h[:,0]**2
+        grad_bound[:,0] = 2.0*sol.h[:,0]
+        grad_bound[:,1] = 0
+        grad_bound[:,2] = 0
+    
 
     def snap(self):
         """Set h such that for each solution it's the smallest possible square containing all trees.
