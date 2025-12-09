@@ -133,7 +133,7 @@ def plot_polygons(polygons, ax=None):
             )
             ax.add_patch(red_patch)
 
-    #ax.set_xlim(minx, maxx)
-    #ax.set_ylim(miny, maxy)
+    ax.set_xlim(minx, maxx)
+    ax.set_ylim(miny, maxy)
     ax.set_aspect("equal", adjustable="box")
     return ax

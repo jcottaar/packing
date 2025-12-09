@@ -10,7 +10,7 @@ import cupy as cp
 import time
 from dataclasses import dataclass, field, fields
 import pack_cuda
-import pack_vis
+import pack_vis_sol
 import pack_cost
 import copy
 from IPython.display import HTML, display, clear_output
@@ -52,9 +52,8 @@ class Optimizer(kgs.BaseClass):
         n_ensembles = xyt.shape[0]
         n_trees = xyt.shape[1] 
 
-        if self.plot_interval is not None:          
+        if self.plot_interval is not None:
             fig, ax = plt.subplots(figsize=(8, 8))
-            tree_list = kgs.TreeList()
 
         # Pre-allocate gradient arrays once (float32 for efficiency)
         total_cost = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
@@ -101,11 +100,9 @@ class Optimizer(kgs.BaseClass):
             t_total0 += dt
             
             if self.plot_interval is not None and t_total0 - t_last_plot >= self.plot_interval*0.999:
-                t_last_plot = t_total0+0               
+                t_last_plot = t_total0+0
                 ax.clear()
-                ax.set_aspect('equal', adjustable='box')
-                tree_list.xyt = cp.asnumpy(xyt[0])
-                pack_vis.visualize_tree_list(tree_list, ax=ax, h=cp.asnumpy(h[0]))
+                pack_vis_sol.pack_vis_sol(sol, solution_idx=0, ax=ax)
                 ax.set_title(f'Time: {t_total0:.2f}')
                 display(fig)
                 clear_output(wait=True)       
@@ -152,7 +149,6 @@ class Dynamics(kgs.BaseClass):
 
         if self.plot_interval is not None:
             fig, ax = plt.subplots(figsize=(8, 8))
-            tree_list = kgs.TreeList()
 
         # Pre-allocate gradient arrays once (float32 for efficiency)
         total_cost0 = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
@@ -219,11 +215,9 @@ class Dynamics(kgs.BaseClass):
             t_total0 += dt[0]
             
             if self.plot_interval is not None and t_total0 - t_last_plot >= self.plot_interval*0.999:
-                t_last_plot = t_total0+0                
+                t_last_plot = t_total0+0
                 ax.clear()
-                ax.set_aspect('equal', adjustable='box')
-                tree_list.xyt = cp.asnumpy(sol.xyt[0])
-                pack_vis.visualize_tree_list(tree_list, ax=ax, h=cp.asnumpy(sol.h[0]))
+                pack_vis_sol.pack_vis_sol(sol, solution_idx=0, ax=ax)
                 ax.set_title(f'Time: {t_total0:.2f}')
                 display(fig)
                 clear_output(wait=True)       

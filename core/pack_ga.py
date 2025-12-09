@@ -9,7 +9,7 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 import shapely
 import pack_cost
-import pack_vis
+import pack_vis_sol
 import pack_dynamics
 import copy
 import matplotlib.pyplot as plt
@@ -573,9 +573,7 @@ class GA(kgs.BaseClass):
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
             if np.isnan(costs[i]) or costs[i]>1e6:
-                tree_list = kgs.TreeList()
-                tree_list.xyt = sol.xyt[i].get()
-                pack_vis.visualize_tree_list(tree_list)
+                pack_vis_sol.pack_vis_sol(sol, solution_idx=i)
                 plt.title(f'Invalid solution with cost {costs[i]}')
                 raise AssertionError(f'Invalid solution with cost {costs[i]}')
         return costs
@@ -628,11 +626,9 @@ class GA(kgs.BaseClass):
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
                 best_id = np.argmin(self.populations[i_N_trees].fitness)                   
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
-                self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]                
+                self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]
                 if i_gen==0 or self.best_cost_per_generation[i_gen, i_N_trees]<self.best_cost_per_generation[i_gen-1, i_N_trees]:
-                    tree_list = kgs.TreeList()
-                    tree_list.xyt = self.populations[i_N_trees].configuration.xyt[best_id].get()
-                    pack_vis.visualize_tree_list(tree_list)
+                    pack_vis_sol.pack_vis_sol(self.populations[i_N_trees].configuration, solution_idx=best_id)
                     plt.title(f'Generation: {i_gen}, cost: {self.best_cost_per_generation[i_gen, i_N_trees]}')
                     plt.pause(0.001)
                 

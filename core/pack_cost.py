@@ -113,66 +113,106 @@ class CollisionCost(Cost):
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
         # Compute collision cost for all pairs of trees
         n_trees = sol.N_trees
-        tree_list = kgs.TreeList()
-        tree_list.xyt = xyt
-        trees = tree_list.get_trees()
-        total_cost = cp.array(0.0)
-        total_grad = cp.zeros_like(xyt)
 
         if sol.periodic:
-            # Get crystal axes: shape (1, 2, 2) for single solution
-            crystal_axes = cp.zeros((1, 2, 2), dtype=xyt.dtype)
-            sol.get_crystal_axes(crystal_axes)
-            a_vec = crystal_axes[0, 0, :]  # First lattice vector
-            b_vec = crystal_axes[0, 1, :]  # Second lattice vector
+            # Use finite differences for periodic BC (simpler and handles all edge cases)
+            eps = 1e-6
 
-            # Convert to numpy for shapely operations
-            a_vec_np = a_vec.get()
-            b_vec_np = b_vec.get()
+            # Compute base cost using _compute_cost_one_tree_ref
+            def _compute_cost_only(xyt_in, h_in):
+                tree_list = kgs.TreeList()
+                tree_list.xyt = xyt_in
+                trees = tree_list.get_trees()
 
-            for i in range(n_trees):
-                this_xyt = xyt[i]
-                this_tree = trees[i]
+                # Get crystal axes
+                crystal_axes = cp.zeros((1, 2, 2), dtype=xyt_in.dtype)
+                sol_tmp = type(sol)()
+                sol_tmp.xyt = cp.array([xyt_in])
+                sol_tmp.h = cp.array([h_in])
+                sol_tmp.get_crystal_axes(crystal_axes)
+                a_vec_np = crystal_axes[0, 0, :].get()
+                b_vec_np = crystal_axes[0, 1, :].get()
 
-                # Collect all other trees including periodic images
-                other_trees_all = []
-                other_xyt_all = []
+                total_cost = 0.0
 
-                # Loop over 3x3 grid of periodic cells
-                for dx in [-1, 0, 1]:
-                    for dy in [-1, 0, 1]:
-                        print(dx,dy)
-                        shift = dx * a_vec_np + dy * b_vec_np
+                for i in range(n_trees):
+                    this_xyt = xyt_in[i]
+                    this_tree = trees[i]
 
-                        for j in range(n_trees):
-                            # Skip self-interaction in origin cell only
-                            if dx == 0 and dy == 0:
-                                if i == j:
+                    # Collect all other trees including periodic images
+                    other_trees_all = []
+                    other_xyt_all = []
+
+                    # Loop over 3x3 grid of periodic cells
+                    for dx in [-1, 0, 1]:
+                        for dy in [-1, 0, 1]:
+                            shift = dx * a_vec_np + dy * b_vec_np
+
+                            for j in range(n_trees):
+                                # Skip self-interaction in origin cell only
+                                if dx == 0 and dy == 0 and i == j:
                                     continue
 
-                            # Translate tree j by the lattice shift
-                            tree_j_shifted = shapely.affinity.translate(trees[j], xoff=shift[0], yoff=shift[1])
-                            other_trees_all.append(tree_j_shifted)
+                                # Translate tree j by the lattice shift
+                                tree_j_shifted = shapely.affinity.translate(trees[j], xoff=shift[0], yoff=shift[1])
+                                other_trees_all.append(tree_j_shifted)
 
-                            # Create shifted pose for xyt2 (needed by CollisionCostSeparation)
-                            xyt_j_shifted = xyt[j].copy()
-                            xyt_j_shifted[0] += cp.array(shift[0])  # x += shift_x
-                            xyt_j_shifted[1] += cp.array(shift[1])  # y += shift_y
-                            # theta unchanged
-                            other_xyt_all.append(xyt_j_shifted)
+                                # Create shifted pose for xyt2 (needed by CollisionCostSeparation)
+                                xyt_j_shifted = xyt_in[j].copy()
+                                xyt_j_shifted[0] += cp.array(shift[0])
+                                xyt_j_shifted[1] += cp.array(shift[1])
+                                other_xyt_all.append(xyt_j_shifted)
 
-                # Stack into array for xyt2
-                if len(other_xyt_all) > 0:
-                    other_xyt = cp.stack(other_xyt_all, axis=0)
-                else:
-                    other_xyt = cp.zeros((0, 3), dtype=xyt.dtype)
+                    # Stack into array for xyt2
+                    if len(other_xyt_all) > 0:
+                        other_xyt = cp.stack(other_xyt_all, axis=0)
+                    else:
+                        other_xyt = cp.zeros((0, 3), dtype=xyt_in.dtype)
 
-                # Compute cost for this tree vs all others (including periodic images)
-                this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees_all)
-                total_cost += this_cost / 2
-                total_grad[i] += this_grads
+                    # Use subclass's _compute_cost_one_tree_ref (overlap area or separation)
+                    this_cost, _ = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees_all)
+                    total_cost += this_cost / 2
+
+                return cp.array(total_cost)
+
+            total_cost = _compute_cost_only(xyt, h)
+
+            # Compute gradients w.r.t. xyt using finite differences
+            total_grad = cp.zeros_like(xyt)
+            for i in range(n_trees):
+                for j in range(3):  # x, y, theta
+                    xyt_plus = xyt.copy()
+                    xyt_minus = xyt.copy()
+                    xyt_plus[i, j] += eps
+                    xyt_minus[i, j] -= eps
+
+                    cost_plus = _compute_cost_only(xyt_plus, h)
+                    cost_minus = _compute_cost_only(xyt_minus, h)
+
+                    total_grad[i, j] = (cost_plus - cost_minus) / (2.0 * eps)
+
+            # Compute gradients w.r.t. h using finite differences
+            grad_h = cp.zeros_like(h)
+            for i in range(h.shape[0]):
+                h_plus = h.copy()
+                h_minus = h.copy()
+                h_plus[i] += eps
+                h_minus[i] -= eps
+
+                cost_plus = _compute_cost_only(xyt, h_plus)
+                cost_minus = _compute_cost_only(xyt, h_minus)
+
+                grad_h[i] = (cost_plus - cost_minus) / (2.0 * eps)
+
+            return total_cost, total_grad, grad_h
         else:
-            # Non-periodic: original implementation
+            # Non-periodic: use existing analytical approach
+            tree_list = kgs.TreeList()
+            tree_list.xyt = xyt
+            trees = tree_list.get_trees()
+            total_cost = cp.array(0.0)
+            total_grad = cp.zeros_like(xyt)
+
             for i in range(n_trees):
                 this_xyt = xyt[i]
                 other_xyt = cp.delete(xyt, i, axis=0)
@@ -182,7 +222,7 @@ class CollisionCost(Cost):
                 total_cost += this_cost/2
                 total_grad[i] += this_grads
 
-        return total_cost, total_grad, cp.zeros_like(h)
+            return total_cost, total_grad, cp.zeros_like(h)
     
 class CollisionCostOverlappingArea(CollisionCost):
     # Collision cost based on overlapping area of two trees
