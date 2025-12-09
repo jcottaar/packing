@@ -335,103 +335,195 @@ __device__ __forceinline__ void backward_clip_against_edge(
 
 // Compute the area of intersection between two convex polygons using
 // Sutherland-Hodgman clipping of "subj" against all edges of "clip".
-// Also computes gradients w.r.t. both input polygons.
+// If d_subj and d_clip are non-NULL, also computes gradients w.r.t. both input polygons.
+// If they are NULL, skips the backward pass for faster forward-only computation.
 __device__ double convex_intersection_area(
     const d2* subj, int n_subj,
     const d2* clip, int n_clip,
-    d2* d_subj,     // output: gradient w.r.t. subject vertices
-    d2* d_clip)     // output: gradient w.r.t. clip vertices
+    d2* d_subj,     // output: gradient w.r.t. subject vertices (can be NULL)
+    d2* d_clip)     // output: gradient w.r.t. clip vertices (can be NULL)
 {
-    // Early exit for empty input - zero gradients
+    const int compute_grads = (d_subj != NULL && d_clip != NULL);
+    
+    // Early exit for empty input
     if (n_subj == 0 || n_clip == 0) {
-        for (int i = 0; i < n_subj; ++i) {
-            d_subj[i] = make_double2(0.0, 0.0);
-        }
-        for (int i = 0; i < n_clip; ++i) {
-            d_clip[i] = make_double2(0.0, 0.0);
+        if (compute_grads) {
+            for (int i = 0; i < n_subj; ++i) {
+                d_subj[i] = make_double2(0.0, 0.0);
+            }
+            for (int i = 0; i < n_clip; ++i) {
+                d_clip[i] = make_double2(0.0, 0.0);
+            }
         }
         return 0.0;
     }
 
-    // Forward pass: perform clipping with metadata AND save intermediate polygons
+    // Forward pass: perform clipping
+    // Only save metadata and intermediate polygons if computing gradients
     d2 forward_polys[MAX_VERTS_PER_PIECE + 1][MAX_INTERSECTION_VERTS];
     int forward_counts[MAX_VERTS_PER_PIECE + 1];
-    ClipMetadata metadata[MAX_VERTS_PER_PIECE];  // one per clipping edge
+    ClipMetadata metadata[MAX_VERTS_PER_PIECE];
     
-    // Initialize with subject polygon
-    forward_counts[0] = n_subj;
-    for (int i = 0; i < n_subj; ++i) {
-        forward_polys[0][i] = subj[i];
-    }
-
-    // Apply each clipping edge, save metadata and intermediate results
-    int clip_count = 0;
-    for (int e = 0; e < n_clip && forward_counts[e] > 0; ++e) {
-        d2 A = clip[e];
-        d2 B = clip[(e + 1) % n_clip];
-
-        int n_out = clip_against_edge(
-            forward_polys[e], forward_counts[e], 
-            A, B, 
-            forward_polys[e + 1], &metadata[e]);
-        forward_counts[e + 1] = n_out;
-        clip_count++;
-    }
-
-    // Final polygon is in forward_polys[clip_count]
-    int final_n = forward_counts[clip_count];
+    // For forward-only mode, we just need current and next buffers
+    d2 current_poly[MAX_INTERSECTION_VERTS];
+    d2 next_poly[MAX_INTERSECTION_VERTS];
+    int current_count;
     
-    // Compute area and gradients through polygon_area
-    d2 d_polyFinal[MAX_INTERSECTION_VERTS];
-    double area = polygon_area(forward_polys[clip_count], final_n, d_polyFinal);
-    
-    // Skip backward pass if area is zero - gradients already zeroed by polygon_area
-    if (area == 0.0) {
+    if (compute_grads) {
+        // Initialize with subject polygon (save for backward pass)
+        forward_counts[0] = n_subj;
         for (int i = 0; i < n_subj; ++i) {
-            d_subj[i] = make_double2(0.0, 0.0);
+            forward_polys[0][i] = subj[i];
         }
-        for (int i = 0; i < n_clip; ++i) {
-            d_clip[i] = make_double2(0.0, 0.0);
+    } else {
+        // Initialize current buffer
+        current_count = n_subj;
+        for (int i = 0; i < n_subj; ++i) {
+            current_poly[i] = subj[i];
+        }
+    }
+
+    // Apply each clipping edge
+    int clip_count = 0;
+    if (compute_grads) {
+        for (int e = 0; e < n_clip && forward_counts[e] > 0; ++e) {
+            d2 A = clip[e];
+            d2 B = clip[(e + 1) % n_clip];
+
+            int n_out = clip_against_edge(
+                forward_polys[e], forward_counts[e], 
+                A, B, 
+                forward_polys[e + 1], &metadata[e]);
+            forward_counts[e + 1] = n_out;
+            clip_count++;
+        }
+    } else {
+        // Forward-only: no metadata needed
+        for (int e = 0; e < n_clip && current_count > 0; ++e) {
+            d2 A = clip[e];
+            d2 B = clip[(e + 1) % n_clip];
+
+            int out_count = 0;
+            d2 S = current_poly[current_count - 1];
+            double S_side = cross3(A, B, S);
+
+            for (int i = 0; i < current_count; ++i) {
+                d2 E = current_poly[i];
+                double E_side = cross3(A, B, E);
+
+                bool S_inside = (S_side >= 0.0);
+                bool E_inside = (E_side >= 0.0);
+
+                if (S_inside && E_inside) {
+                    next_poly[out_count++] = E;
+                } else if (S_inside && !E_inside) {
+                    next_poly[out_count++] = line_intersection(S, E, A, B);
+                } else if (!S_inside && E_inside) {
+                    next_poly[out_count++] = line_intersection(S, E, A, B);
+                    next_poly[out_count++] = E;
+                }
+
+                S = E;
+                S_side = E_side;
+            }
+            
+            // Swap buffers
+            current_count = out_count;
+            for (int i = 0; i < out_count; ++i) {
+                current_poly[i] = next_poly[i];
+            }
+            clip_count++;
+        }
+    }
+
+    // Get final polygon and compute area
+    int final_n;
+    d2* final_poly;
+    if (compute_grads) {
+        final_n = forward_counts[clip_count];
+        final_poly = forward_polys[clip_count];
+    } else {
+        final_n = current_count;
+        final_poly = current_poly;
+    }
+    
+    // Compute area (and gradients if needed)
+    if (final_n < 3) {
+        if (compute_grads) {
+            for (int i = 0; i < n_subj; ++i) {
+                d_subj[i] = make_double2(0.0, 0.0);
+            }
+            for (int i = 0; i < n_clip; ++i) {
+                d_clip[i] = make_double2(0.0, 0.0);
+            }
         }
         return 0.0;
     }
     
-    // Backward pass: backprop through clipping stages
-    
-    // Backward through each clipping stage in reverse
-    d2 d_current[MAX_INTERSECTION_VERTS];
-    for (int i = 0; i < final_n; ++i) {
-        d_current[i] = d_polyFinal[i];
-    }
-    
-    for (int e = clip_count - 1; e >= 0; --e) {
-        int e_idx = e % n_clip;
-        int e_next = (e + 1) % n_clip;
-        d2 A = clip[e_idx];
-        d2 B = clip[e_next];
+    double area;
+    if (compute_grads) {
+        d2 d_polyFinal[MAX_INTERSECTION_VERTS];
+        area = polygon_area(final_poly, final_n, d_polyFinal);
         
-        d2 d_in[MAX_INTERSECTION_VERTS];
-        d2 d_A, d_B;
-        
-        backward_clip_against_edge(forward_polys[e], forward_counts[e], A, B,
-                                   d_current, &metadata[e],
-                                   d_in, &d_A, &d_B);
-        
-        // Accumulate gradients for clip vertices
-        d_clip[e_idx].x += d_A.x;
-        d_clip[e_idx].y += d_A.y;
-        d_clip[e_next].x += d_B.x;
-        d_clip[e_next].y += d_B.y;
-        
-        // Update current gradient for next iteration
-        for (int i = 0; i < forward_counts[e]; ++i) {
-            d_current[i] = d_in[i];
+        // Skip backward pass if area is zero
+        if (area == 0.0) {
+            for (int i = 0; i < n_subj; ++i) {
+                d_subj[i] = make_double2(0.0, 0.0);
+            }
+            for (int i = 0; i < n_clip; ++i) {
+                d_clip[i] = make_double2(0.0, 0.0);
+            }
+            return 0.0;
         }
-    }
-    
-    // After all clipping stages, d_current contains gradients w.r.t. subject
-    for (int i = 0; i < n_subj; ++i) {
-        d_subj[i] = d_current[i];
+        
+        // Initialize clip gradients to zero before accumulation
+        for (int i = 0; i < n_clip; ++i) {
+            d_clip[i] = make_double2(0.0, 0.0);
+        }
+        
+        // Backward pass: backprop through clipping stages
+        d2 d_current[MAX_INTERSECTION_VERTS];
+        for (int i = 0; i < final_n; ++i) {
+            d_current[i] = d_polyFinal[i];
+        }
+        
+        for (int e = clip_count - 1; e >= 0; --e) {
+            int e_idx = e % n_clip;
+            int e_next = (e + 1) % n_clip;
+            d2 A = clip[e_idx];
+            d2 B = clip[e_next];
+            
+            d2 d_in[MAX_INTERSECTION_VERTS];
+            d2 d_A, d_B;
+            
+            backward_clip_against_edge(forward_polys[e], forward_counts[e], A, B,
+                                       d_current, &metadata[e],
+                                       d_in, &d_A, &d_B);
+            
+            // Accumulate gradients for clip vertices
+            d_clip[e_idx].x += d_A.x;
+            d_clip[e_idx].y += d_A.y;
+            d_clip[e_next].x += d_B.x;
+            d_clip[e_next].y += d_B.y;
+            
+            // Update current gradient for next iteration
+            for (int i = 0; i < forward_counts[e]; ++i) {
+                d_current[i] = d_in[i];
+            }
+        }
+        
+        // After all clipping stages, d_current contains gradients w.r.t. subject
+        for (int i = 0; i < n_subj; ++i) {
+            d_subj[i] = d_current[i];
+        }
+    } else {
+        // Forward-only: just compute area using shoelace formula
+        double sum = 0.0;
+        for (int i = 0; i < final_n; ++i) {
+            int j = (i + 1) % final_n;
+            sum += final_poly[i].x * final_poly[j].y - final_poly[j].x * final_poly[i].y;
+        }
+        area = fabs(0.5 * sum);
     }
     
     return area;
@@ -451,16 +543,19 @@ __device__ void sat_separation_with_grad_pose(
     double cos_th1,
     double sin_th1,
     double* sep,
-    double* dsep_dx,
-    double* dsep_dy,
-    double* dsep_dtheta
-)
+    double* dsep_dx,      // can be NULL to skip gradient computation
+    double* dsep_dy,      // can be NULL to skip gradient computation
+    double* dsep_dtheta)  // can be NULL to skip gradient computation
 {
+    const int compute_grads = (dsep_dx != NULL && dsep_dy != NULL && dsep_dtheta != NULL);
+    
     // Default outputs: no penetration
-    *sep         = 0.0;
-    *dsep_dx     = 0.0;
-    *dsep_dy     = 0.0;
-    *dsep_dtheta = 0.0;
+    *sep = 0.0;
+    if (compute_grads) {
+        *dsep_dx     = 0.0;
+        *dsep_dy     = 0.0;
+        *dsep_dtheta = 0.0;
+    }
 
     if (n1 < 3 || n2 < 3) {
         return;
@@ -672,9 +767,14 @@ __device__ void sat_separation_with_grad_pose(
         return;
     }
 
-    double sep_val = min_penetration;
+    *sep = min_penetration;
+    
+    // Skip gradient computation if not requested
+    if (!compute_grads) {
+        return;
+    }
 
-    // ---- Gradients as before ----
+    // ---- Gradients ----
     double2 grad_v;
     if (best_case == 1) {
         grad_v = best_normal;
@@ -714,7 +814,6 @@ __device__ void sat_separation_with_grad_pose(
 
     double d_dtheta = term_vertex + term_axis;
 
-    *sep         = sep_val;
     *dsep_dx     = d_dx;
     *dsep_dy     = d_dy;
     *dsep_dtheta = d_dtheta;

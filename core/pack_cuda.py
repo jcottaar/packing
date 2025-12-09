@@ -133,15 +133,16 @@ __device__ __forceinline__ void compute_tree_poly_and_aabb(
 
 // Compute overlap for a single piece (pi) of the reference tree against all pieces of trees in the list.
 // This enables parallelization across the 4 pieces of the reference tree.
-// Also computes gradients w.r.t. the reference pose.
+// Optionally computes gradients w.r.t. the reference pose when compute_grads is non-zero.
 __device__ double overlap_ref_with_list_piece(
     const double3 ref,
     const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
     const int n,
     const int pi,          // piece index to process (0-3)
-    double3* d_ref,        // output: gradient w.r.t. ref pose (accumulated)
+    double3* d_ref,        // output: gradient w.r.t. ref pose (accumulated), can be NULL
     const int use_separation, // if non-zero, compute separation-based cost (sum of sep^2)
-    const int skip_index)  // index to skip (self-collision), use -1 to skip none
+    const int skip_index,  // index to skip (self-collision), use -1 to skip none
+    const int compute_grads) // if non-zero, compute gradients
 {
     double sum = 0.0;
     
@@ -161,20 +162,24 @@ __device__ double overlap_ref_with_list_piece(
     
     int n1 = const_piece_nverts[pi];
     
-    // Load local piece vertices from constant memory
+    // Load local piece vertices from constant memory (needed for gradients or separation)
     d2 ref_local_piece[MAX_VERTS_PER_PIECE];
-    for (int v = 0; v < n1; ++v) {
-        int idx = pi * MAX_VERTS_PER_PIECE + v;
-        int base = 2 * idx;
-        ref_local_piece[v].x = const_piece_xy[base + 0];
-        ref_local_piece[v].y = const_piece_xy[base + 1];
+    if (compute_grads || use_separation) {
+        for (int v = 0; v < n1; ++v) {
+            int idx = pi * MAX_VERTS_PER_PIECE + v;
+            int base = 2 * idx;
+            ref_local_piece[v].x = const_piece_xy[base + 0];
+            ref_local_piece[v].y = const_piece_xy[base + 1];
+        }
     }
     
-    // Accumulate gradients locally
+    // Accumulate gradients locally (only if computing gradients)
     double3 d_ref_local;
-    d_ref_local.x = 0.0;
-    d_ref_local.y = 0.0;
-    d_ref_local.z = 0.0;
+    if (compute_grads) {
+        d_ref_local.x = 0.0;
+        d_ref_local.y = 0.0;
+        d_ref_local.z = 0.0;
+    }
     
     // Loop over all trees in the list
     for (int i = 0; i < n; ++i) {
@@ -222,53 +227,56 @@ __device__ double overlap_ref_with_list_piece(
             }
 
             if (!use_separation) {
-                // Merged function computes both area and gradients
+                // Pass NULL for gradient outputs when not computing gradients
                 d2 d_ref_poly[MAX_VERTS_PER_PIECE];
                 d2 d_other_poly[MAX_VERTS_PER_PIECE];
 
                 double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
-                                                        d_ref_poly, d_other_poly);
+                                                        compute_grads ? d_ref_poly : NULL,
+                                                        compute_grads ? d_other_poly : NULL);
                 total += area;
 
-                // Backward through transform for ref piece
-                // Note: d_ref_poly will be zero if area is zero, so this is safe
-                double3 d_ref_pose_piece;
-                backward_transform_vertices(
-                    ref_local_piece, n1,
-                    d_ref_poly,
-                    c_ref, s_ref,
-                    &d_ref_pose_piece);
+                if (compute_grads) {
+                    // Backward through transform for ref piece
+                    double3 d_ref_pose_piece;
+                    backward_transform_vertices(
+                        ref_local_piece, n1,
+                        d_ref_poly,
+                        c_ref, s_ref,
+                        &d_ref_pose_piece);
 
-                // Accumulate into local gradient
-                d_ref_local.x += d_ref_pose_piece.x;
-                d_ref_local.y += d_ref_pose_piece.y;
-                d_ref_local.z += d_ref_pose_piece.z;
+                    // Accumulate into local gradient
+                    d_ref_local.x += d_ref_pose_piece.x;
+                    d_ref_local.y += d_ref_pose_piece.y;
+                    d_ref_local.z += d_ref_pose_piece.z;
+                }
             } else {
-                // Separation-based primitive: compute penetration depth and its
-                // derivatives wrt ref pose. We only support the sum-of-squares
-                // behavior (use_max == False), so for each piece-pair with
-                // positive separation we add sep^2 to the total and accumulate
-                // gradient 2*sep*dsep.
+                // Separation-based primitive
                 double sep = 0.0;
                 double dsep_dx = 0.0;
                 double dsep_dy = 0.0;
                 double dsep_dtheta = 0.0;
 
-                // Device primitive defined in pack_cuda_primitives.PRIMITIVE_SRC
+                // Pass NULL for gradient outputs when not computing gradients
                 sat_separation_with_grad_pose(
                     ref_local_piece, n1,
                     other_poly, n2,
                     ref.x, ref.y, c_ref, s_ref,
-                    &sep, &dsep_dx, &dsep_dy, &dsep_dtheta);
+                    &sep,
+                    compute_grads ? &dsep_dx : NULL,
+                    compute_grads ? &dsep_dy : NULL,
+                    compute_grads ? &dsep_dtheta : NULL);
 
                 // Only positive penetration contributes
                 if (sep > 0.0) {
                     total += sep * sep;
 
-                    // Gradient of sep^2: 2 * sep * dsep/dparam
-                    d_ref_local.x += 2.0 * sep * dsep_dx;
-                    d_ref_local.y += 2.0 * sep * dsep_dy;
-                    d_ref_local.z += 2.0 * sep * dsep_dtheta;
+                    if (compute_grads) {
+                        // Gradient of sep^2: 2 * sep * dsep/dparam
+                        d_ref_local.x += 2.0 * sep * dsep_dx;
+                        d_ref_local.y += 2.0 * sep * dsep_dy;
+                        d_ref_local.z += 2.0 * sep * dsep_dtheta;
+                    }
                 }
             }
         }
@@ -276,10 +284,12 @@ __device__ double overlap_ref_with_list_piece(
         sum += total;
     }
     
-    // Atomically accumulate the local gradient into the output
-    atomicAdd(&d_ref->x, d_ref_local.x);
-    atomicAdd(&d_ref->y, d_ref_local.y);
-    atomicAdd(&d_ref->z, d_ref_local.z);
+    // Atomically accumulate the local gradient into the output (only if computing gradients)
+    if (compute_grads && d_ref != NULL) {
+        atomicAdd(&d_ref->x, d_ref_local.x);
+        atomicAdd(&d_ref->y, d_ref_local.y);
+        atomicAdd(&d_ref->z, d_ref_local.z);
+    }
 
     return sum;
 }
@@ -296,15 +306,10 @@ __device__ double overlap_ref_with_list(
     const int skip_index)  // index to skip (self-collision), use -1 to skip none
 {
     double sum = 0.0;
-    double3 d_ref_dummy;
-    d_ref_dummy.x = 0.0;
-    d_ref_dummy.y = 0.0;
-    d_ref_dummy.z = 0.0;
     
-    // Sum across all 4 pieces
+    // Sum across all 4 pieces (no gradients needed)
     for (int pi = 0; pi < MAX_PIECES; ++pi) {
-        // Call with use_separation=0 (area mode)
-        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, &d_ref_dummy, 0, skip_index);
+        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, NULL, 0, skip_index, 0);
     }
     return sum;
 }
@@ -329,12 +334,8 @@ __device__ double convex_area_outside_square(
     square[2] = make_double2(half_h, half_h);
     square[3] = make_double2(-half_h, half_h);
     
-    // Compute intersection area between polygon and square
-    // We need dummy gradient buffers since gradients are always computed
-    d2 d_poly_dummy[MAX_VERTS_PER_PIECE];
-    d2 d_square_dummy[4];
-    double intersection_area = convex_intersection_area(poly, n, square, 4,
-                                                         d_poly_dummy, d_square_dummy);
+    // Compute intersection area between polygon and square (no gradients needed)
+    double intersection_area = convex_intersection_area(poly, n, square, 4, NULL, NULL);
     
     // Compute total polygon area
     double total_area = 0.0;
@@ -520,8 +521,11 @@ __device__ void overlap_list_total(
         ref.y = xyt1_Nx3[tree_idx * 3 + 1];
         ref.z = xyt1_Nx3[tree_idx * 3 + 2];
 
+        // Determine if we need to compute gradients
+        int compute_grads = (out_grads != NULL) ? 1 : 0;
+
         // Initialize gradient to zero (only first thread does this)
-        if (out_grads != NULL && piece_idx == 0) {
+        if (compute_grads && piece_idx == 0) {
             out_grads[tree_idx * 3 + 0] = 0.0;
             out_grads[tree_idx * 3 + 1] = 0.0;
             out_grads[tree_idx * 3 + 2] = 0.0;
@@ -531,14 +535,8 @@ __device__ void overlap_list_total(
         __syncthreads();
 
         // Each thread computes overlap (or separation) for one piece of the reference tree
-        // The merged function computes both forward and backward passes
-        // Use a dummy local gradient buffer when out_grads is NULL
-        double3 d_ref_dummy;
-        d_ref_dummy.x = 0.0;
-        d_ref_dummy.y = 0.0;
-        d_ref_dummy.z = 0.0;
-        double3* d_ref_output = (out_grads != NULL) ? (double3*)(&out_grads[tree_idx * 3]) : &d_ref_dummy;
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx);
+        double3* d_ref_output = compute_grads ? (double3*)(&out_grads[tree_idx * 3]) : NULL;
+        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx, compute_grads);
 
         // Atomic add for overlap sum
         atomicAdd(out_total, local_sum / 2.0);
@@ -1185,9 +1183,6 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
         ),
         stream=stream,
     )
-
-    print(out_grads_ptr)
-
 
 def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, out_grad_h: cp.ndarray | None = None, stream: cp.cuda.Stream | None = None):
     """Compute total boundary violation area for multiple ensembles in parallel.

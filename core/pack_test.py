@@ -181,18 +181,18 @@ def test_costs():
         print(f"  ✓ Vectorized results exactly match individual calls")
 
         
-        # Timing comparisons
-        kgs.debugging_mode = 0
-        n_repeats = 100
-        import time
-        for evaluate_gradient in [False, True]:
-            start = time.time()
-            for _ in range(n_repeats):
-                c.compute_cost(sol_fast, cost_fast, grad_fast, grad_bound_fast, evaluate_gradient=evaluate_gradient)
-            end = time.time()
-            time_taken = (end - start) / n_repeats
-            print(f'Time taken for {c.__class__.__name__} single (evaluate_gradient={evaluate_gradient}): {time_taken*1000:.3f} ms')
-        kgs.debugging_mode = 2
+        # # Timing comparisons
+        # kgs.debugging_mode = 0
+        # n_repeats = 100
+        # import time
+        # for evaluate_gradient in [False, True]:
+        #     start = time.time()
+        #     for _ in range(n_repeats):
+        #         c.compute_cost(sol_fast, cost_fast, grad_fast, grad_bound_fast, evaluate_gradient=evaluate_gradient)
+        #     end = time.time()
+        #     time_taken = (end - start) / n_repeats
+        #     print(f'Time taken for {c.__class__.__name__} single (evaluate_gradient={evaluate_gradient}): {time_taken*1000:.3f} ms')
+        # kgs.debugging_mode = 2
 
 
 if __name__ == "__main__":
