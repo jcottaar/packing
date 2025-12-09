@@ -146,7 +146,7 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
 
 @dataclass
 class Population(kgs.BaseClass):
-    configuration: kgs.SolutionCollectionSquare = field(init=True, default=None)
+    configuration: kgs.SolutionCollection = field(init=True, default=None)
     fitness: np.ndarray = field(init=True, default=None)
     lineages: list = field(init=True, default=None)
 
@@ -172,12 +172,11 @@ class Population(kgs.BaseClass):
         self.fitness = self.fitness[inds]
         self.lineages = [self.lineages[i] for i in inds]
     
-    @classmethod
-    def create_empty(cls, N_individuals, N_trees):
+    def create_empty(self, N_individuals, N_trees):
         xyt = cp.zeros((N_individuals, N_trees, 3), dtype=kgs.dtype_cp)
         h = cp.zeros((N_individuals, 3), dtype=kgs.dtype_cp)
-        configuration = kgs.SolutionCollectionSquare(xyt=xyt, h=h)
-        population = cls(configuration=configuration)
+        configuration = type(self.configuration)(xyt=xyt, h=h)
+        population = type(self)(configuration=configuration)
         population.fitness = np.zeros(N_individuals, dtype=kgs.dtype_np)
         population.lineages = [ None for _ in range(N_individuals) ]
         return population
@@ -215,14 +214,21 @@ class Initializer(kgs.BaseClass):
 class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
+    base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
 
     def _initialize_population(self, N_individuals, N_trees):
+        self.check_constraints()
         size_setup_scaled = self.size_setup * np.sqrt(N_trees)
         xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=(N_individuals, N_trees, 3))
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, np.pi]]]
-        xyt = cp.array(xyt, dtype=kgs.dtype_np)        
-        h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)
-        sol = kgs.SolutionCollectionSquare(xyt=xyt, h=h)        
+        xyt = cp.array(xyt, dtype=kgs.dtype_np)    
+        sol = copy.deepcopy(self.base_solution)
+        sol.xyt = xyt    
+        if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
+            sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
+        else:
+            assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
+            sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)               
         sol = self.jiggler.run_simulation(sol)
         population = Population(configuration=sol)
         population.lineages = [ [['InitializerRandomJiggled', [np.inf, np.inf, np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
@@ -569,7 +575,7 @@ class GA(kgs.BaseClass):
         # relaxer.n_iterations *= 2
         # self.relaxers.append(relaxer)
 
-    def _score(self, sol:kgs.SolutionCollectionSquare):
+    def _score(self, sol:kgs.SolutionCollection):
         costs = self.fitness_cost.compute_cost_allocate(sol)[0].get()
         for i in range(len(costs)):
             if np.isnan(costs[i]) or costs[i]>1e6:
@@ -613,7 +619,7 @@ class GA(kgs.BaseClass):
 
         # Initialize populations
         for N_trees in self.N_trees_to_do:    
-            self.initializer.seed = 200*self.seed + N_trees        
+            self.initializer.seed = 200*self.seed + int(N_trees)
             population = self.initializer.initialize_population(self.population_size, N_trees)
             population.check_constraints()
             self._relax_and_score(population)
@@ -665,7 +671,7 @@ class GA(kgs.BaseClass):
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
                 old_pop = self.populations[i_N_trees]
                 parent_size = old_pop.configuration.N_solutions
-                new_pop = Population.create_empty(self.population_size-parent_size, N_trees)
+                new_pop = old_pop.create_empty(self.population_size-parent_size, N_trees)
 
                 for i_ind in range(new_pop.configuration.N_solutions):
                     # Pick a random parent

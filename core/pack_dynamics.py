@@ -126,7 +126,7 @@ class Dynamics(kgs.BaseClass):
     mass_h = 1.0  # Mass for boundary parameter h (single value)
 
     @typechecked
-    def run_simulation(self, sol:kgs.SolutionCollectionSquare):
+    def run_simulation(self, sol:kgs.SolutionCollection):
         # Initial configuration
 
         sol.check_constraints()
@@ -241,7 +241,7 @@ class DynamicsInitialize(Dynamics):
     use_separation_overlap = True
 
     @typechecked
-    def run_simulation(self, sol:kgs.SolutionCollectionSquare):
+    def run_simulation(self, sol:kgs.SolutionCollection):
 
         self.cost0 = pack_cost.AreaCost(scaling=1.)
         self.cost1 = pack_cost.CostCompound(costs = [pack_cost.BoundaryDistanceCost(scaling=self.scaling_boundary), 
@@ -250,6 +250,8 @@ class DynamicsInitialize(Dynamics):
             self.cost1.costs[0] = pack_cost.BoundaryCost(scaling=self.scaling_boundary)
         if self.use_separation_overlap:
             self.cost1.costs[1] = pack_cost.CollisionCostSeparation(scaling=self.scaling_overlap)   
+        if sol.periodic:
+            self.cost1.costs.pop(0)
         t_total = kgs.dtype_np(0.)
         dt = kgs.dtype_np(self.dt)
         phase = 'init'
@@ -334,7 +336,7 @@ class DynamicsAnneal(Dynamics):
         ])
 
     @typechecked
-    def run_simulation(self, sol: kgs.SolutionCollectionSquare):
+    def run_simulation(self, sol: kgs.SolutionCollection):
         n_ensembles = sol.N_solutions
         
         # Use cost as cost1, no cost0 (no force balance scheduling)
@@ -408,7 +410,7 @@ class OptimizerGraph(Optimizer):
     last_graph_exec_time: float = 0.0
 
     @typechecked
-    def run_simulation(self, sol:kgs.SolutionCollectionSquare):
+    def run_simulation(self, sol:kgs.SolutionCollection):
         # Initial configuration (same setup as Optimizer)
 
         sol.check_constraints()
