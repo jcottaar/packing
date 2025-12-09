@@ -122,8 +122,11 @@ class CollisionCost(Cost):
             trees = tree_list.get_trees()
 
             # Get crystal axes
+            import copy
+            sol_here = copy.deepcopy(sol)
+            sol_here.h = h[None]
             crystal_axes = cp.zeros((1, 2, 2), dtype=xyt.dtype)
-            sol.get_crystal_axes(crystal_axes)
+            sol_here.get_crystal_axes(crystal_axes)
             a_vec = crystal_axes[0, 0, :]
             b_vec = crystal_axes[0, 1, :]
             a_vec_np = a_vec.get()
@@ -306,9 +309,99 @@ class CollisionCost(Cost):
         if not sol.periodic:
             self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         else:
-            # Fall back to reference implementation for periodic boundaries
-            for i in range(sol.N_solutions):
-                cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol, sol.xyt[i], sol.h[i], evaluate_gradient)
+            crystal_axes = sol.get_crystal_axes_allocate().reshape(-1,4)
+            self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient, crystal_axes=crystal_axes)
+
+            # do finite gradient over the above to compute grad_xyt from self interactions, excluded above
+            # use only_self_interactions is true
+            # Compute missing self-interaction costs (kernel does not provide gradients for these).
+            eps = 1e-6
+
+            tmp_grad_dummy = None
+            tmp_bound_dummy = None
+
+            if evaluate_gradient:
+                # Compute theta-gradients for self-interactions by finite differences.
+                # Vectorized over the ensemble: perturb each tree's theta across all solutions.
+                n_trees = sol.N_trees
+                cost_plus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+                cost_minus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+
+                for t in range(n_trees):
+                    xyt_plus = sol.xyt.copy()
+                    xyt_minus = sol.xyt.copy()
+                    xyt_plus[:, t, 2] += eps
+                    xyt_minus[:, t, 2] -= eps
+
+                    sol_plus = type(sol)()
+                    sol_plus.xyt = xyt_plus
+                    sol_plus.h = sol.h
+                    sol_minus = type(sol)()
+                    sol_minus.xyt = xyt_minus
+                    sol_minus.h = sol.h
+
+                    # Only request costs for self-interactions
+                    self._compute_cost_internal(
+                        sol_plus,
+                        cost_plus,
+                        tmp_grad_dummy,
+                        tmp_bound_dummy,
+                        evaluate_gradient=False,
+                        crystal_axes=crystal_axes,
+                        only_self_interactions=True,
+                    )
+                    self._compute_cost_internal(
+                        sol_minus,
+                        cost_minus,
+                        tmp_grad_dummy,
+                        tmp_bound_dummy,
+                        evaluate_gradient=False,
+                        crystal_axes=crystal_axes,
+                        only_self_interactions=True,
+                    )
+
+                    grad_theta = (cost_plus - cost_minus) / (2.0 * eps)
+                    grad_xyt[:, t, 2] += grad_theta/2
+
+            if evaluate_gradient:
+
+                # Now, find gradients w.r.t. h using finite differences
+                # Vectorized finite-difference for grad w.r.t. h (no loop over solutions)
+                eps = 1e-6
+                grad_bound[:] = 0
+                n_bounds = sol.h.shape[1]
+
+                # Temporary arrays for compute_cost_internal outputs
+                tmp_grad_xyt = cp.zeros_like(sol.xyt)
+                tmp_grad_bound = cp.zeros_like(sol.h)
+
+                for k in range(n_bounds):
+                    # build perturbed h arrays for all solutions at once
+                    h_plus = sol.h.copy()
+                    h_minus = sol.h.copy()
+                    h_plus[:, k] += eps
+                    h_minus[:, k] -= eps
+
+                    # prepare solution-like objects to compute crystal axes for each perturbed ensemble
+                    sol_plus = type(sol)()
+                    sol_plus.xyt = sol.xyt
+                    sol_plus.h = h_plus
+                    crystal_axes_plus = sol_plus.get_crystal_axes_allocate().reshape(-1, 4)
+
+                    sol_minus = type(sol)()
+                    sol_minus.xyt = sol.xyt
+                    sol_minus.h = h_minus
+                    crystal_axes_minus = sol_minus.get_crystal_axes_allocate().reshape(-1, 4)
+
+                    # compute costs for all solutions in one call each
+                    cost_plus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+                    cost_minus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+
+                    self._compute_cost_internal(sol_plus, cost_plus, tmp_grad_xyt, tmp_grad_bound, evaluate_gradient=False, crystal_axes=crystal_axes_plus)
+                    self._compute_cost_internal(sol_minus, cost_minus, tmp_grad_xyt, tmp_grad_bound, evaluate_gradient=False, crystal_axes=crystal_axes_minus)
+
+                    # central difference across the ensemble (vectorized)
+                    grad_bound[:, k] = (cost_plus - cost_minus) / (2.0 * eps)
         
     
     
@@ -333,18 +426,14 @@ class CollisionCostOverlappingArea(CollisionCost):
                 grad[j] = cp.array((area_plus - area_minus) / (2 * epsilon))
         return area, grad
 
-    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
-        # use_separation=False -> run overlap area path
-        if sol.periodic:
-            # Fall back to reference implementation for periodic boundaries
-            super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
-        else:
-            # Use fast CUDA implementation for non-periodic
-            if evaluate_gradient:
-                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt)
-            else:
-                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost)
+    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient, crystal_axes=None,
+                               only_self_interactions=False):
+        # Use fast CUDA implementation
+        if evaluate_gradient:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
             grad_bound[:] = 0
+        else:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
 
 @dataclass
 class CollisionCostSeparation(CollisionCost):
@@ -688,18 +777,15 @@ class CollisionCostSeparation(CollisionCost):
 
         return cp.array(total_sep_squared), total_grad
     
-    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
-        # use_separation=True -> run separation (sum-of-squares) path
-        if sol.periodic or self.use_max or self.TEMP_use_kernel:
-            # Fall back to reference implementation for periodic boundaries or special modes
-            super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
-        else:
-            # Use fast CUDA implementation
-            if evaluate_gradient:
-                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt)
-            else:
-                pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost)
+    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient, crystal_axes=None,
+                               only_self_interactions=False):
+        # Use fast CUDA implementation
+        if evaluate_gradient:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
             grad_bound[:] = 0
+        else:
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+        
     
 
 @dataclass

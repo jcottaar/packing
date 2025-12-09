@@ -37,7 +37,7 @@ def _iter_geoms(geom):
         raise TypeError(f"Expected Polygon or MultiPolygon, got {type(geom)}")
 
 
-def _plot_polygons(polygons, ax):
+def _plot_polygons(polygons, ax, color_indices=None):
     """
     Plot a list of Shapely polygons with distinct unsaturated colors.
     Overlapping regions are highlighted in bright red.
@@ -46,6 +46,9 @@ def _plot_polygons(polygons, ax):
     ----------
     polygons : list of shapely.geometry.Polygon or MultiPolygon
     ax       : matplotlib Axes
+    color_indices : list of int, optional
+        If provided, color_indices[i] determines the color for polygon i.
+        Polygons with the same index will have the same color.
     """
     # Flatten any MultiPolygons
     flat_polys = []
@@ -59,7 +62,14 @@ def _plot_polygons(polygons, ax):
     # Draw base polygons (pastel, no edges)
     for i, poly in enumerate(flat_polys):
         x, y = poly.exterior.xy
-        facecolor = _pastel_color(i, n)
+        # Use color index if provided, otherwise use sequential coloring
+        if color_indices is not None:
+            color_idx = color_indices[i]
+            # Determine total number of unique colors
+            n_colors = len(set(color_indices))
+            facecolor = _pastel_color(color_idx, n_colors)
+        else:
+            facecolor = _pastel_color(i, n)
         patch = MplPolygon(
             list(zip(x, y)),
             closed=True,
@@ -186,6 +196,8 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1):
 
         # Create 3x3 tiling (centered on origin)
         all_trees = []
+        color_indices = []  # Track which unit cell each tree belongs to
+        cell_idx = 0
         for i in range(-1, 2):
             for j in range(-1, 2):
                 # Translation vector for this tile
@@ -196,9 +208,12 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1):
                 for tree in trees:
                     translated_tree = affinity.translate(tree, offset_x, offset_y)
                     all_trees.append(translated_tree)
+                    color_indices.append(cell_idx)
 
-        # Plot all tiled trees
-        _plot_polygons(all_trees, ax=ax)
+                cell_idx += 1
+
+        # Plot all tiled trees with color indices for each unit cell
+        _plot_polygons(all_trees, ax=ax, color_indices=color_indices)
 
         # Draw the unit cell outline (centered at origin)
         # Unit cell vertices: origin, a, a+b, b

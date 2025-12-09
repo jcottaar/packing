@@ -496,14 +496,14 @@ class SolutionCollectionLattice(SolutionCollection):
         cos_angle = cp.cos(h[2])
 
         # Area = |a × b| = a_length * b_length * sin(angle)
-        area = h[0] * h[1] * sin_angle
-
-        # Gradients
+        prod = h[0] * h[1] * sin_angle
+        area = cp.abs(prod)
+        sgn = cp.sign(prod)
+        # Propagate absolute value into gradients (subgradient 0 when prod==0)
         grad_bound = cp.zeros_like(h)
-        grad_bound[0] = h[1] * sin_angle          # ∂A/∂a_length
-        grad_bound[1] = h[0] * sin_angle          # ∂A/∂b_length
-        grad_bound[2] = h[0] * h[1] * cos_angle   # ∂A/∂angle
-
+        grad_bound[0] = sgn * (h[1] * sin_angle)          # ∂|prod|/∂a_length
+        grad_bound[1] = sgn * (h[0] * sin_angle)          # ∂|prod|/∂b_length
+        grad_bound[2] = sgn * (h[0] * h[1] * cos_angle)   # ∂|prod|/∂angle
         return area, grad_bound
 
     def compute_cost(self, sol:SolutionCollection, cost:cp.ndarray, grad_bound:cp.ndarray):
@@ -519,12 +519,15 @@ class SolutionCollectionLattice(SolutionCollection):
         cos_angle = cp.cos(sol.h[:, 2])
 
         # Area = a_length * b_length * sin(angle)
-        cost[:] = sol.h[:, 0] * sol.h[:, 1] * sin_angle
+        res = sol.h[:, 0] * sol.h[:, 1] * sin_angle
+        cost_sign = cp.sign(res)
+        cost[:] = cp.abs(res)
+
 
         # Gradients
-        grad_bound[:, 0] = sol.h[:, 1] * sin_angle          # ∂A/∂a_length
-        grad_bound[:, 1] = sol.h[:, 0] * sin_angle          # ∂A/∂b_length
-        grad_bound[:, 2] = sol.h[:, 0] * sol.h[:, 1] * cos_angle  # ∂A/∂angle
+        grad_bound[:, 0] = cost_sign * (sol.h[:, 1] * sin_angle)          # ∂A/∂a_length
+        grad_bound[:, 1] = cost_sign * (sol.h[:, 0] * sin_angle)          # ∂A/∂b_length
+        grad_bound[:, 2] = cost_sign * (sol.h[:, 0] * sol.h[:, 1] * cos_angle)  # ∂A/∂angle
 
     def _get_crystal_axes(self, crystal_axes):
         """Fill crystal_axes array with lattice vectors.
@@ -547,4 +550,38 @@ class SolutionCollectionLattice(SolutionCollection):
         crystal_axes[:, 1, 1] = self.h[:, 1] * cp.sin(self.h[:, 2])  # b_y
 
     def snap(self):
-        pass # skip for now
+        import pack_cost
+        if self.N_trees > 1:
+            # For each solution, check if overlap exists. If not, scale xy until overlap just occurs.
+            overlap_cost, _, _ = pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(self, evaluate_gradient=False)
+            needs_scaling = overlap_cost <= 0
+            if cp.any(needs_scaling):
+                # Work on a copy to avoid in-place issues
+                xyt = self.xyt.copy()
+                for i in range(self.N_solutions):
+                    if needs_scaling[i]:
+                        # Only scale if no overlap
+                        xy = xyt[i, :, :2]
+                        centroid = cp.mean(xy, axis=0)
+                        # Find minimal scaling factor s > 1 so that overlap just occurs
+                        # Use binary search
+                        s_lo, s_hi = 1.0, 10.0
+                        for _ in range(30):
+                            s_mid = 0.5 * (s_lo + s_hi)
+                            xy_scaled = (xy - centroid) * s_mid + centroid
+                            xyt_test = xyt[i].copy()
+                            xyt_test[:, :2] = xy_scaled
+                            # Create a temporary SolutionCollection for this solution
+                            from copy import deepcopy
+                            sol_tmp = deepcopy(self)
+                            sol_tmp.xyt = cp.expand_dims(xyt_test, axis=0)
+                            cost, _, _ = pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(sol_tmp, evaluate_gradient=False)
+                            if cost[0] > 0:
+                                s_hi = s_mid
+                            else:
+                                s_lo = s_mid
+                        # Apply the found scaling
+                        xyt[i, :, :2] = (xy - centroid) * s_hi + centroid
+                self.xyt = xyt
+            # Final assert: all solutions must now have overlap
+            assert cp.all(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(self, evaluate_gradient=False)[0] > 0)

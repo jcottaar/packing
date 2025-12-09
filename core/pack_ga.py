@@ -263,6 +263,10 @@ class Move(kgs.BaseClass):
         #     plt.pause(0.001)
         #     raise AssertionError(f"Two trees in individual {individual_id} are closer than 1e-6 (min_dist={min_dist})")
         return move_descriptor    
+    
+class NoOp(Move):
+    def _do_move(self, population, old_pop, individual_id, mate_id, generator):
+        return None
 
 @dataclass  
 class MoveSelector(Move):
@@ -632,6 +636,10 @@ class GA(kgs.BaseClass):
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
                 best_id = np.argmin(self.populations[i_N_trees].fitness)                   
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
+                best_pop = copy.deepcopy(self.populations[i_N_trees])
+                best_pop.select_ids([best_id])
+                print(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(best_pop.configuration)[0].get(), 
+                      pack_cost.CollisionCostSeparation().compute_cost_allocate(best_pop.configuration)[0].get())
                 self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]
                 if i_gen==0 or self.best_cost_per_generation[i_gen, i_N_trees]<self.best_cost_per_generation[i_gen-1, i_N_trees]:
                     pack_vis_sol.pack_vis_sol(self.populations[i_N_trees].configuration, solution_idx=best_id)

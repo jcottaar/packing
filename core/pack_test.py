@@ -51,7 +51,7 @@ def test_costs():
         [0.0, 0.0, 0.0],      # Tree 0 at origin
         [1.0, 0.5, np.pi/4]   # Tree 1 offset and rotated
         ]])/4
-    a_length = 2.5/6
+    a_length = -2.5/6
     b_length = 2.5/6
     angle = np.pi / 3  # 90 degrees - square lattice
     sol_list[-1].h = cp.array([[a_length, b_length, angle]])
@@ -61,6 +61,7 @@ def test_costs():
     plt.pause(0.001)
 
     for c in costs_to_test:
+        kgs.set_float32(False)
         # Collect all outputs for vectorized check
         all_ref_outputs = []
         all_fast_outputs = []
@@ -166,53 +167,55 @@ def test_costs():
             max_diff_bound = cp.max(cp.abs(grad_bound_num - grad_bound_fast_flat)).get().item()
             assert cp.allclose(grad_bound_num, grad_bound_fast_flat, rtol=1e-4, atol=1e-4), f"Finite-diff bound gradient mismatch (max diff {max_diff_bound})"
         
-        # Vectorized check: call with all xyt and bounds for this cost function
-        print(f"  Vectorized check for {c.__class__.__name__}")
-        full_xyt = cp.concatenate(all_xyt[:2], axis=0)
-        full_bounds = cp.concatenate(all_bounds[:2], axis=0)
-        print(full_bounds)
+        for todo in ([[0,1]] if (isinstance(c, pack_cost.BoundaryDistanceCost) or isinstance(c, pack_cost.BoundaryCost)) else [[0,1],[2,3]]):
+            # Vectorized check: call with all xyt and bounds for this cost function
+            print(f"  Vectorized check for {c.__class__.__name__}")
+            full_xyt = cp.concatenate(all_xyt[todo[0]:todo[-1]+1], axis=0)
+            full_bounds = cp.concatenate(all_bounds[todo[0]:todo[-1]+1], axis=0)
 
-        # Compute vectorized results using kgs.SolutionCollectionSquare
-        full_sol = kgs.SolutionCollectionSquare()
-        full_sol.xyt = full_xyt
-        full_sol.h = full_bounds
-        kgs.set_float32(False)
-        vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_sol)
-        kgs.set_float32(CUDA_float32)
-        full_sol_fast = kgs.SolutionCollectionSquare()
-        full_sol_fast.xyt = cp.array(full_xyt,dtype=kgs.dtype_cp)
-        full_sol_fast.h = cp.array(full_bounds,dtype=kgs.dtype_cp)
-        vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)
-        
-        # Check each tree's results
-        for i in range(2):
-            # Get stored individual outputs
-            stored_ref = all_ref_outputs[i]
-            stored_fast = all_fast_outputs[i]
+            # Compute vectorized results using kgs.SolutionCollectionSquare
+            full_sol = type(sol_list[todo[0]])()
+            full_sol.xyt = full_xyt
+            full_sol.h = full_bounds
+            kgs.set_float32(False)
+            print(full_sol.h)
+            vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_sol)
+            print(vec_cost_ref)
+            kgs.set_float32(CUDA_float32)
+            full_sol_fast = type(sol_list[todo[0]])()
+            full_sol_fast.xyt = cp.array(full_xyt,dtype=kgs.dtype_cp)
+            full_sol_fast.h = cp.array(full_bounds,dtype=kgs.dtype_cp)
+            vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)
             
-            # Extract from vectorized results
-            vec_ref_cost_i = vec_cost_ref[i]
-            vec_fast_cost_i = vec_cost_fast[i]
-            vec_ref_grad_i = vec_grad_ref[i]
-            vec_fast_grad_i = vec_grad_fast[i]
-            vec_ref_grad_bound_i = vec_grad_bound_ref[i]
-            vec_fast_grad_bound_i = vec_grad_bound_fast[i]
+            # Check each tree's results
+            for i,i2 in enumerate(todo):
+                # Get stored individual outputs
+                stored_ref = all_ref_outputs[i2]
+                stored_fast = all_fast_outputs[i2]
+                
+                # Extract from vectorized results
+                vec_ref_cost_i = vec_cost_ref[i]
+                vec_fast_cost_i = vec_cost_fast[i]
+                vec_ref_grad_i = vec_grad_ref[i]
+                vec_fast_grad_i = vec_grad_fast[i]
+                vec_ref_grad_bound_i = vec_grad_bound_ref[i]
+                vec_fast_grad_bound_i = vec_grad_bound_fast[i]
+                
+                # Compare vectorized with individual calls - must be exactly identical
+                assert cp.array_equal(vec_ref_cost_i, stored_ref[0][0]), \
+                    f"Vectorized ref cost mismatch for {c.__class__.__name__} tree {i}: {vec_ref_cost_i} vs {stored_ref[0]}"
+                assert cp.array_equal(vec_fast_cost_i, stored_fast[0][0]), \
+                    f"Vectorized fast cost mismatch for {c.__class__.__name__} tree {i}: {vec_fast_cost_i} vs {stored_fast[0]}"
+                assert cp.array_equal(vec_ref_grad_i, stored_ref[1][0]), \
+                    f"Vectorized ref grad mismatch for {c.__class__.__name__} tree {i}"
+                assert cp.array_equal(vec_fast_grad_i, stored_fast[1][0]), \
+                    f"Vectorized fast grad mismatch for {c.__class__.__name__} tree {i}"
+                assert cp.array_equal(vec_ref_grad_bound_i, stored_ref[2][0]), \
+                    f"Vectorized ref bound grad mismatch for {c.__class__.__name__} tree {i}"
+                assert cp.array_equal(vec_fast_grad_bound_i, stored_fast[2][0]), \
+                    f"Vectorized fast bound grad mismatch for {c.__class__.__name__} tree {i}"
             
-            # Compare vectorized with individual calls - must be exactly identical
-            assert cp.array_equal(vec_ref_cost_i, stored_ref[0][0]), \
-                f"Vectorized ref cost mismatch for {c.__class__.__name__} tree {i}: {vec_ref_cost_i} vs {stored_ref[0]}"
-            assert cp.array_equal(vec_fast_cost_i, stored_fast[0][0]), \
-                f"Vectorized fast cost mismatch for {c.__class__.__name__} tree {i}: {vec_fast_cost_i} vs {stored_fast[0]}"
-            assert cp.array_equal(vec_ref_grad_i, stored_ref[1][0]), \
-                f"Vectorized ref grad mismatch for {c.__class__.__name__} tree {i}"
-            assert cp.array_equal(vec_fast_grad_i, stored_fast[1][0]), \
-                f"Vectorized fast grad mismatch for {c.__class__.__name__} tree {i}"
-            assert cp.array_equal(vec_ref_grad_bound_i, stored_ref[2][0]), \
-                f"Vectorized ref bound grad mismatch for {c.__class__.__name__} tree {i}"
-            assert cp.array_equal(vec_fast_grad_bound_i, stored_fast[2][0]), \
-                f"Vectorized fast bound grad mismatch for {c.__class__.__name__} tree {i}"
-        
-        print(f"  ✓ Vectorized results exactly match individual calls")
+            print(f"  ✓ Vectorized results exactly match individual calls")
 
         
         # # Timing comparisons
