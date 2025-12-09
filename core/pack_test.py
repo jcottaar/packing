@@ -40,6 +40,15 @@ def test_costs():
     sol_list.append(kgs.SolutionCollectionLattice())
     sol_list[-1].xyt = cp.array([[
         [0.0, 0.0, 0.0],      # Tree 0 at origin
+        [1.5, 0.5, np.pi/4]   # Tree 1 offset and rotated
+        ]])/4
+    a_length = 2.5/3
+    b_length = 2.5/2
+    angle = np.pi / 3  # 90 degrees - square lattice
+    sol_list[-1].h = cp.array([[a_length, b_length, angle]])
+    sol_list.append(kgs.SolutionCollectionLattice())
+    sol_list[-1].xyt = cp.array([[
+        [0.0, 0.0, 0.0],      # Tree 0 at origin
         [1.0, 0.5, np.pi/4]   # Tree 1 offset and rotated
         ]])/4
     a_length = 2.5/6
@@ -100,7 +109,10 @@ def test_costs():
                 sol_tmp = type(sol_single)()
                 sol_tmp.xyt = cp.array(xyt_arr)
                 sol_tmp.h = sol_single.h
-                return obj.compute_cost_ref(sol_tmp)[0]
+                if CUDA_float32:
+                    return obj.compute_cost_ref(sol_tmp)[0]
+                else:
+                    return obj.compute_cost_allocate(sol_tmp)[0]
 
             x0 = sol_single.xyt.copy()
             shape = x0.shape
@@ -129,7 +141,10 @@ def test_costs():
                 sol_tmp = type(sol_single)()
                 sol_tmp.xyt = sol_single.xyt
                 sol_tmp.h = cp.array(bound_arr)
-                return obj.compute_cost_ref(sol_tmp)[0]
+                if CUDA_float32:
+                    return obj.compute_cost_ref(sol_tmp)[0]
+                else:
+                    return obj.compute_cost_allocate(sol_tmp)[0]
 
             b0 = sol_single.h.copy()
             bound_shape = b0.shape

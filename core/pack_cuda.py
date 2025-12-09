@@ -289,26 +289,6 @@ __device__ double overlap_ref_with_list_piece(
     return sum;
 }
 
-// Compute sum of overlap areas between a reference tree `ref` and a list
-// of other trees provided as a flattened Nx3 array.
-// Always skips comparing ref with itself using skip_index.
-// Note: This function is currently unused but kept for potential future use.
-// It would need to be updated to handle gradients if used.
-__device__ double overlap_ref_with_list(
-    const double3 ref,
-    const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
-    const int n,
-    const int skip_index)  // index to skip (self-collision), use -1 to skip none
-{
-    double sum = 0.0;
-    
-    // Sum across all 4 pieces (no gradients needed)
-    for (int pi = 0; pi < MAX_PIECES; ++pi) {
-        sum += overlap_ref_with_list_piece(ref, xyt_Nx3, n, pi, NULL, 0, skip_index, 0);
-    }
-    return sum;
-}
-
 
 
 // Compute the area of a single convex polygon that lies outside the square [-h/2, h/2] x [-h/2, h/2]

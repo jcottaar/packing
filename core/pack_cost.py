@@ -201,12 +201,12 @@ class CollisionCost(Cost):
                 cost_tmp = 0.0
                 if len(other_xyt_self) > 0:
                     other_xyt_arr = cp.stack(other_xyt_self, axis=0)
-                    this_cost_tmp, _ = self._compute_cost_one_tree_ref(xyt_in[tree_idx], other_xyt_arr, this_tree_tmp, other_trees_self)
+                    this_cost_tmp, X = self._compute_cost_one_tree_ref(xyt_in[tree_idx], other_xyt_arr, this_tree_tmp, other_trees_self)
                     cost_tmp = this_cost_tmp / 2
 
                 return cp.array(cost_tmp)
 
-            # Add self-interaction cost to total (sum over all trees)
+            # # Add self-interaction cost to total (sum over all trees)
             for i in range(n_trees):
                 self_interaction_cost = _compute_cost_only_xyt(xyt, i)
                 total_cost += self_interaction_cost
@@ -214,7 +214,7 @@ class CollisionCost(Cost):
             # Compute self-interaction gradients using finite differences
             eps = 1e-6
             for i in range(n_trees):
-                for j in range(3):  # x, y, theta
+                for j in [2]:  # theta only, x and y are 0
                     xyt_plus = xyt.copy()
                     xyt_minus = xyt.copy()
                     xyt_plus[i, j] += eps
@@ -301,6 +301,16 @@ class CollisionCost(Cost):
                 total_grad[i] += this_grads
 
             return total_cost, total_grad, cp.zeros_like(h)
+        
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
+        if not sol.periodic:
+            self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
+        else:
+            # Fall back to reference implementation for periodic boundaries
+            for i in range(sol.N_solutions):
+                cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol, sol.xyt[i], sol.h[i], evaluate_gradient)
+        
+    
     
 class CollisionCostOverlappingArea(CollisionCost):
     # Collision cost based on overlapping area of two trees
@@ -323,7 +333,7 @@ class CollisionCostOverlappingArea(CollisionCost):
                 grad[j] = cp.array((area_plus - area_minus) / (2 * epsilon))
         return area, grad
 
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
+    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # use_separation=False -> run overlap area path
         if sol.periodic:
             # Fall back to reference implementation for periodic boundaries
@@ -678,7 +688,7 @@ class CollisionCostSeparation(CollisionCost):
 
         return cp.array(total_sep_squared), total_grad
     
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
+    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # use_separation=True -> run separation (sum-of-squares) path
         if sol.periodic or self.use_max or self.TEMP_use_kernel:
             # Fall back to reference implementation for periodic boundaries or special modes
