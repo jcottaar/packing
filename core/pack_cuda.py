@@ -129,6 +129,114 @@ __device__ __forceinline__ void compute_tree_poly_and_aabb(
 // Compute overlap for a single piece (pi) of the reference tree against all pieces of trees in the list.
 // This enables parallelization across the 4 pieces of the reference tree.
 // Optionally computes gradients w.r.t. the reference pose when compute_grads is non-zero.
+// Process overlap/separation between one ref piece and all pieces of one other tree
+__device__ double process_tree_pair_piece(
+    const double3 ref,
+    const double3 other,
+    const int pi,
+    const d2* __restrict__ ref_poly,
+    const int n1,
+    const d2* __restrict__ ref_local_piece,
+    const double ref_aabb_min_x,
+    const double ref_aabb_max_x,
+    const double ref_aabb_min_y,
+    const double ref_aabb_max_y,
+    const double c_ref,
+    const double s_ref,
+    const int use_separation,
+    const int compute_grads,
+    double3* d_ref_local)  // output: accumulated gradient (modified in-place)
+{
+    // Early exit: check if tree centers are too far apart
+    double dx = other.x - ref.x;
+    double dy = other.y - ref.y;
+    double dist_sq = dx*dx + dy*dy;
+    double max_overlap_dist = 2.0 * MAX_RADIUS;
+
+    if (dist_sq > max_overlap_dist * max_overlap_dist) {
+        return 0.0;  // Trees too far apart to overlap
+    }
+
+    double total = 0.0;
+
+    // Process only the assigned piece (pi) against all pieces of other tree
+    for (int pj = 0; pj < MAX_PIECES; ++pj) {
+        int n2 = const_piece_nverts[pj];
+
+        // Compute only this piece of the other tree
+        d2 other_poly[MAX_VERTS_PER_PIECE];
+        double other_aabb_min_x;
+        double other_aabb_max_x;
+        double other_aabb_min_y;
+        double other_aabb_max_y;
+
+        compute_tree_poly_and_aabb(other, pj, other_poly, other_aabb_min_x, other_aabb_max_x,
+                                    other_aabb_min_y, other_aabb_max_y);
+
+        // AABB overlap test - early exit if no overlap
+        if (ref_aabb_max_x < other_aabb_min_x || other_aabb_max_x < ref_aabb_min_x ||
+            ref_aabb_max_y < other_aabb_min_y || other_aabb_max_y < ref_aabb_min_y) {
+            continue;  // No AABB overlap, skip expensive intersection
+        }
+
+        if (!use_separation) {
+            // Pass NULL for gradient outputs when not computing gradients
+            d2 d_ref_poly[MAX_VERTS_PER_PIECE];
+            d2 d_other_poly[MAX_VERTS_PER_PIECE];
+
+            double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
+                                                    compute_grads ? d_ref_poly : NULL,
+                                                    compute_grads ? d_other_poly : NULL);
+            total += area;
+
+            if (compute_grads) {
+                // Backward through transform for ref piece
+                double3 d_ref_pose_piece;
+                backward_transform_vertices(
+                    ref_local_piece, n1,
+                    d_ref_poly,
+                    c_ref, s_ref,
+                    &d_ref_pose_piece);
+
+                // Accumulate into local gradient
+                d_ref_local->x += d_ref_pose_piece.x;
+                d_ref_local->y += d_ref_pose_piece.y;
+                d_ref_local->z += d_ref_pose_piece.z;
+            }
+        } else {
+            // Separation-based primitive
+            double sep = 0.0;
+            double dsep_dx = 0.0;
+            double dsep_dy = 0.0;
+            double dsep_dtheta = 0.0;
+
+            // Pass NULL for gradient outputs when not computing gradients
+            sat_separation_with_grad_pose(
+                ref_local_piece, n1,
+                other_poly, n2,
+                ref.x, ref.y, c_ref, s_ref,
+                &sep,
+                compute_grads ? &dsep_dx : NULL,
+                compute_grads ? &dsep_dy : NULL,
+                compute_grads ? &dsep_dtheta : NULL);
+
+            // Only positive penetration contributes
+            if (sep > 0.0) {
+                total += sep * sep;
+
+                if (compute_grads) {
+                    // Gradient of sep^2: 2 * sep * dsep/dparam
+                    d_ref_local->x += 2.0 * sep * dsep_dx;
+                    d_ref_local->y += 2.0 * sep * dsep_dy;
+                    d_ref_local->z += 2.0 * sep * dsep_dtheta;
+                }
+            }
+        }
+    }
+
+    return total;
+}
+
 __device__ double overlap_ref_with_list_piece(
     const double3 ref,
     const double* __restrict__ xyt_Nx3, // flattened: [n, 3] in C-contiguous layout
@@ -189,93 +297,16 @@ __device__ double overlap_ref_with_list_piece(
         other.y = xyt_Nx3[i * 3 + 1];
         other.z = xyt_Nx3[i * 3 + 2];
 
-        // Early exit: check if tree centers are too far apart
-        double dx = other.x - ref.x;
-        double dy = other.y - ref.y;
-        double dist_sq = dx*dx + dy*dy;
-        double max_overlap_dist = 2.0 * MAX_RADIUS;
-        
-        if (dist_sq > max_overlap_dist * max_overlap_dist) {
-            continue;  // Trees too far apart to overlap
-        }
-        
-        double total = 0.0;
+        // Process this tree pair using the extracted subfunction
+        double total = process_tree_pair_piece(
+            ref, other, pi,
+            ref_poly, n1, ref_local_piece,
+            ref_aabb_min_x, ref_aabb_max_x,
+            ref_aabb_min_y, ref_aabb_max_y,
+            c_ref, s_ref,
+            use_separation, compute_grads,
+            &d_ref_local);
 
-        // Process only the assigned piece (pi) against all pieces of other tree
-        for (int pj = 0; pj < MAX_PIECES; ++pj) {
-            int n2 = const_piece_nverts[pj];
-            
-            // Compute only this piece of the other tree
-            d2 other_poly[MAX_VERTS_PER_PIECE];
-            double other_aabb_min_x;
-            double other_aabb_max_x;
-            double other_aabb_min_y;
-            double other_aabb_max_y;
-            
-            compute_tree_poly_and_aabb(other, pj, other_poly, other_aabb_min_x, other_aabb_max_x,
-                                        other_aabb_min_y, other_aabb_max_y);
-
-            // AABB overlap test - early exit if no overlap
-            if (ref_aabb_max_x < other_aabb_min_x || other_aabb_max_x < ref_aabb_min_x ||
-                ref_aabb_max_y < other_aabb_min_y || other_aabb_max_y < ref_aabb_min_y) {
-                continue;  // No AABB overlap, skip expensive intersection
-            }
-
-            if (!use_separation) {
-                // Pass NULL for gradient outputs when not computing gradients
-                d2 d_ref_poly[MAX_VERTS_PER_PIECE];
-                d2 d_other_poly[MAX_VERTS_PER_PIECE];
-
-                double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
-                                                        compute_grads ? d_ref_poly : NULL,
-                                                        compute_grads ? d_other_poly : NULL);
-                total += area;
-
-                if (compute_grads) {
-                    // Backward through transform for ref piece
-                    double3 d_ref_pose_piece;
-                    backward_transform_vertices(
-                        ref_local_piece, n1,
-                        d_ref_poly,
-                        c_ref, s_ref,
-                        &d_ref_pose_piece);
-
-                    // Accumulate into local gradient
-                    d_ref_local.x += d_ref_pose_piece.x;
-                    d_ref_local.y += d_ref_pose_piece.y;
-                    d_ref_local.z += d_ref_pose_piece.z;
-                }
-            } else {
-                // Separation-based primitive
-                double sep = 0.0;
-                double dsep_dx = 0.0;
-                double dsep_dy = 0.0;
-                double dsep_dtheta = 0.0;
-
-                // Pass NULL for gradient outputs when not computing gradients
-                sat_separation_with_grad_pose(
-                    ref_local_piece, n1,
-                    other_poly, n2,
-                    ref.x, ref.y, c_ref, s_ref,
-                    &sep,
-                    compute_grads ? &dsep_dx : NULL,
-                    compute_grads ? &dsep_dy : NULL,
-                    compute_grads ? &dsep_dtheta : NULL);
-
-                // Only positive penetration contributes
-                if (sep > 0.0) {
-                    total += sep * sep;
-
-                    if (compute_grads) {
-                        // Gradient of sep^2: 2 * sep * dsep/dparam
-                        d_ref_local.x += 2.0 * sep * dsep_dx;
-                        d_ref_local.y += 2.0 * sep * dsep_dy;
-                        d_ref_local.z += 2.0 * sep * dsep_dtheta;
-                    }
-                }
-            }
-        }
-        
         sum += total;
     }
     
