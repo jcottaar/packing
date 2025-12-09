@@ -112,7 +112,7 @@ class CollisionCost(Cost):
     
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
         # Compute collision cost for all pairs of trees
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
+        assert not sol.periodic
         n_trees = sol.N_trees
         tree_list = kgs.TreeList()
         tree_list.xyt = xyt
@@ -152,7 +152,7 @@ class CollisionCostOverlappingArea(CollisionCost):
 
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # use_separation=False -> run overlap area path
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
+        assert not sol.periodic
         if evaluate_gradient:
             pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt)
         else:
@@ -503,7 +503,7 @@ class CollisionCostSeparation(CollisionCost):
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # use_separation=True -> run separation (sum-of-squares) path
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
+        assert not sol.periodic
         if self.use_max or self.TEMP_use_kernel:
             super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         else:
@@ -601,7 +601,7 @@ class BoundaryDistanceCost(Cost):
     # Cost based on squared distance of vertices outside the square boundary
     # Per tree, use only the vertex with the maximum distance
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt,h):
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
+        assert not sol.periodic
         # xyt is (n_trees, 3), bound is (1,); compute squared distance for each vertex outside square
         b = float(h[0].get().item())
         half = b / 2.0
@@ -726,7 +726,7 @@ class BoundaryDistanceCost(Cost):
         return cp.array(total_cost), grad, grad_bound
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
-        assert isinstance(sol, kgs.SolutionCollectionSquare)
+        assert not sol.periodic
         if self.use_kernel:
             if evaluate_gradient:
                 pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_bound)

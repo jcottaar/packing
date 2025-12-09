@@ -12,7 +12,7 @@ import pack_cuda
 import pack_cuda_primitives_test
 import matplotlib.pyplot as plt
 
-CUDA_float32 = True
+CUDA_float32 = False
 kgs.set_float32(CUDA_float32)
 pack_cuda._ensure_initialized()
 
