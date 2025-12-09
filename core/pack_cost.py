@@ -173,43 +173,43 @@ class CollisionCost(Cost):
                 total_grad[i] += this_grads
 
             # Handle self-interactions separately using finite differences
-            # Build helper function to compute cost with given xyt
-            def _compute_cost_only_xyt(xyt_in):
+            # Build helper function to compute cost with given xyt for a specific tree i
+            def _compute_cost_only_xyt(xyt_in, tree_idx):
                 tree_list_tmp = kgs.TreeList()
                 tree_list_tmp.xyt = xyt_in
                 trees_tmp = tree_list_tmp.get_trees()
 
+                this_tree_tmp = trees_tmp[tree_idx]
+                other_trees_self = []
+                other_xyt_self = []
+
+                # Only include self-interactions (tree i with its periodic images)
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        if dx == 0 and dy == 0:
+                            continue  # Skip origin
+
+                        shift = dx * a_vec_np + dy * b_vec_np
+                        tree_i_shifted = shapely.affinity.translate(trees_tmp[tree_idx], xoff=shift[0], yoff=shift[1])
+                        other_trees_self.append(tree_i_shifted)
+
+                        xyt_i_shifted = xyt_in[tree_idx].copy()
+                        xyt_i_shifted[0] += cp.array(shift[0])
+                        xyt_i_shifted[1] += cp.array(shift[1])
+                        other_xyt_self.append(xyt_i_shifted)
+
                 cost_tmp = 0.0
-                for i in range(n_trees):
-                    this_tree_tmp = trees_tmp[i]
-                    other_trees_self = []
-                    other_xyt_self = []
-
-                    # Only include self-interactions (tree i with its periodic images)
-                    for dx in [-1, 0, 1]:
-                        for dy in [-1, 0, 1]:
-                            if dx == 0 and dy == 0:
-                                continue  # Skip origin
-
-                            shift = dx * a_vec_np + dy * b_vec_np
-                            tree_i_shifted = shapely.affinity.translate(trees_tmp[i], xoff=shift[0], yoff=shift[1])
-                            other_trees_self.append(tree_i_shifted)
-
-                            xyt_i_shifted = xyt_in[i].copy()
-                            xyt_i_shifted[0] += cp.array(shift[0])
-                            xyt_i_shifted[1] += cp.array(shift[1])
-                            other_xyt_self.append(xyt_i_shifted)
-
-                    if len(other_xyt_self) > 0:
-                        other_xyt_arr = cp.stack(other_xyt_self, axis=0)
-                        this_cost_tmp, _ = self._compute_cost_one_tree_ref(xyt_in[i], other_xyt_arr, this_tree_tmp, other_trees_self)
-                        cost_tmp += this_cost_tmp / 2
+                if len(other_xyt_self) > 0:
+                    other_xyt_arr = cp.stack(other_xyt_self, axis=0)
+                    this_cost_tmp, _ = self._compute_cost_one_tree_ref(xyt_in[tree_idx], other_xyt_arr, this_tree_tmp, other_trees_self)
+                    cost_tmp = this_cost_tmp / 2
 
                 return cp.array(cost_tmp)
 
-            # Add self-interaction cost to total
-            self_interaction_cost = _compute_cost_only_xyt(xyt)
-            total_cost += self_interaction_cost
+            # Add self-interaction cost to total (sum over all trees)
+            for i in range(n_trees):
+                self_interaction_cost = _compute_cost_only_xyt(xyt, i)
+                total_cost += self_interaction_cost
 
             # Compute self-interaction gradients using finite differences
             eps = 1e-6
@@ -220,8 +220,8 @@ class CollisionCost(Cost):
                     xyt_plus[i, j] += eps
                     xyt_minus[i, j] -= eps
 
-                    cost_plus = _compute_cost_only_xyt(xyt_plus)
-                    cost_minus = _compute_cost_only_xyt(xyt_minus)
+                    cost_plus = _compute_cost_only_xyt(xyt_plus, i)
+                    cost_minus = _compute_cost_only_xyt(xyt_minus, i)
 
                     total_grad[i, j] += (cost_plus - cost_minus) / (2.0 * eps)
 
