@@ -186,7 +186,7 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1):
         ax.set_xlim(minx - margin_x, maxx + margin_x)
         ax.set_ylim(miny - margin_y, maxy + margin_y)
 
-    elif isinstance(sol, kgs.SolutionCollectionLattice):
+    elif sol.periodic:
         # Periodic solution: plot 3x3 tiling and display unit cell
 
         # Get crystal axes

@@ -174,7 +174,7 @@ class Population(kgs.BaseClass):
     
     def create_empty(self, N_individuals, N_trees):
         xyt = cp.zeros((N_individuals, N_trees, 3), dtype=kgs.dtype_cp)
-        h = cp.zeros((N_individuals, 3), dtype=kgs.dtype_cp)
+        h = cp.zeros((N_individuals, self.configuration._N_h_DOF), dtype=kgs.dtype_cp)
         configuration = type(self.configuration)(xyt=xyt, h=h)
         population = type(self)(configuration=configuration)
         population.fitness = np.zeros(N_individuals, dtype=kgs.dtype_np)
@@ -226,6 +226,8 @@ class InitializerRandomJiggled(Initializer):
         sol.xyt = xyt    
         if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
             sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
+        elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
+            sol.h = cp.array([[size_setup_scaled,size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)         
         else:
             assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
             sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)               

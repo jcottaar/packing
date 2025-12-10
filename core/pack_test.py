@@ -55,6 +55,14 @@ def test_costs():
     b_length = 2.5/6
     angle = np.pi / 3  # 90 degrees - square lattice
     sol_list[-1].h = cp.array([[a_length, b_length, angle]])
+    sol_list.append(kgs.SolutionCollectionLatticeRectangle())
+    sol_list[-1].xyt = cp.array([[
+        [0.0, 0.0, 0.0],      # Tree 0 at origin
+        [1.0, 0.5, np.pi/4]   # Tree 1 offset and rotated
+        ]])/4
+    a_length = -2.5/6
+    b_length = 2.5/5
+    sol_list[-1].h = cp.array([[a_length, b_length]])
     
     for ii in range(len(sol_list)):
         pack_vis_sol.pack_vis_sol(sol_list[ii], solution_idx=0)

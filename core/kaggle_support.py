@@ -366,6 +366,28 @@ class SolutionCollection(BaseClass):
         arr = to_cpu(self.xyt)
         return int(np.asarray(arr).shape[1])
     
+    def rotate(self, angle:float):
+        # rotate xyt by given angle (radians)
+        xyt_cp = self.xyt  # assume already cupy array and non-empty        
+
+        c = cp.cos(angle)
+        s = cp.sin(angle)
+
+        x = xyt_cp[:, :, 0]
+        y = xyt_cp[:, :, 1]
+        cx = cp.mean(x, axis=1)[:, None]
+        cy = cp.mean(y, axis=1)[:, None]
+
+        x0 = x - cx
+        y0 = y - cy
+
+        x_rot =  c * x0 + s * y0
+        y_rot = -s * x0 + c * y0
+
+        xyt_cp[:, :, 0] = x_rot + cx
+        xyt_cp[:, :, 1] = y_rot + cy
+        xyt_cp[:, :, 2] = (xyt_cp[:, :, 2] - angle) % (2 * np.pi)
+    
     def get_crystal_axes_allocate(self):
         """Get crystal axes for each solution. Returns (N_solutions, 2, 2) array."""        
         assert self.periodic
@@ -584,3 +606,72 @@ class SolutionCollectionLattice(SolutionCollection):
             # Final assert: all solutions must now have overlap
             assert cp.all(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(self, evaluate_gradient=False)[0] > 0)
             self.periodic = True
+
+
+@dataclass
+class SolutionCollectionLatticeRectangle(SolutionCollectionLattice):
+    # h[0]: crystal axis 1 length (a_length)
+    # h[1]: crystal axis 2 length (b_length)
+    # h[2]: angle between axes (radians)
+
+    def __post_init__(self):        
+        super().__post_init__()
+        self._N_h_DOF = 2
+
+    def compute_cost_single_ref(self, h:cp.ndarray):
+        """Compute area cost and grad_bound for a single solution.
+
+        Area = a_length * b_length * sin(angle)
+
+        Returns:
+            cost: scalar area
+            grad_bound: (3,) array with derivatives [d/da, d/db, d/dangle]
+        """
+        # Area = |a × b| = a_length * b_length * sin(angle)
+        prod = h[0] * h[1]
+        area = cp.abs(prod)
+        sgn = cp.sign(prod)
+        # Propagate absolute value into gradients (subgradient 0 when prod==0)
+        grad_bound = cp.zeros_like(h)
+        grad_bound[0] = sgn * (h[1])          # ∂|prod|/∂a_length
+        grad_bound[1] = sgn * (h[0])          # ∂|prod|/∂b_length
+        return area, grad_bound
+
+    def compute_cost(self, sol:SolutionCollection, cost:cp.ndarray, grad_bound:cp.ndarray):
+        """Compute area cost and grad_bound for multiple solutions (vectorized).
+
+        Args:
+            sol: This SolutionCollection instance (self)
+            cost: (N_solutions,) output array
+            grad_bound: (N_solutions, 3) output array
+        """
+
+        # Area = a_length * b_length * sin(angle)
+        res = sol.h[:, 0] * sol.h[:, 1]
+        cost_sign = cp.sign(res)
+        cost[:] = cp.abs(res)
+
+
+        # Gradients
+        grad_bound[:, 0] = cost_sign * (sol.h[:, 1])          # ∂A/∂a_length
+        grad_bound[:, 1] = cost_sign * (sol.h[:, 0])          # ∂A/∂b_length
+
+    def _get_crystal_axes(self, crystal_axes):
+        """Fill crystal_axes array with lattice vectors.
+
+        Args:
+            crystal_axes: (N_solutions, 2, 2) output array
+                crystal_axes[i, 0, :] = first lattice vector (a)
+                crystal_axes[i, 1, :] = second lattice vector (b)
+
+        Convention:
+            a = (a_length, 0)  - first axis along x
+            b = (b_length * cos(angle), b_length * sin(angle))
+        """
+        # First axis: a = (a_length, 0)
+        crystal_axes[:, 0, 0] = self.h[:, 0]  # a_x = a_length
+        crystal_axes[:, 0, 1] = 0              # a_y = 0
+
+        # Second axis: b = (b_length * cos(angle), b_length * sin(angle))
+        crystal_axes[:, 1, 0] = 0  # b_x
+        crystal_axes[:, 1, 1] = self.h[:, 1] # b_y
