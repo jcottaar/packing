@@ -28,20 +28,19 @@ def snap_cell(sol, skip_assert=False):
         cost_val = cost.compute_cost_allocate(sol, evaluate_gradient=False)[0]
         return cost_val>0
     # implement line search on h[0,0] and h[0,1] to satisfy constraints, using _overlaps.
+    import boolean_line_search
     def _snap_axis(axis_idx, max_iter=60):
         orig = sol.h[0, axis_idx].copy()
-        # factors: lo -> causes overlap (True), hi -> no overlap (False)
+        sol_tmp = copy.deepcopy(sol)
+        def f(factor):      
+            nonlocal sol_tmp      
+            sol_tmp.h[0, axis_idx] = orig * factor
+            return _overlaps(sol_tmp)
+        # lo: overlap (True), hi: no overlap (False)
         hi = 10.
         lo = 0.1
-        sol_tmp = copy.deepcopy(sol)
-        for _ in range(max_iter):
-            mid = (hi + lo) / 2.0            
-            sol_tmp.h[0, axis_idx] = orig * mid
-            if _overlaps(sol_tmp):
-                lo = mid
-            else:
-                hi = mid
-        sol.h[0, axis_idx] = orig * hi
+        factor = boolean_line_search.boolean_line_search(f, lo, hi, max_iter=max_iter)
+        sol.h[0, axis_idx] = orig * factor
 
     _snap_axis(1)   
     if not skip_assert:
@@ -154,9 +153,20 @@ def try_tilings(sol, N_max=20, show_one=False):
                             sol_here.snap()  # Compute the bounding square
                             if show_one and tile_x==5 and tile_y==5:
                                 pack_vis_sol.pack_vis_sol(sol_here, solution_idx=0)
-                            res.append([sol_here.h[0,0].get(), N_trees_total])
+                            res.append([sol_here.h[0,0].get(), N_trees_total, sol_here])
     best_per_tree = np.zeros(200)
+    sol_per_tree = []
     for i_tree in range(200):
-        best_per_tree[i_tree] = np.min([area for area, N_trees in res if N_trees>=i_tree+1])
-    return best_per_tree
+        # Find all solutions with at least i_tree+1 trees
+        candidates = [(area, N_trees, sol_here) for area, N_trees, sol_here in res if N_trees >= i_tree+1]
+        assert(candidates)
+        if candidates:
+            # Find the solution with minimal area
+            min_area, min_N_trees, min_sol = min(candidates, key=lambda x: x[0])
+            min_sol = copy.deepcopy(min_sol)
+            best_per_tree[i_tree] = min_area
+            min_sol.xyt = min_sol.xyt[:, :i_tree+1, :]
+            assert(min_sol.N_trees == i_tree+1)
+            sol_per_tree.append(min_sol)
+    return best_per_tree, sol_per_tree
 

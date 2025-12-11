@@ -143,7 +143,6 @@ def score(solution: pd.DataFrame, submission: pd.DataFrame, row_id_column_name: 
         bounds = unary_union(all_polygons).bounds
         # Use the largest edge of the bounding rectangle to make a square boulding box
         side_length_scaled = max(bounds[2] - bounds[0], bounds[3] - bounds[1])
-        print(Decimal(side_length_scaled)/scale_factor)
 
         group_score = (Decimal(side_length_scaled) ** 2) / (scale_factor**2) / Decimal(num_trees)
         total_score += group_score
