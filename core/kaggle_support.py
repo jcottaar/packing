@@ -63,13 +63,15 @@ os.makedirs(temp_dir, exist_ok=True)
 '''
 Precision control
 '''
-USE_FLOAT32, dtype_cp, dtype_np = None, None, None
+USE_FLOAT32, dtype_cp, dtype_np, just_over_one = None, None, None, None
 def set_float32(use_float32:bool):
-    global USE_FLOAT32, dtype_cp, dtype_np
+    global USE_FLOAT32, dtype_cp, dtype_np, just_over_one
     if use_float32:
         USE_FLOAT32, dtype_cp, dtype_np = True, cp.float32, np.float32
+        just_over_one = 1.000001
     else:
         USE_FLOAT32, dtype_cp, dtype_np = False, cp.float64, np.float64
+        just_over_one = 1.00000000000001 
 set_float32(True)
 
 '''
@@ -366,12 +368,12 @@ class SolutionCollection(BaseClass):
         arr = to_cpu(self.xyt)
         return int(np.asarray(arr).shape[1])
     
-    def rotate(self, angle:float):
+    def rotate(self, angle:cp.ndarray):
         # rotate xyt by given angle (radians)
         xyt_cp = self.xyt  # assume already cupy array and non-empty        
 
-        c = cp.cos(angle)
-        s = cp.sin(angle)
+        c = cp.cos(angle)[:, None]
+        s = cp.sin(angle)[:, None]
 
         x = xyt_cp[:, :, 0]
         y = xyt_cp[:, :, 1]
@@ -386,7 +388,7 @@ class SolutionCollection(BaseClass):
 
         xyt_cp[:, :, 0] = x_rot + cx
         xyt_cp[:, :, 1] = y_rot + cy
-        xyt_cp[:, :, 2] = (xyt_cp[:, :, 2] - angle) % (2 * np.pi)
+        xyt_cp[:, :, 2] = (xyt_cp[:, :, 2] - angle[:, None]) % (2 * np.pi)
     
     def get_crystal_axes_allocate(self):
         """Get crystal axes for each solution. Returns (N_solutions, 2, 2) array."""        
@@ -398,7 +400,23 @@ class SolutionCollection(BaseClass):
     def get_crystal_axes(self, crystal_axes):
         assert self.periodic
         self._get_crystal_axes(crystal_axes)
+
+    def select_ids(self, inds):
+        self.xyt = self.xyt[inds]
+        self.h = self.h[inds]
+
+    def merge(self, other:'SolutionCollection'):
+        self.xyt = cp.concatenate([self.xyt, other.xyt], axis=0)
+        self.h = cp.concatenate([self.h, other.h], axis=0)
     
+    def create_clone(self, idx: int, other: 'SolutionCollection', parent_id: int):
+        self.xyt[idx] = other.xyt[parent_id]
+        self.h[idx] = other.h[parent_id]
+
+    def create_empty(self, N_solutions: int, N_trees: int):
+        xyt = cp.zeros((N_solutions, N_trees, 3), dtype=dtype_cp)
+        h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)
+        return type(self)(xyt=xyt, h=h)
     # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
     
 
@@ -409,8 +427,9 @@ class SolutionCollectionSquare(SolutionCollection):
         self._N_h_DOF = 3  # h = [size, x_offset, y_offset]
         return super().__post_init__()
     
-    def compute_cost_single_ref(self, h:cp.ndarray):
+    def compute_cost_single_ref(self):
         """Compute area cost and grad_bound for a single reference"""
+        h = self.h[0]
         cost = h[0]**2
         # Build grad_bound on the GPU without implicitly converting via NumPy
         grad_bound = cp.empty(3, dtype=h.dtype)
@@ -496,12 +515,14 @@ class SolutionCollectionLattice(SolutionCollection):
     # h[1]: crystal axis 2 length (b_length)
     # h[2]: angle between axes (radians)
 
+    do_snap: bool = field(init=True, default=True)
+
     def __post_init__(self):
         self._N_h_DOF = 3
         self.periodic = True
         return super().__post_init__()
 
-    def compute_cost_single_ref(self, h:cp.ndarray):
+    def compute_cost_single_ref(self):
         """Compute area cost and grad_bound for a single solution.
 
         Area = a_length * b_length * sin(angle)
@@ -510,6 +531,7 @@ class SolutionCollectionLattice(SolutionCollection):
             cost: scalar area
             grad_bound: (3,) array with derivatives [d/da, d/db, d/dangle]
         """
+        h = self.h[0]
         a_length = float(h[0].get().item())
         b_length = float(h[1].get().item())
         angle = float(h[2].get().item())
@@ -573,6 +595,8 @@ class SolutionCollectionLattice(SolutionCollection):
 
     @profile_each_line
     def snap(self):
+        #if not self.do_snap:
+        return
         import pack_cost
         if self.N_trees > 1 and self.periodic:
             self.periodic = False
@@ -612,13 +636,12 @@ class SolutionCollectionLattice(SolutionCollection):
 class SolutionCollectionLatticeRectangle(SolutionCollectionLattice):
     # h[0]: crystal axis 1 length (a_length)
     # h[1]: crystal axis 2 length (b_length)
-    # h[2]: angle between axes (radians)
 
     def __post_init__(self):        
         super().__post_init__()
         self._N_h_DOF = 2
 
-    def compute_cost_single_ref(self, h:cp.ndarray):
+    def compute_cost_single_ref(self):
         """Compute area cost and grad_bound for a single solution.
 
         Area = a_length * b_length * sin(angle)
@@ -627,6 +650,7 @@ class SolutionCollectionLatticeRectangle(SolutionCollectionLattice):
             cost: scalar area
             grad_bound: (3,) array with derivatives [d/da, d/db, d/dangle]
         """
+        h = self.h[0]
         # Area = |a × b| = a_length * b_length * sin(angle)
         prod = h[0] * h[1]
         area = cp.abs(prod)
@@ -675,3 +699,64 @@ class SolutionCollectionLatticeRectangle(SolutionCollectionLattice):
         # Second axis: b = (b_length * cos(angle), b_length * sin(angle))
         crystal_axes[:, 1, 0] = 0  # b_x
         crystal_axes[:, 1, 1] = self.h[:, 1] # b_y
+
+
+@dataclass
+class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
+    # h[0]: crystal axis 1 length (a_length)
+    
+    aspect_ratios: cp.ndarray = field(default=None)  # (N_solutions,) array of aspect ratios (b_length / a_length)
+
+    def __post_init__(self):        
+        super().__post_init__()
+        self._N_h_DOF = 1
+
+    def _check_constraints(self):
+        super()._check_constraints()
+        assert self.aspect_ratios.shape == (self.N_solutions,)
+
+    def compute_cost_single_ref(self):
+        h = self.h[0]
+        prod = h[0] * h[0] * self.aspect_ratios[0]
+        area = cp.abs(prod)
+        sgn = cp.sign(prod)
+        grad_bound = cp.zeros_like(h)
+        grad_bound[0] = sgn * (2 * h[0] * self.aspect_ratios[0])          # ∂|prod|/∂a_length
+        return area, grad_bound
+
+    def compute_cost(self, sol:SolutionCollection, cost:cp.ndarray, grad_bound:cp.ndarray):
+        # Area = a_length * b_length * sin(angle)
+        res = sol.h[:, 0]**2 * self.aspect_ratios
+        cost_sign = cp.sign(res)
+        cost[:] = cp.abs(res)
+        grad_bound[:, 0] = cost_sign * (2 * sol.h[:, 0] * self.aspect_ratios)          # ∂A/∂a_length
+
+    def _get_crystal_axes(self, crystal_axes):
+        # First axis: a = (a_length, 0)
+        crystal_axes[:, 0, 0] = self.h[:, 0]  # a_x = a_length
+        crystal_axes[:, 0, 1] = 0              # a_y = 0
+
+        # Second axis: b = (b_length * cos(angle), b_length * sin(angle))
+        crystal_axes[:, 1, 0] = 0  # b_x
+        crystal_axes[:, 1, 1] = self.h[:, 0] * self.aspect_ratios  # b_y
+
+    def select_ids(self, inds):
+        super().select_ids(inds)
+        self.aspect_ratios = self.aspect_ratios[inds]
+
+    def merge(self, other:'SolutionCollectionLatticeFixed'):
+        super().merge(other)
+        self.aspect_ratios = cp.concatenate([self.aspect_ratios, other.aspect_ratios], axis=0)
+
+    def create_clone(self, idx, other, parent_id):
+        self.aspect_ratios[idx] = other.aspect_ratios[parent_id]
+        super().create_clone(idx, other, parent_id)
+    
+    def create_empty(self, N_solutions: int, N_trees: int):
+        res = super().create_empty(N_solutions, N_trees)
+        res.aspect_ratios = cp.array([self.aspect_ratios[0]]*N_solutions, dtype=dtype_cp)
+        return res
+
+
+    def snap(self):
+        return

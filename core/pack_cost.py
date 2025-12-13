@@ -9,6 +9,7 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 import shapely
 import pack_cuda
+import copy
 
 @dataclass
 class Cost(kgs.BaseClass):
@@ -30,7 +31,9 @@ class Cost(kgs.BaseClass):
         grad_xyt = cp.zeros_like(sol.xyt)
         grad_bound = cp.zeros_like(sol.h)
         for i in range(sol.N_solutions):
-            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(sol, sol.xyt[i], sol.h[i])
+            sol_tmp = copy.deepcopy(sol)
+            sol_tmp.select_ids([i])
+            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(sol_tmp)
         return cost,grad_xyt,grad_bound
     
     def compute_cost_allocate(self, sol:kgs.SolutionCollection, evaluate_gradient:bool=True):
@@ -53,10 +56,12 @@ class Cost(kgs.BaseClass):
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # Subclass can implement faster version with preallocated gradients
         for i in range(sol.N_solutions):
-            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol, sol.xyt[i], sol.h[i], evaluate_gradient)
+            sol_tmp = copy.deepcopy(sol)
+            sol_tmp.select_ids([i])
+            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol_tmp, evaluate_gradient)
     
-    def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h, evaluate_gradient):
-        return self._compute_cost_single_ref(sol, xyt, h)
+    def _compute_cost_single(self, sol:kgs.SolutionCollection, evaluate_gradient):
+        return self._compute_cost_single_ref(sol)
 
 @dataclass 
 class CostCompound(Cost):
@@ -104,14 +109,17 @@ class CostCompound(Cost):
 @dataclass
 class CostDummy(Cost):
     # Dummy: always zero cost
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
-        return cp.array(0.0), cp.zeros_like(xyt), cp.zeros_like(h)
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
+        return cp.array(0.0), cp.zeros_like(sol.xyt[0]), cp.zeros_like(sol.h[0])
 
 @dataclass    
 class CollisionCost(Cost):
 
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
         # Compute collision cost for all pairs of trees
+        assert(sol.N_solutions==1)
+        xyt = sol.xyt[0]
+        h = sol.h[0]
         n_trees = sol.N_trees
 
         if sol.periodic:
@@ -238,7 +246,7 @@ class CollisionCost(Cost):
                 trees_tmp = tree_list_tmp.get_trees()
 
                 crystal_axes_tmp = cp.zeros((1, 2, 2), dtype=xyt.dtype)
-                sol_tmp = type(sol)()
+                sol_tmp = copy.deepcopy(sol)
                 sol_tmp.xyt = cp.array([xyt])
                 sol_tmp.h = cp.array([h_in])
                 sol_tmp.get_crystal_axes(crystal_axes_tmp)
@@ -304,7 +312,8 @@ class CollisionCost(Cost):
                 total_grad[i] += this_grads
 
             return total_cost, total_grad, cp.zeros_like(h)
-        
+
+    @kgs.profile_each_line    
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         if not sol.periodic:
             self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
@@ -328,21 +337,16 @@ class CollisionCost(Cost):
                 cost_minus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
 
                 for t in range(n_trees):
+                    xyt_orig = sol.xyt.copy()
                     xyt_plus = sol.xyt.copy()
                     xyt_minus = sol.xyt.copy()
                     xyt_plus[:, t, 2] += eps
                     xyt_minus[:, t, 2] -= eps
 
-                    sol_plus = type(sol)()
-                    sol_plus.xyt = xyt_plus
-                    sol_plus.h = sol.h
-                    sol_minus = type(sol)()
-                    sol_minus.xyt = xyt_minus
-                    sol_minus.h = sol.h
-
                     # Only request costs for self-interactions
+                    sol.xyt[...] = xyt_plus
                     self._compute_cost_internal(
-                        sol_plus,
+                        sol,
                         cost_plus,
                         tmp_grad_dummy,
                         tmp_bound_dummy,
@@ -350,8 +354,9 @@ class CollisionCost(Cost):
                         crystal_axes=crystal_axes,
                         only_self_interactions=True,
                     )
+                    sol.xyt[...] = xyt_minus
                     self._compute_cost_internal(
-                        sol_minus,
+                        sol,
                         cost_minus,
                         tmp_grad_dummy,
                         tmp_bound_dummy,
@@ -359,6 +364,7 @@ class CollisionCost(Cost):
                         crystal_axes=crystal_axes,
                         only_self_interactions=True,
                     )
+                    sol.xyt[...] = xyt_orig
 
                     grad_theta = (cost_plus - cost_minus) / (2.0 * eps)
                     grad_xyt[:, t, 2] += grad_theta/2
@@ -377,28 +383,31 @@ class CollisionCost(Cost):
 
                 for k in range(n_bounds):
                     # build perturbed h arrays for all solutions at once
+                    h_orig = sol.h.copy()
                     h_plus = sol.h.copy()
                     h_minus = sol.h.copy()
                     h_plus[:, k] += eps
                     h_minus[:, k] -= eps
 
                     # prepare solution-like objects to compute crystal axes for each perturbed ensemble
-                    sol_plus = type(sol)()
-                    sol_plus.xyt = sol.xyt
-                    sol_plus.h = h_plus
-                    crystal_axes_plus = sol_plus.get_crystal_axes_allocate().reshape(-1, 4)
-
-                    sol_minus = type(sol)()
-                    sol_minus.xyt = sol.xyt
-                    sol_minus.h = h_minus
-                    crystal_axes_minus = sol_minus.get_crystal_axes_allocate().reshape(-1, 4)
-
-                    # compute costs for all solutions in one call each
+                    #sol_plus = type(sol)()
+                    #sol_plus.xyt = sol.xyt
+                    #sol_plus.h = h_plus
+                    sol.h[...] = h_plus
+                    crystal_axes_plus = sol.get_crystal_axes_allocate().reshape(-1, 4)
                     cost_plus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
-                    cost_minus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+                    self._compute_cost_internal(sol, cost_plus, tmp_grad_xyt, tmp_grad_bound, evaluate_gradient=False, crystal_axes=crystal_axes_plus)
 
-                    self._compute_cost_internal(sol_plus, cost_plus, tmp_grad_xyt, tmp_grad_bound, evaluate_gradient=False, crystal_axes=crystal_axes_plus)
-                    self._compute_cost_internal(sol_minus, cost_minus, tmp_grad_xyt, tmp_grad_bound, evaluate_gradient=False, crystal_axes=crystal_axes_minus)
+                    # sol_minus = type(sol)()
+                    # sol_minus.xyt = sol.xyt
+                    # sol_minus.h = h_minus
+                    sol.h[...] = h_minus 
+                    crystal_axes_minus = sol.get_crystal_axes_allocate().reshape(-1, 4)
+                    cost_minus = cp.zeros(sol.N_solutions, dtype=cost.dtype)
+                    self._compute_cost_internal(sol, cost_minus, tmp_grad_xyt, tmp_grad_bound, evaluate_gradient=False, crystal_axes=crystal_axes_minus)
+
+                    sol.h[...] = h_orig
+                    
 
                     # central difference across the ensemble (vectorized)
                     grad_bound[:, k] = (cost_plus - cost_minus) / (2.0 * eps)
@@ -861,9 +870,9 @@ class BoundaryCost(Cost):
 
 @dataclass 
 class AreaCost(Cost):
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):
-        cost, grad_bound = sol.compute_cost_single_ref(h)
-        return cost, cp.zeros_like(xyt), grad_bound
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
+        cost, grad_bound = sol.compute_cost_single_ref()
+        return cost, cp.zeros_like(sol.xyt[0]), grad_bound
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool):
         grad_xyt[:] = 0
@@ -874,7 +883,11 @@ class BoundaryDistanceCost(Cost):
     use_kernel : bool = field(init=True, default=True)
     # Cost based on squared distance of vertices outside the square boundary
     # Per tree, use only the vertex with the maximum distance
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt,h):
+    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
+        assert(sol.N_solutions==1)
+        xyt = sol.xyt[0]
+        h = sol.h[0]
+
         assert not sol.periodic
         # xyt is (n_trees, 3), bound is (1,); compute squared distance for each vertex outside square
         b = float(h[0].get().item())
@@ -1009,10 +1022,13 @@ class BoundaryDistanceCost(Cost):
         else:
             super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
             
-    def _compute_cost_single(self, sol:kgs.SolutionCollection, xyt, h, evaluate_gradient):
+    def _compute_cost_single(self, sol:kgs.SolutionCollection, evaluate_gradient):
         # xyt is (n_trees, 3), h is (3,): [square_size, x_offset, y_offset]
         # Use kgs.tree_vertices (precomputed center tree vertices) for efficient vectorized computation
         # evaluate_gradient is ignored
+        assert(sol.N_solutions==1)
+        xyt = sol.xyt[0]
+        h = sol.h[0]
     
         b = float(h[0].get().item())
         half = b / 2.0

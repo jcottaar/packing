@@ -42,7 +42,7 @@ def solution_list_to_dataframe(sol_list, compact=True):
         n = sol.N_trees
 
         submission = pd.DataFrame(
-            index=[f'{n:03d}_{t}' for t in range(n)], columns=cols, data=sol.xyt[0].get()).rename_axis('id')
+            index=[f'{n:03d}_{t}' for t in range(n)], columns=cols, data=sol.xyt[0].get().astype(np.float64)).rename_axis('id')
         submission = submission.reset_index()
 
 

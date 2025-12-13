@@ -18,7 +18,7 @@ import lap_batch
 
 def create_dimer():
     res = cp.array([[-0.15/2, 0.1+kgs.tree_centroid_offset[1], 0.],[0.15/2, -0.1-kgs.tree_centroid_offset[1], np.pi]], dtype=kgs.dtype_cp)
-    res[:,:2]*=1.0000000000001
+    res[:,:2]*=kgs.just_over_one
     return res
 
 def snap_cell(sol, skip_assert=False):
@@ -30,33 +30,33 @@ def snap_cell(sol, skip_assert=False):
     # implement line search on h[0,0] and h[0,1] to satisfy constraints, using _overlaps.
     import boolean_line_search
     def _snap_axis(axis_idx, max_iter=60):
-        orig = sol.h[0, axis_idx].copy()
+        orig = sol.h[:, axis_idx].copy()
         sol_tmp = copy.deepcopy(sol)
         def f(factor):      
             nonlocal sol_tmp      
-            sol_tmp.h[0, axis_idx] = orig * factor
+            sol_tmp.h[:, axis_idx] = orig * factor
             return _overlaps(sol_tmp)
         # lo: overlap (True), hi: no overlap (False)
-        hi = 10.
-        lo = 0.1
-        factor = boolean_line_search.boolean_line_search(f, lo, hi, max_iter=max_iter)
-        sol.h[0, axis_idx] = orig * factor
+        hi = 100.
+        lo = 0.01
+        factor = boolean_line_search.boolean_line_search_vectorized(f, lo, hi, sol.N_solutions, max_iter=max_iter)
+        sol.h[:, axis_idx] = orig * factor
 
     _snap_axis(1)   
     if not skip_assert:
-        assert not _overlaps(sol)
+        assert cp.all(~_overlaps(sol))
         sol_tmp = copy.deepcopy(sol)
-        sol_tmp.h[0,1]/=1.0000000001
-        assert(_overlaps(sol_tmp))
+        sol_tmp.h[:,1]/=kgs.just_over_one
+        assert(cp.all(_overlaps(sol_tmp)))
     _snap_axis(0)
     if not skip_assert:
-        assert not _overlaps(sol)
+        assert cp.all(~_overlaps(sol))
         sol_tmp = copy.deepcopy(sol)
-        sol_tmp.h[0,0]/=1.0000000001
-        assert(_overlaps(sol_tmp))
+        sol_tmp.h[:,0]/=kgs.just_over_one
+        assert(cp.all(_overlaps(sol_tmp)))  
         sol_tmp = copy.deepcopy(sol)
-        sol_tmp.h[0,1]/=1.0000000001
-        assert(_overlaps(sol_tmp))
+        sol_tmp.h[:,1]/=kgs.just_over_one
+        assert(cp.all(_overlaps(sol_tmp)))  
 
 def try_tilings(sol, N_max=20, show_one=False):
     res = []

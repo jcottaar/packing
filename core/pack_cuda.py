@@ -1274,23 +1274,24 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
     use_crystal = 1 if crystal_axes is not None else 0
     crystal_axes_ptr = crystal_axes if crystal_axes is not None else np.intp(0)
 
-    _multi_overlap_list_total_kernel(
-        (blocks,),
-        (threads_per_block,),
-        (
-            xyt1,
-            xyt2,
-            np.int32(n_trees),
-            out_cost,
-            out_grads_ptr,
-            np.int32(num_ensembles),
-            np.int32(1 if use_separation else 0),
-            np.int32(use_crystal),
-            crystal_axes_ptr,
-            np.int32(1 if only_self_interactions else 0),
-        ),
-        stream=stream,
-    )
+    for _ in range(1):
+        _multi_overlap_list_total_kernel(
+            (blocks,),
+            (threads_per_block,),
+            (
+                xyt1,
+                xyt2,
+                np.int32(n_trees),
+                out_cost,
+                out_grads_ptr,
+                np.int32(num_ensembles),
+                np.int32(1 if use_separation else 0),
+                np.int32(use_crystal),
+                crystal_axes_ptr,
+                np.int32(1 if only_self_interactions else 0),
+            ),
+            stream=stream,
+        )
 
 def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, out_grad_h: cp.ndarray | None = None, stream: cp.cuda.Stream | None = None):
     """Compute total boundary violation area for multiple ensembles in parallel.

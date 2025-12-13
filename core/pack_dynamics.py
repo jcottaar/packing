@@ -102,7 +102,7 @@ class Optimizer(kgs.BaseClass):
                 t_last_plot = t_total0+0
                 ax.clear()
                 pack_vis_sol.pack_vis_sol(sol, solution_idx=0, ax=ax)
-                ax.set_title(f'Time: {t_total0:.2f}')
+                ax.set_title(f'Time: {t_total0:.2f}, cost: {total_cost[0].get().item():.12f}, {sol.h[0,0].get()}, {bound_grad[0,0].get()}')
                 display(fig)
                 clear_output(wait=True)       
         return sol

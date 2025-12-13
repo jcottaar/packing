@@ -167,15 +167,12 @@ class Population(kgs.BaseClass):
         self.fitness = np.zeros(self.configuration.N_solutions)
 
     def select_ids(self, inds):
-        self.configuration.xyt = self.configuration.xyt[inds]
-        self.configuration.h = self.configuration.h[inds]
+        self.configuration.select_ids(inds)
         self.fitness = self.fitness[inds]
         self.lineages = [self.lineages[i] for i in inds]
     
     def create_empty(self, N_individuals, N_trees):
-        xyt = cp.zeros((N_individuals, N_trees, 3), dtype=kgs.dtype_cp)
-        h = cp.zeros((N_individuals, self.configuration._N_h_DOF), dtype=kgs.dtype_cp)
-        configuration = type(self.configuration)(xyt=xyt, h=h)
+        configuration = self.configuration.create_empty(N_individuals, N_trees)        
         population = type(self)(configuration=configuration)
         population.fitness = np.zeros(N_individuals, dtype=kgs.dtype_np)
         population.lineages = [ None for _ in range(N_individuals) ]
@@ -183,14 +180,12 @@ class Population(kgs.BaseClass):
 
     def create_clone(self, idx: int, other: 'Population', parent_id: int):
         assert idx<self.configuration.N_solutions
-        self.configuration.xyt[idx] = other.configuration.xyt[parent_id]
-        self.configuration.h[idx] = other.configuration.h[parent_id]
+        self.configuration.create_clone(idx, other.configuration, parent_id)
         self.fitness[idx] = other.fitness[parent_id]
         self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
 
     def merge(self, other:'Population'):
-        self.configuration.xyt = cp.concatenate([self.configuration.xyt, other.configuration.xyt], axis=0)
-        self.configuration.h = cp.concatenate([self.configuration.h, other.configuration.h], axis=0)
+        self.configuration.merge(other.configuration)
         self.fitness = np.concatenate([self.fitness, other.fitness], axis=0)
         self.lineages = self.lineages + other.lineages
 
@@ -228,6 +223,9 @@ class InitializerRandomJiggled(Initializer):
             sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
         elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
             sol.h = cp.array([[size_setup_scaled,size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)         
+        elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeFixed):
+            sol.h = cp.array([[size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)  
+            sol.aspect_ratios = cp.array([sol.aspect_ratios[0]]*N_individuals, dtype=kgs.dtype_cp)       
         else:
             assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
             sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)               

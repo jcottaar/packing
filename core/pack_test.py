@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import pack_vis_sol
 import copy
 
-CUDA_float32 = True
+CUDA_float32 = False
 kgs.set_float32(CUDA_float32)
 pack_cuda._ensure_initialized()
 
@@ -63,6 +63,13 @@ def test_costs():
     a_length = -2.5/6
     b_length = 2.5/5
     sol_list[-1].h = cp.array([[a_length, b_length]])
+    sol_list.append(kgs.SolutionCollectionLatticeFixed())
+    sol_list[-1].xyt = cp.array([[
+        [0.0, 0.0, 0.0],      # Tree 0 at origin
+        [1.0, 0.5, np.pi/4]   # Tree 1 offset and rotated
+        ]])/4
+    sol_list[-1].aspect_ratios = cp.array([2.])
+    sol_list[-1].h = cp.array([[0.3]])
     
     for ii in range(len(sol_list)):
         pack_vis_sol.pack_vis_sol(sol_list[ii], solution_idx=0)
@@ -116,7 +123,7 @@ def test_costs():
             # Now check gradients via finite differences
             def _get_cost(obj, xyt_arr):
                 # Create same type of solution as the one being tested
-                sol_tmp = type(sol_single)()
+                sol_tmp = copy.deepcopy(sol_single)
                 sol_tmp.xyt = cp.array(xyt_arr)
                 sol_tmp.h = sol_single.h
                 if CUDA_float32:
@@ -148,7 +155,7 @@ def test_costs():
             # Check bound gradient via finite differences
             def _get_cost_bound(obj, bound_arr):
                 # Create same type of solution as the one being tested
-                sol_tmp = type(sol_single)()
+                sol_tmp = copy.deepcopy(sol_single)
                 sol_tmp.xyt = sol_single.xyt
                 sol_tmp.h = cp.array(bound_arr)
                 if CUDA_float32:
