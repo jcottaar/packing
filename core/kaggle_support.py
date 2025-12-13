@@ -646,6 +646,8 @@ class SolutionCollectionLattice(SolutionCollection):
 
             # Final assert: all solutions must now have overlap
             #assert cp.all(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(self, evaluate_gradient=False)[0] > 0)
+            self.xyt[:,:,0] -= cp.mean(self.xyt[:,:,0],axis=1)[:,None]
+            self.xyt[:,:,1] -= cp.mean(self.xyt[:,:,1],axis=1)[:,None]                   
             self.periodic = True
 
 

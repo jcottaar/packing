@@ -205,6 +205,8 @@ class Initializer(kgs.BaseClass):
         population.check_constraints()
         return population        
 
+ax=None
+
 @dataclass
 class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
@@ -215,7 +217,7 @@ class InitializerRandomJiggled(Initializer):
         self.check_constraints()
         size_setup_scaled = self.size_setup * np.sqrt(N_trees)
         xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=(N_individuals, N_trees, 3))
-        xyt = xyt * [[[size_setup_scaled, size_setup_scaled, np.pi]]]
+        xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
         xyt = cp.array(xyt, dtype=kgs.dtype_np)    
         sol = copy.deepcopy(self.base_solution)
         sol.xyt = xyt    
@@ -229,7 +231,14 @@ class InitializerRandomJiggled(Initializer):
         else:
             assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
             sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)               
-        sol.snap()
+        # NN=10
+        # global ax
+        # _,ax =  plt.subplots(NN,3,figsize=(24,8*NN))
+        # for i in range(NN):
+        #     pack_vis_sol.pack_vis_sol(sol, solution_idx=i, ax=ax[i,0])
+        # sol.snap()
+        # for i in range(NN):
+        #     pack_vis_sol.pack_vis_sol(sol, solution_idx=i, ax=ax[i,1])
         sol = self.jiggler.run_simulation(sol)
         sol.snap()
         population = Population(configuration=sol)
@@ -630,7 +639,12 @@ class GA(kgs.BaseClass):
             self.initializer.seed = 200*self.seed + int(N_trees)
             population = self.initializer.initialize_population(self.population_size, N_trees)
             population.check_constraints()
-            self._relax_and_score(population)            
+            self._relax_and_score(population)    
+            # global ax
+            # NN=10
+            # for i in range(NN):
+            #     pack_vis_sol.pack_vis_sol(population.configuration, solution_idx=i, ax=ax[i,2])
+            # plt.pause(0.001)
             self.populations.append(population)    
 
         self.best_cost_per_generation = np.zeros((self.n_generations, len(self.N_trees_to_do)))
