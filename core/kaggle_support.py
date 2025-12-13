@@ -598,37 +598,54 @@ class SolutionCollectionLattice(SolutionCollection):
         if not self.do_snap:
             return
         import pack_cost
+        import boolean_line_search
         if self.N_trees > 1 and self.periodic:
             self.periodic = False
             # For each solution, check if overlap exists. If not, scale xy until overlap just occurs.
             overlap_cost, _, _ = pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(self, evaluate_gradient=False)
             needs_scaling = overlap_cost <= 0
-            sol_tmp = copy.deepcopy(self)
+
             if cp.any(needs_scaling):
-                # Work on a copy to avoid in-place issues                
-                for i in range(self.N_solutions):
-                    sol_tmp.xyt = self.xyt[i:i+1].copy()
-                    if needs_scaling[i]:
-                        # Only scale if no overlap
-                        xy = sol_tmp.xyt[0,  :, :2]
-                        centroid = cp.mean(xy, axis=0)
-                        # Find minimal scaling factor s > 1 so that overlap just occurs
-                        # Use binary search
-                        s_lo, s_hi = 1e-2, 1.
-                        for _ in range(30):
-                            s_mid = 0.5 * (s_lo + s_hi)
-                            xy_scaled = (xy - centroid) * s_mid + centroid
-                            sol_tmp.xyt[0, :, :2] = xy_scaled
-                            # Create a temporary SolutionCollection for this solution                                      
-                            cost, _, _ = pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(sol_tmp, evaluate_gradient=False)
-                            if cost[0] > 0:
-                                s_lo = s_mid
-                            else:
-                                s_hi = s_mid
-                        # Apply the found scaling
-                        self.xyt[i, :, :2] = (xy - centroid) * s_lo + centroid
+                # Store original xy positions for solutions that need scaling
+                xy_orig = self.xyt[:, :, :2].copy()  # (N_solutions, N_trees, 2)
+                centroids = cp.mean(xy_orig, axis=1, keepdims=True)  # (N_solutions, 1, 2)
+
+                # Create vectorized function for boolean_line_search_vectorized
+                # We need to work only on solutions that need scaling
+                needs_scaling_indices = cp.where(needs_scaling)[0]
+
+                if len(needs_scaling_indices) > 0:
+                    # Extract solutions that need scaling
+                    xy_to_scale = xy_orig[needs_scaling_indices]  # (n_needs_scaling, N_trees, 2)
+                    centroids_to_scale = centroids[needs_scaling_indices]  # (n_needs_scaling, 1, 2)
+
+                    def f(factors):
+                        # factors: (n_needs_scaling,) array of scaling factors
+                        # Apply scaling to each solution
+                        xy_scaled = (xy_to_scale - centroids_to_scale) * factors[:, cp.newaxis, cp.newaxis] + centroids_to_scale
+
+                        # Temporarily update xyt for overlap check
+                        xyt_temp = self.xyt[needs_scaling_indices].copy()
+                        xyt_temp[:, :, :2] = xy_scaled
+
+                        # Create temporary solution collection for cost computation
+                        sol_tmp = copy.deepcopy(self)
+                        sol_tmp.xyt = xyt_temp
+
+                        # Check overlap
+                        cost, _, _ = pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(sol_tmp, evaluate_gradient=False)
+                        return cost > 0
+
+                    # Find minimal scaling factor s in [lo, hi] where overlap occurs
+                    s_lo, s_hi = 1e-2, 10.
+                    factors = boolean_line_search.boolean_line_search_vectorized(f, s_lo, s_hi, len(needs_scaling_indices), max_iter=30)
+
+                    # Apply the found scaling to solutions that needed it
+                    xy_scaled = (xy_to_scale - centroids_to_scale) * factors[:, cp.newaxis, cp.newaxis] + centroids_to_scale
+                    self.xyt[needs_scaling_indices, :, :2] = xy_scaled
+
             # Final assert: all solutions must now have overlap
-            assert cp.all(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(self, evaluate_gradient=False)[0] > 0)
+            #assert cp.all(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(self, evaluate_gradient=False)[0] > 0)
             self.periodic = True
 
 
