@@ -595,8 +595,8 @@ class SolutionCollectionLattice(SolutionCollection):
 
     @profile_each_line
     def snap(self):
-        #if not self.do_snap:
-        return
+        if not self.do_snap:
+            return
         import pack_cost
         if self.N_trees > 1 and self.periodic:
             self.periodic = False
@@ -756,7 +756,3 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
         res = super().create_empty(N_solutions, N_trees)
         res.aspect_ratios = cp.array([self.aspect_ratios[0]]*N_solutions, dtype=dtype_cp)
         return res
-
-
-    def snap(self):
-        return
