@@ -1,289 +1,387 @@
+# Batched L-BFGS in CuPy, closely mirroring SciPy's unconstrained L-BFGS-B behavior
+# (Strong Wolfe line search, no bounds, float32/float64 supported)
+
 import cupy as cp
 
-def lbfgs_minimize_batched_cupy(
-    f,                       # callable: x[M,N] -> (cost[M], grad[M,N]) (CuPy)
-    x0,                      # CuPy array [M,N]
-    max_iter=5000,
-    gtol=1e-2,               # infinity-norm stopping criterion
-    m_hist=10,               # history size
-    line_search_max=25,
-    c1=1e-4,                 # Armijo constant
-    tau=0.5,                 # backtracking factor
-    alpha0=1.0,              # initial step
-    min_alpha=1e-16,
-    use_powell_damping=True,
-    reset_on_failure=True,
+
+def lbfgs_minimize_batched_cupy_scipy(
+    f,
+    x0,
+    # SciPy L-BFGS-B defaults:
+    max_iter=15000,
+    maxcor=10,
+    ftol=2.220446049250313e-09,
+    gtol=1e-5,
+    maxls=20,
+    # Strong Wolfe parameters (SciPy defaults):
+    c1=1e-4,
+    c2=0.9,
 ):
     """
-    Batched L-BFGS on GPU with CuPy.
+    Batched (unconstrained) L-BFGS in CuPy, aiming to mirror SciPy's L-BFGS-B behavior
+    (without bounds).
 
-    Returns dict with:
-      x: [M,N] final positions
-      cost: [M]
-      grad: [M,N]
-      converged: [M] bool
-      n_iter: int
-      n_eval: int objective/grad evaluations
+    f: callable(x[M,N]) -> (cost[M], grad[M,N]) as CuPy arrays
+    x0: CuPy array [M,N] (float32 or float64)
+
+    Returns dict:
+      x, cost, grad
+      converged_f, converged_g, converged
+      failed_line_search
+      n_iter, n_eval
     """
 
     x = cp.asarray(x0)
     if x.ndim != 2:
-        raise ValueError("x0 must be 2D [M,N]")
+        raise ValueError("x0 must be [M,N]")
     M, N = x.shape
+    dtype = x.dtype
+    rows = cp.arange(M, dtype=cp.int32)
 
-    # Evaluate initial
-    cost, grad = f(x)
-    n_eval = 1
+    # mutable evaluation counter (safe for nested scopes)
+    n_eval = [0]
 
-    # Convergence mask (kept on GPU)
-    converged = cp.zeros((M,), dtype=cp.bool_)
-    # Optional: store iteration of convergence
-    # conv_iter = cp.full((M,), -1, dtype=cp.int32)
-
-    # L-BFGS history (circular buffer)
-    S = cp.zeros((M, m_hist, N), dtype=x.dtype)
-    Y = cp.zeros((M, m_hist, N), dtype=x.dtype)
-    Rho = cp.zeros((M, m_hist), dtype=x.dtype)  # 1/(y·s)
-    hist_len = cp.zeros((M,), dtype=cp.int32)
-    hist_pos = cp.zeros((M,), dtype=cp.int32)   # next insert position
+    def assert_shapes(cost, grad):
+        assert isinstance(cost, cp.ndarray) and isinstance(grad, cp.ndarray), \
+            f"f must return CuPy arrays, got {type(cost)} and {type(grad)}"
+        assert cost.shape == (M,), f"cost shape must be {(M,)}, got {cost.shape}"
+        assert grad.shape == (M, N), f"grad shape must be {(M, N)}, got {grad.shape}"
 
     def inf_norm(g):
         return cp.max(cp.abs(g), axis=1)
 
-    def two_loop_direction(g, active_mask):
-        """
-        Compute p = -H g using two-loop recursion, batched.
-        g: [M,N]
-        active_mask: [M] bool
-        """
-        M_, N_ = g.shape
-        rows = cp.arange(M_, dtype=cp.int32)
+    # Initial evaluation
+    fval, grad = f(x)
+    assert_shapes(fval, grad)
+    n_eval[0] += 1
 
-        # Default: steepest descent
-        p = -g.copy()
+    # History buffers
+    m_hist = int(maxcor)
+    S = cp.zeros((M, m_hist, N), dtype=dtype)
+    Y = cp.zeros((M, m_hist, N), dtype=dtype)
+    Rho = cp.zeros((M, m_hist), dtype=dtype)
+    hist_len = cp.zeros((M,), dtype=cp.int32)
+    hist_pos = cp.zeros((M,), dtype=cp.int32)
 
-        has_hist = (hist_len > 0) & active_mask
-        if not bool(cp.any(has_hist)):
-            return p
+    converged_g = cp.zeros((M,), dtype=cp.bool_)
+    converged_f = cp.zeros((M,), dtype=cp.bool_)
+    failed_ls = cp.zeros((M,), dtype=cp.bool_)
 
+    # ---------------- L-BFGS direction ----------------
+    def lbfgs_direction(g):
         q = g.copy()
-        alpha = cp.zeros((M_, m_hist), dtype=x.dtype)
+        alpha = cp.zeros((M, m_hist), dtype=dtype)
 
-        # Reverse loop: newest -> oldest
+        has_hist = hist_len > 0
+        if not bool(cp.any(has_hist)):
+            return -q
+
+        # backward (newest -> oldest)
         for t in range(m_hist):
-            idx = (hist_pos - 1 - t) % m_hist  # [M]
-            valid = has_hist & (t < hist_len)
-            if not bool(cp.any(valid)):
-                continue
-
-            # ✅ gather per-row
-            s = S[rows, idx, :]          # [M,N]
-            y = Y[rows, idx, :]          # [M,N]
-            rho = Rho[rows, idx]         # [M]
-
-            sq = cp.sum(s * q, axis=1)   # [M]
-            a = rho * sq                 # [M]
-            alpha[:, t] = a
-
-            q = cp.where(valid[:, None], q - a[:, None] * y, q)
-
-        # Initial scaling gamma using most recent pair
-        idx0 = (hist_pos - 1) % m_hist   # [M]
-        s0 = S[rows, idx0, :]            # [M,N]
-        y0 = Y[rows, idx0, :]            # [M,N]
-        yy = cp.sum(y0 * y0, axis=1)     # [M]
-        sy = cp.sum(s0 * y0, axis=1)     # [M]
-
-        gamma = cp.where(has_hist & (yy > 0), sy / yy, cp.ones((M_,), dtype=x.dtype))
-        r = gamma[:, None] * q
-
-        # Forward loop: oldest -> newest
-        for t in range(m_hist - 1, -1, -1):
             idx = (hist_pos - 1 - t) % m_hist
-            valid = has_hist & (t < hist_len)
+            valid = (t < hist_len)
             if not bool(cp.any(valid)):
                 continue
-
             s = S[rows, idx, :]
             y = Y[rows, idx, :]
             rho = Rho[rows, idx]
+            a = rho * cp.sum(s * q, axis=1)
+            alpha[:, t] = a
+            q = cp.where(valid[:, None], q - a[:, None] * y, q)
 
-            yr = cp.sum(y * r, axis=1)
-            b = rho * yr
-            a = alpha[:, t]
-            r = cp.where(valid[:, None], r + s * (a - b)[:, None], r)
+        # scaling H0 = (s'y)/(y'y)
+        idx0 = (hist_pos - 1) % m_hist
+        s0 = S[rows, idx0, :]
+        y0 = Y[rows, idx0, :]
+        yy = cp.sum(y0 * y0, axis=1)
+        sy = cp.sum(s0 * y0, axis=1)
+        gamma = cp.where((has_hist) & (yy > 0), sy / yy, cp.ones((M,), dtype=dtype))
+        r = gamma[:, None] * q
 
-        p = cp.where(has_hist[:, None], -r, p)
-        return p
+        # forward (oldest -> newest)
+        for t in range(m_hist - 1, -1, -1):
+            idx = (hist_pos - 1 - t) % m_hist
+            valid = (t < hist_len)
+            if not bool(cp.any(valid)):
+                continue
+            s = S[rows, idx, :]
+            y = Y[rows, idx, :]
+            rho = Rho[rows, idx]
+            beta = rho * cp.sum(y * r, axis=1)
+            r = cp.where(valid[:, None], r + s * (alpha[:, t] - beta)[:, None], r)
 
-    def store_history(s, y, active_mask):
+        return -r
+
+    # ---------------- Strong Wolfe line search ----------------
+    tiny = cp.finfo(dtype).tiny
+    eps = cp.finfo(dtype).eps
+
+    def _cubic_minimizer(a, fa, fpa, b, fb, fpb):
+        d1 = fpa + fpb - 3.0 * (fa - fb) / (a - b)
+        rad = d1 * d1 - fpa * fpb
+        rad = cp.maximum(rad, 0.0)
+        d2 = cp.sqrt(rad)
+        denom = fpb - fpa + 2.0 * d2
+        return b - (b - a) * (fpb + d2 - d1) / denom
+
+    def _safe_step(cand, lo, hi):
+        lo2 = cp.minimum(lo, hi)
+        hi2 = cp.maximum(lo, hi)
+        mid = 0.5 * (lo + hi)
+        ok = (cand > lo2) & (cand < hi2) & cp.isfinite(cand)
+        return cp.where(ok, cand, mid)
+
+    def strong_wolfe_search(x, f0, g0, p, active_mask):
+        """Batched strong-Wolfe line search (stateful per-run).
+
+        Critical behavior for batching: once a run satisfies strong Wolfe (or fails),
+        its step is *frozen* while we continue evaluating the full batch to satisfy
+        the requirement that f is always called on the full [M,N] array.
+
+        Returns (alpha, phi, g, ok, failed).
         """
-        Store (s,y) with safeguards + optional Powell damping.
-        s,y: [M,N]
-        active_mask: [M] bool (only update for active runs)
-        """
-        nonlocal S, Y, Rho, hist_len, hist_pos
+        dphi0 = cp.sum(g0 * p, axis=1)
 
-        # Compute curvature
-        ys = cp.sum(y * s, axis=1)  # [M]
-        yy = cp.sum(y * y, axis=1)
-        ss = cp.sum(s * s, axis=1)
+        # Only runs with a descent direction can succeed
+        descent = active_mask & (dphi0 < 0)
+        bad_dir = active_mask & (~descent)
 
-        # Basic validity: positive curvature and not tiny
-        eps = cp.finfo(x.dtype).eps
-        min_curv = eps * cp.sqrt(yy * ss + eps)
+        alpha_min = cp.asarray(tiny, dtype=dtype)
+        alpha_max = cp.asarray(1e20, dtype=dtype)
 
-        valid = active_mask & (ys > min_curv)
+        # Per-run line-search state
+        ok = cp.zeros((M,), dtype=cp.bool_)
+        failed = cp.zeros((M,), dtype=cp.bool_)
+        ls_active = descent.copy()  # only these are searched
 
-        if use_powell_damping:
-            # Powell damping to enforce y^T s >= 0.2 * s^T B s
-            # We approximate s^T B s using (y·s)/(s·s) * (s·s) = y·s, which is circular.
-            # Better: use y as proxy can fail. A common cheap damping uses:
-            # if y·s < 0.2 * s·s (in scaled space), modify y.
-            # We'll use a heuristic: enforce y·s >= 0.2 * s·s * (||g|| scale)
-            # but keep it simple & safe: if y·s < 0.2 * s·s, damp y towards s.
-            # This is heuristic but works well in practice for noisy gradients.
-            threshold = 0.2 * ss
-            need = active_mask & (ys < threshold) & (ss > 0)
-            if bool(cp.any(need)):
-                # y_hat = theta*y + (1-theta)*s, choose theta to satisfy y_hat·s = threshold
-                # => (theta*ys + (1-theta)*ss) = threshold
-                # => theta = (threshold - ss) / (ys - ss)
-                denom = (ys - ss)
-                theta = cp.where(cp.abs(denom) > 0, (threshold - ss) / denom, cp.ones_like(ys))
-                theta = cp.clip(theta, 0.0, 1.0)
-                y = cp.where(need[:, None], theta[:, None] * y + (1.0 - theta)[:, None] * s, y)
-                # recompute ys
-                ys = cp.sum(y * s, axis=1)
-                valid = active_mask & (ys > min_curv)
+        # Start alpha ~1 (SciPy-ish). Keep as vector for general M.
+        alpha = cp.ones((M,), dtype=dtype)
+        alpha_prev = cp.zeros((M,), dtype=dtype)
+        phi_prev = f0
+        dphi_prev = dphi0
 
-        # Insert at per-run hist_pos; we do it batched using advanced indexing
-        pos = hist_pos  # [M]
-        rows = cp.arange(M)
+        # Bracket endpoints with values
+        a_lo = cp.zeros((M,), dtype=dtype)
+        phi_lo = f0
+        dphi_lo = dphi0
 
-        # Write only where valid; keep old where not
-        S[rows, pos, :] = cp.where(valid[:, None], s, S[rows, pos, :])
-        Y[rows, pos, :] = cp.where(valid[:, None], y, Y[rows, pos, :])
+        a_hi = cp.zeros((M,), dtype=dtype)
+        phi_hi = cp.zeros((M,), dtype=dtype)
+        dphi_hi = cp.zeros((M,), dtype=dtype)
 
-        rho = cp.where(valid, 1.0 / ys, 0.0)
-        Rho[rows, pos] = cp.where(valid, rho, Rho[rows, pos])
+        # Track best Armijo-satisfying point as a practical fallback (matches SciPy behavior better
+        # on tricky objectives where strict strong-Wolfe may fail within maxls).
+        have_armijo = cp.zeros((M,), dtype=cp.bool_)
+        best_alpha = cp.zeros((M,), dtype=dtype)
+        best_phi = cp.full((M,), cp.inf, dtype=dtype)
+        best_g = g0.copy()
 
-        # Update hist_len and hist_pos only where valid
-        hist_len = cp.where(valid, cp.minimum(hist_len + 1, m_hist), hist_len)
-        hist_pos = cp.where(valid, (hist_pos + 1) % m_hist, hist_pos)
+        # Last evaluated
+        phi = f0
+        g = g0
+        dphi = dphi0
 
-        if reset_on_failure:
-            # If not valid but active, you may want to reset history for that run to avoid bad curvature.
-            bad = active_mask & (~valid)
-            hist_len = cp.where(bad, 0, hist_len)
-            hist_pos = cp.where(bad, 0, hist_pos)
-            # Not strictly necessary to zero S/Y/Rho; len=0 ignores them.
+        def zoom(zoom_mask):
+            """Zoom phase for runs in zoom_mask. Uses cubic interpolation with bisection fallback.
 
-    # Initial convergence
-    converged = inf_norm(grad) < gtol
+            Updates outer-scope variables and freezes finished runs.
+            """
+            nonlocal alpha, phi, g, dphi
+            nonlocal a_lo, phi_lo, dphi_lo, a_hi, phi_hi, dphi_hi
+            nonlocal ok, failed, ls_active
+            nonlocal have_armijo, best_alpha, best_phi, best_g
 
-    for it in range(max_iter):
-        active = ~converged  # [M]
-        # Still must call f on full batch later per your constraint; we *mask updates only*.
+            for _ in range(maxls):
+                zm = zoom_mask & ls_active & (~ok) & (~failed)
+                if not bool(cp.any(zm)):
+                    return
 
-        # Direction p (compute for all, but it will be ignored for converged runs)
-        p = two_loop_direction(grad, active)
+                cand = _cubic_minimizer(a_lo, phi_lo, dphi_lo, a_hi, phi_hi, dphi_hi)
+                a_trial = _safe_step(cand, a_lo, a_hi)
+                a_trial = cp.clip(a_trial, alpha_min, alpha_max)
 
-        # Ensure descent direction for active runs; if not, fall back to steepest descent.
-        gp = cp.sum(grad * p, axis=1)  # [M]
-        descent = active & (gp < 0)
-        p = cp.where(descent[:, None], p, -grad)
+                # Freeze alpha for non-zm runs
+                alpha = cp.where(zm, a_trial, alpha)
 
-        # Batched Armijo backtracking line search (always evaluate full batch)
-        alpha = cp.full((M,), alpha0, dtype=x.dtype)
-        x_base = x
-        f_base = cost
-        g_base = grad
-        gp_base = cp.sum(g_base * p, axis=1)
+                x_trial = x + alpha[:, None] * p
+                phi, g = f(x_trial)
+                assert_shapes(phi, g)
+                n_eval[0] += 1
+                dphi = cp.sum(g * p, axis=1)
 
-        accepted = cp.zeros((M,), dtype=cp.bool_)
+                # Armijo check
+                armijo_ok = phi <= (f0 + c1 * alpha * dphi0)
 
-        # For converged runs: force alpha=0 so x doesn't change (but we still eval full batch anyway)
-        alpha = cp.where(active, alpha, cp.zeros_like(alpha))
+                # Track best Armijo point
+                better = zm & armijo_ok & (phi < best_phi)
+                best_phi = cp.where(better, phi, best_phi)
+                best_alpha = cp.where(better, alpha, best_alpha)
+                best_g = cp.where(better[:, None], g, best_g)
+                have_armijo = have_armijo | (zm & armijo_ok)
 
-        for _ls in range(line_search_max):
-            x_trial = x_base + alpha[:, None] * p
-            f_trial, g_trial = f(x_trial)
-            n_eval += 1
+                # Interval update logic
+                high = (~armijo_ok) | (phi >= phi_lo)
+                upd_hi = zm & high
+                a_hi = cp.where(upd_hi, alpha, a_hi)
+                phi_hi = cp.where(upd_hi, phi, phi_hi)
+                dphi_hi = cp.where(upd_hi, dphi, dphi_hi)
 
-            # Armijo condition: f(x+a p) <= f(x) + c1*a*(g·p)
-            rhs = f_base + c1 * alpha * gp_base
-            ok = active & (f_trial <= rhs)
+                curv_ok = cp.abs(dphi) <= (-c2 * dphi0)
+                accept = zm & (~high) & armijo_ok & curv_ok
+                ok = ok | accept
+                ls_active = ls_active & (~accept)
 
-            # Accept where ok
-            accepted = accepted | ok
+                upd_lo = zm & (~high) & armijo_ok & (~curv_ok) & (~accept)
+                wrong_sign = upd_lo & (dphi * (a_hi - a_lo) >= 0)
 
-            # Prepare for next backtrack: shrink alpha where not ok and still active
-            still = active & (~ok)
-            alpha = cp.where(still, alpha * tau, alpha)
+                # Swap hi <- lo when needed
+                a_hi = cp.where(wrong_sign, a_lo, a_hi)
+                phi_hi = cp.where(wrong_sign, phi_lo, phi_hi)
+                dphi_hi = cp.where(wrong_sign, dphi_lo, dphi_hi)
 
-            # If everyone active has accepted, stop
-            if not bool(cp.any(still)):
-                # keep the last computed f_trial/g_trial for the final update
+                a_lo = cp.where(upd_lo, alpha, a_lo)
+                phi_lo = cp.where(upd_lo, phi, phi_lo)
+                dphi_lo = cp.where(upd_lo, dphi, dphi_lo)
+
+                # Collapse => mark failure for those runs (do not claim convergence)
+                interval = cp.abs(a_hi - a_lo)
+                collapsed = zm & (interval <= alpha_min)
+                failed = failed | collapsed
+                ls_active = ls_active & (~collapsed)
+
+            # If zoom exceeded maxls, remaining zoomed runs are marked failed (unless Armijo fallback later)
+            leftover = zoom_mask & ls_active & (~ok) & (~failed)
+            failed = failed | leftover
+            ls_active = ls_active & (~leftover)
+
+        # Bracketing loop
+        for i in range(maxls):
+            bm = ls_active & (~ok) & (~failed)
+            if not bool(cp.any(bm)):
                 break
 
-            # Also stop if step too small for remaining
-            too_small = still & (alpha < min_alpha)
-            if bool(cp.any(too_small)):
-                # mark those as "failed" (won't update this iter)
-                active = active & (~too_small)
-                alpha = cp.where(~active, cp.zeros_like(alpha), alpha)
-                # continue line search for remaining actives
+            alpha = cp.where(bm, cp.clip(alpha, alpha_min, alpha_max), alpha)
 
-        # Final trial evaluation at chosen alpha (we already have last f_trial/g_trial)
-        # But if line search exited early due to accepted, we have corresponding f_trial/g_trial.
-        # If it exited due to alpha < min_alpha, accepted may be false for those.
+            x_trial = x + alpha[:, None] * p
+            phi, g = f(x_trial)
+            assert_shapes(phi, g)
+            n_eval[0] += 1
+            dphi = cp.sum(g * p, axis=1)
 
-        # Compute updates (masked)
-        x_new = x_base + alpha[:, None] * p
+            armijo_ok = phi <= (f0 + c1 * alpha * dphi0)
+            curv_ok = cp.abs(dphi) <= (-c2 * dphi0)
 
-        # Re-evaluate at x_new to align with masked alpha changes (optional but safer).
-        # This enforces "always full batch call"; costs one eval/iter.
-        f_new, g_new = f(x_new)
-        n_eval += 1
+            # Track best Armijo for fallback
+            better = bm & armijo_ok & (phi < best_phi)
+            best_phi = cp.where(better, phi, best_phi)
+            best_alpha = cp.where(better, alpha, best_alpha)
+            best_g = cp.where(better[:, None], g, best_g)
+            have_armijo = have_armijo | (bm & armijo_ok)
 
-        # Only update for runs that are active and made a non-trivial step and improved Armijo
-        # (You can relax this if you want to accept non-decreasing steps sometimes.)
-        improved = (f_new <= (f_base + c1 * alpha * gp_base)) & (~converged)
-        stepped = cp.abs(alpha) > 0
-        do_update = improved & stepped
+            accept = bm & armijo_ok & curv_ok
+            ok = ok | accept
+            ls_active = ls_active & (~accept)
 
+            # Bracket condition 1: Armijo fails OR f increases vs previous
+            bracket1 = bm & (~accept) & ((~armijo_ok) | ((i > 0) & (phi >= phi_prev)))
+            if bool(cp.any(bracket1)):
+                # Set bracket endpoints for these runs
+                a_lo = cp.where(bracket1, alpha_prev, a_lo)
+                phi_lo = cp.where(bracket1, phi_prev, phi_lo)
+                dphi_lo = cp.where(bracket1, dphi_prev, dphi_lo)
+
+                a_hi = cp.where(bracket1, alpha, a_hi)
+                phi_hi = cp.where(bracket1, phi, phi_hi)
+                dphi_hi = cp.where(bracket1, dphi, dphi_hi)
+
+                zoom(bracket1)
+
+            # Bracket condition 2: derivative becomes nonnegative
+            bm2 = ls_active & (~ok) & (~failed)
+            bracket2 = bm2 & (dphi >= 0)
+            if bool(cp.any(bracket2)):
+                a_lo = cp.where(bracket2, alpha, a_lo)
+                phi_lo = cp.where(bracket2, phi, phi_lo)
+                dphi_lo = cp.where(bracket2, dphi, dphi_lo)
+
+                a_hi = cp.where(bracket2, alpha_prev, a_hi)
+                phi_hi = cp.where(bracket2, phi_prev, phi_hi)
+                dphi_hi = cp.where(bracket2, dphi_prev, dphi_hi)
+
+                zoom(bracket2)
+
+            # Prepare next step for remaining active runs
+            bm3 = ls_active & (~ok) & (~failed)
+            alpha_prev = cp.where(bm3, alpha, alpha_prev)
+            phi_prev = cp.where(bm3, phi, phi_prev)
+            dphi_prev = cp.where(bm3, dphi, dphi_prev)
+
+            alpha = cp.where(bm3, alpha * 2.0, alpha)
+
+        # Practical fallback: if strong Wolfe wasn't found but Armijo was, accept best Armijo.
+        # This prevents early "failed" exits in cases where SciPy still proceeds.
+        fallback = active_mask & descent & (~ok) & have_armijo
+        alpha = cp.where(fallback, best_alpha, alpha)
+        phi = cp.where(fallback, best_phi, phi)
+        g = cp.where(fallback[:, None], best_g, g)
+        ok = ok | fallback
+
+        # Mark failures for those that still didn't find any acceptable step
+        failed = failed | (active_mask & descent & (~ok)) | bad_dir
+        return alpha, phi, g, ok, failed
+
+    # ---------------- Main loop ----------------
+    for it in range(int(max_iter)):
+        gnorm = inf_norm(grad)
+        converged_g |= (gnorm <= gtol)
+
+        active = ~(converged_g | converged_f | failed_ls)
+        if not bool(cp.any(active)):
+            break
+
+        p = lbfgs_direction(grad)
+        gp = cp.sum(grad * p, axis=1)
+        need_sd = active & (gp >= 0)
+        p = cp.where(need_sd[:, None], -grad, p)
+
+        alpha, f_new, g_new, ok, failed = strong_wolfe_search(x, fval, grad, p, active_mask=active)
+        failed_ls |= failed
+        accept = ok & active & (~failed)
+
+        x_new = x + alpha[:, None] * p
         s = x_new - x
         y = g_new - grad
+        ys = cp.sum(y * s, axis=1)
+        good = accept & (ys > 0)
 
-        # Store history and commit state for do_update
-        store_history(s, y, do_update)
+        pos = hist_pos
+        S[rows, pos, :] = cp.where(good[:, None], s, S[rows, pos, :])
+        Y[rows, pos, :] = cp.where(good[:, None], y, Y[rows, pos, :])
+        Rho[rows, pos] = cp.where(good, 1.0 / ys, Rho[rows, pos])
+        hist_len = cp.where(good, cp.minimum(hist_len + 1, m_hist), hist_len)
+        hist_pos = cp.where(good, (hist_pos + 1) % m_hist, hist_pos)
 
-        x = cp.where(do_update[:, None], x_new, x)
-        cost = cp.where(do_update, f_new, cost)
-        grad = cp.where(do_update[:, None], g_new, grad)
+        f_prev = fval
+        x = cp.where(accept[:, None], x_new, x)
+        fval = cp.where(accept, f_new, fval)
+        grad = cp.where(accept[:, None], g_new, grad)
 
-        # Update convergence (based on new grad)
-        converged = converged | (inf_norm(grad) < gtol)
+        denom = cp.maximum(cp.maximum(cp.abs(f_prev), cp.abs(fval)), cp.ones((M,), dtype=dtype))
+        rel_red = (f_prev - fval) / denom
+        converged_f |= (accept & (rel_red <= ftol))
 
-        # Optional: early exit if all converged (even though you asked to always pass full batch to f,
-        # exiting means you won't call f anymore. If you truly want to keep calling f after convergence,
-        # remove this break.)
-        if bool(cp.all(converged)):
-            return {
-                "x": x,
-                "cost": cost,
-                "grad": grad,
-                "converged": converged,
-                "n_iter": it + 1,
-                "n_eval": n_eval,
-            }
+        gnorm = inf_norm(grad)
+        converged_g |= (gnorm <= gtol)
 
+    converged = converged_f | converged_g
     return {
         "x": x,
-        "cost": cost,
+        "cost": fval,
         "grad": grad,
+        "converged_f": converged_f,
+        "converged_g": converged_g,
         "converged": converged,
-        "n_iter": max_iter,
-        "n_eval": n_eval,
+        "failed_line_search": failed_ls,
+        "n_iter": it + 1,
+        "n_eval": int(n_eval[0]),
     }
