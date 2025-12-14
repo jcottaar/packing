@@ -68,7 +68,7 @@ def _cubic_interpolate_batch(x1, f1, g1, x2, f2, g2, xmin_bound, xmax_bound):
 
     return torch.where(valid, result_valid, result_invalid)
 
-
+@kgs.profile_each_line
 def _strong_wolfe_batched(
     obj_func, x, t, d, f, g, gtd, c1=1e-4, c2=0.9, tolerance_change=1e-9, max_ls=25
 ):
@@ -285,43 +285,80 @@ def _strong_wolfe_batched(
         ls_iter += 1
 
         # Update brackets based on conditions
-        for m in range(M):
-            if not active[m]:
-                continue
+        todo1 = active & (   (f_new > (f + c1 * t_new * gtd)) | (f_new >= bracket_f[torch.arange(M, device=device), low_pos])   )
 
-            lp = low_pos[m].item()
-            hp = high_pos[m].item()
+        # Vectorized: Update high bracket for todo1 systems
+        if todo1.any():
+            hp_idx = high_pos[todo1].unsqueeze(1)  # (num_todo1, 1)
+            idx_expanded = torch.where(todo1)[0].unsqueeze(1)  # (num_todo1, 1)
 
-            if f_new[m] > (f[m] + c1 * t_new[m] * gtd[m]) or f_new[m] >= bracket_f[m, lp]:
-                # Update high bracket
-                bracket_t[m, hp] = t_new[m]
-                bracket_f[m, hp] = f_new[m]
-                bracket_g[m, hp] = g_new[m]
-                bracket_gtd[m, hp] = gtd_new[m]
-                # Recompute low/high
-                if bracket_f[m, 0] <= bracket_f[m, 1]:
-                    low_pos[m] = 0
-                    high_pos[m] = 1
-                else:
-                    low_pos[m] = 1
-                    high_pos[m] = 0
-            else:
-                if gtd_new[m].abs() <= -c2 * gtd[m]:
-                    # Wolfe conditions satisfied
-                    done[m] = True
-                    active[m] = False
-                elif gtd_new[m] * (bracket_t[m, hp] - bracket_t[m, lp]) >= 0:
-                    # Old high becomes new low
+            # Create full indices for scatter
+            scatter_idx = torch.cat([idx_expanded, hp_idx], dim=1)  # (num_todo1, 2)
+
+            # Update bracket_t, bracket_f, bracket_gtd using advanced indexing
+            bracket_t[scatter_idx[:, 0], scatter_idx[:, 1]] = t_new[todo1]
+            bracket_f[scatter_idx[:, 0], scatter_idx[:, 1]] = f_new[todo1]
+            bracket_g[scatter_idx[:, 0], scatter_idx[:, 1]] = g_new[todo1]
+            bracket_gtd[scatter_idx[:, 0], scatter_idx[:, 1]] = gtd_new[todo1]
+            # Vectorized: Update low/high positions for non-todo1 systems
+
+            # mask where we actually update
+            idx = todo1
+
+            # among those, True means (0 <= 1) so low=0/high=1 else low=1/high=0
+            m01 = bracket_f[:, 0] <= bracket_f[:, 1]
+
+            low_pos[idx]  = torch.where(m01[idx], 0, 1)
+            high_pos[idx] = 1 - low_pos[idx]
+
+        todo2 = active & ~todo1
+
+        # Vectorized: Check Wolfe conditions for todo2 systems
+        wolfe_satisfied = todo2 & (gtd_new.abs() <= -c2 * gtd)
+        if wolfe_satisfied.any():
+            done[wolfe_satisfied] = True
+            active[wolfe_satisfied] = False
+
+        # Systems that need to potentially swap and update low bracket
+        update_low = todo2 & ~wolfe_satisfied
+
+        if update_low.any():
+            # Vectorized: Check if old high should become new low
+            lp_update = low_pos[update_low]
+            hp_update = high_pos[update_low]
+
+            # Compute bracket_t differences
+            bracket_t_diff = bracket_t[update_low].gather(1, hp_update.unsqueeze(1)).squeeze(1) - \
+                             bracket_t[update_low].gather(1, lp_update.unsqueeze(1)).squeeze(1)
+
+            # Determine which systems need swap
+            swap_needed = gtd_new[update_low] * bracket_t_diff >= 0
+
+            if swap_needed.any():
+                # Create mask for all M systems
+                swap_mask = torch.zeros(M, dtype=torch.bool, device=device)
+                swap_mask[update_low] = swap_needed
+
+                # Copy low to high for swap_mask systems
+                lp_swap = low_pos[swap_mask]
+                hp_swap = high_pos[swap_mask]
+
+                for m_idx, m in enumerate(torch.where(swap_mask)[0]):
+                    lp = lp_swap[m_idx].item()
+                    hp = hp_swap[m_idx].item()
                     bracket_t[m, hp] = bracket_t[m, lp]
                     bracket_f[m, hp] = bracket_f[m, lp]
                     bracket_g[m, hp] = bracket_g[m, lp]
                     bracket_gtd[m, hp] = bracket_gtd[m, lp]
 
-                # New point becomes new low
-                bracket_t[m, lp] = t_new[m]
-                bracket_f[m, lp] = f_new[m]
-                bracket_g[m, lp] = g_new[m]
-                bracket_gtd[m, lp] = gtd_new[m]
+        # Vectorized: Update low bracket with new point for all todo2 systems
+        idx = todo2
+        if idx.any():
+            lp = low_pos[idx]
+            bracket_t[idx, lp]   = t_new[idx]
+            bracket_f[idx, lp]   = f_new[idx]
+            bracket_g[idx, lp]   = g_new[idx]
+            bracket_gtd[idx, lp] = gtd_new[idx]
 
     # Extract final results from brackets (vectorized)
     size_1_mask = bracket_size == 1
@@ -343,7 +380,7 @@ def _strong_wolfe_batched(
     return f_new, g_new, t, ls_func_evals
 
 
-@kgs.profile_each_line
+#@kgs.profile_each_line
 def lbfgs(
     func,
     x0: Tensor,
@@ -542,15 +579,19 @@ def lbfgs(
                 # Systems that need to shift (curr_len == history_size)
                 shift_mask = update_mask & ~append_mask
 
-                # Handle append case
+                # Handle append case (vectorized)
                 if append_mask.any():
-                    # Write to position hist_len[m] for each system
-                    for pos in range(history_size):
-                        pos_mask = (hist_len == pos) & append_mask
-                        if pos_mask.any():
-                            old_dirs[pos_mask, pos] = y[pos_mask]
-                            old_stps[pos_mask, pos] = s[pos_mask]
-                            ro[pos_mask, pos] = 1.0 / ys[pos_mask]
+                    # Get positions to write for each system: (num_append,)
+                    append_positions = hist_len[append_mask]  # positions to write at
+                    append_indices = torch.where(append_mask)[0]  # system indices
+
+                    # Create scatter indices: (num_append, 2) with [system_idx, position]
+                    scatter_idx = torch.stack([append_indices, append_positions], dim=1)
+
+                    # Write to position hist_len[m] for each system using advanced indexing
+                    old_dirs[scatter_idx[:, 0], scatter_idx[:, 1]] = y[append_mask]
+                    old_stps[scatter_idx[:, 0], scatter_idx[:, 1]] = s[append_mask]
+                    ro[scatter_idx[:, 0], scatter_idx[:, 1]] = 1.0 / ys[append_mask]
 
                     hist_len[append_mask] += 1
 
