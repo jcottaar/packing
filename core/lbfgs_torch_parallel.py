@@ -39,6 +39,36 @@ def _cubic_interpolate(x1, f1, g1, x2, f2, g2, bounds=None):
         return (xmin_bound + xmax_bound) / 2.0
 
 
+def _cubic_interpolate_batch(x1, f1, g1, x2, f2, g2, xmin_bound, xmax_bound):
+    """Batched cubic interpolation.
+
+    Args:
+        x1, f1, g1, x2, f2, g2: Tensors of shape (M,)
+        xmin_bound, xmax_bound: Tensors of shape (M,)
+
+    Returns:
+        Tensor of shape (M,) with interpolated values
+    """
+    d1 = g1 + g2 - 3 * (f1 - f2) / (x1 - x2)
+    d2_square = d1**2 - g1 * g2
+
+    # Where d2_square >= 0, use cubic interpolation
+    valid = d2_square >= 0
+    d2 = torch.sqrt(torch.clamp(d2_square, min=0))
+
+    # Compute min_pos based on x1 <= x2
+    x1_le_x2 = x1 <= x2
+    min_pos_1 = x2 - (x2 - x1) * ((g2 + d2 - d1) / (g2 - g1 + 2 * d2))
+    min_pos_2 = x1 - (x1 - x2) * ((g1 + d2 - d1) / (g1 - g2 + 2 * d2))
+    min_pos = torch.where(x1_le_x2, min_pos_1, min_pos_2)
+
+    # Clamp to bounds
+    result_valid = torch.clamp(min_pos, min=xmin_bound, max=xmax_bound)
+    result_invalid = (xmin_bound + xmax_bound) / 2.0
+
+    return torch.where(valid, result_valid, result_invalid)
+
+
 def _strong_wolfe_batched(
     obj_func, x, t, d, f, g, gtd, c1=1e-4, c2=0.9, tolerance_change=1e-9, max_ls=25
 ):
@@ -147,13 +177,12 @@ def _strong_wolfe_batched(
         max_step = t * 10
 
         # Cubic interpolation (vectorized over active systems)
-        for m in range(M):
-            if active[m]:
-                t[m] = _cubic_interpolate(
-                    t_prev[m].item(), f_prev[m].item(), gtd_prev[m].item(),
-                    t[m].item(), f_new[m].item(), gtd_new[m].item(),
-                    bounds=(min_step[m].item(), max_step[m].item())
-                )
+        if active.any():
+            t[active] = _cubic_interpolate_batch(
+                t_prev[active], f_prev[active], gtd_prev[active],
+                t[active], f_new[active], gtd_new[active],
+                min_step[active], max_step[active]
+            )
 
         # Update previous state
         t_prev = t.clone()
@@ -202,12 +231,14 @@ def _strong_wolfe_batched(
 
         # Compute new trial value via cubic interpolation
         t_new = torch.zeros(M, dtype=dtype, device=device)
-        for m in range(M):
-            if active[m]:
-                t_new[m] = _cubic_interpolate(
-                    bracket_t[m, 0].item(), bracket_f[m, 0].item(), bracket_gtd[m, 0].item(),
-                    bracket_t[m, 1].item(), bracket_f[m, 1].item(), bracket_gtd[m, 1].item()
-                )
+        if active.any():
+            xmin = bracket_t.min(dim=1).values
+            xmax = bracket_t.max(dim=1).values
+            t_new[active] = _cubic_interpolate_batch(
+                bracket_t[active, 0], bracket_f[active, 0], bracket_gtd[active, 0],
+                bracket_t[active, 1], bracket_f[active, 1], bracket_gtd[active, 1],
+                xmin[active], xmax[active]
+            )
 
         # Check progress
         eps = 0.1 * bracket_width
@@ -218,19 +249,30 @@ def _strong_wolfe_batched(
 
         close_to_boundary = (dist_to_bounds < eps) & active
 
-        for m in range(M):
-            if close_to_boundary[m]:
-                if insuf_progress[m] or t_new[m] >= bracket_t[m].max() or t_new[m] <= bracket_t[m].min():
-                    # Move to 0.1 away from nearest boundary
-                    if abs(t_new[m] - bracket_t[m].max()) < abs(t_new[m] - bracket_t[m].min()):
-                        t_new[m] = bracket_t[m].max() - eps[m]
-                    else:
-                        t_new[m] = bracket_t[m].min() + eps[m]
-                    insuf_progress[m] = False
-                else:
-                    insuf_progress[m] = True
-            else:
-                insuf_progress[m] = False
+        # Vectorized insufficient progress adjustment
+        bracket_min = bracket_t.min(dim=1).values
+        bracket_max = bracket_t.max(dim=1).values
+
+        # Check if we need to adjust (insufficient progress or out of bounds)
+        need_adjust = close_to_boundary & (insuf_progress | (t_new >= bracket_max) | (t_new <= bracket_min))
+
+        if need_adjust.any():
+            # Determine which boundary is closer
+            dist_to_max = (t_new - bracket_max).abs()
+            dist_to_min = (t_new - bracket_min).abs()
+            closer_to_max = dist_to_max < dist_to_min
+
+            # Adjust t_new: move 0.1*eps away from nearest boundary
+            t_new_adjusted = torch.where(closer_to_max, bracket_max - eps, bracket_min + eps)
+            t_new[need_adjust] = t_new_adjusted[need_adjust]
+            insuf_progress[need_adjust] = False
+
+        # Mark insufficient progress for close systems that didn't need adjustment
+        mark_insuf = close_to_boundary & ~need_adjust
+        insuf_progress[mark_insuf] = True
+
+        # Clear insufficient progress for systems not close to boundary
+        insuf_progress[~close_to_boundary] = False
 
         # Evaluate new points for active systems
         x_new[active] = x[active] + t_new[active].unsqueeze(1) * d[active]
@@ -281,17 +323,22 @@ def _strong_wolfe_batched(
                 bracket_g[m, lp] = g_new[m]
                 bracket_gtd[m, lp] = gtd_new[m]
 
-    # Extract final results from brackets
-    for m in range(M):
-        if bracket_size[m] == 1:
-            t[m] = bracket_t[m, 0]
-            f_new[m] = bracket_f[m, 0]
-            g_new[m] = bracket_g[m, 0]
-        else:
-            lp = low_pos[m].item()
-            t[m] = bracket_t[m, lp]
-            f_new[m] = bracket_f[m, lp]
-            g_new[m] = bracket_g[m, lp]
+    # Extract final results from brackets (vectorized)
+    size_1_mask = bracket_size == 1
+    size_2_mask = ~size_1_mask
+
+    # For size == 1, use position 0
+    if size_1_mask.any():
+        t[size_1_mask] = bracket_t[size_1_mask, 0]
+        f_new[size_1_mask] = bracket_f[size_1_mask, 0]
+        g_new[size_1_mask] = bracket_g[size_1_mask, 0]
+
+    # For size == 2, use low_pos position
+    if size_2_mask.any():
+        # Use gather to select from bracket_t, bracket_f based on low_pos
+        t[size_2_mask] = bracket_t[size_2_mask].gather(1, low_pos[size_2_mask].unsqueeze(1)).squeeze(1)
+        f_new[size_2_mask] = bracket_f[size_2_mask].gather(1, low_pos[size_2_mask].unsqueeze(1)).squeeze(1)
+        g_new[size_2_mask] = bracket_g[size_2_mask].gather(1, low_pos[size_2_mask].unsqueeze(1).unsqueeze(2).expand(-1, -1, g_new.shape[1])).squeeze(1)
 
     return f_new, g_new, t, ls_func_evals
 
