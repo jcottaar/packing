@@ -534,31 +534,129 @@ def lbfgs(
         ...     return cost, grad
         >>> result = lbfgs(f, x)
     """
-    # Ensure x0 requires grad for LBFGS optimizer
-    if not x0.requires_grad:
-        x0.requires_grad_(True)
+    if max_eval is None:
+        max_eval = max_iter * 5 // 4
 
-    # Create optimizer
-    optimizer = LBFGS(
-        [x0],
-        lr=lr,
-        max_iter=max_iter,
-        max_eval=max_eval,
-        tolerance_grad=tolerance_grad,
-        tolerance_change=tolerance_change,
-        history_size=history_size,
-        line_search_fn=line_search_fn,
-    )
+    # Flatten x0 for optimization
+    x = x0.detach().flatten()
+    original_shape = x0.shape
 
-    # Define closure
-    def closure():
-        optimizer.zero_grad()
-        cost, grad = func(x0)
-        # Set the gradient manually
-        x0.grad = grad
-        return cost
+    # Evaluate initial function and gradient
+    loss, flat_grad = func(x0)
+    loss = float(loss)
+    flat_grad = flat_grad.flatten()
+    func_evals = 1
 
-    # Optimize
-    optimizer.step(closure)
+    # Check if already optimal
+    if flat_grad.abs().max() <= tolerance_grad:
+        return x0
+
+    # Initialize history
+    old_dirs = []
+    old_stps = []
+    ro = []
+    H_diag = 1.0
+
+    # Helper for directional evaluation (for line search)
+    def directional_evaluate(x_init, t, d):
+        x_new = x_init + t * d
+        x0_new = x_new.reshape(original_shape)
+        loss_new, grad_new = func(x0_new)
+        return float(loss_new), grad_new.flatten()
+
+    n_iter = 0
+    prev_loss = loss
+
+    while n_iter < max_iter:
+        n_iter += 1
+
+        # Compute search direction
+        if n_iter == 1:
+            d = flat_grad.neg()
+            H_diag = 1.0
+        else:
+            # L-BFGS two-loop recursion
+            q = flat_grad.neg()
+            num_old = len(old_dirs)
+            al = [None] * num_old
+
+            # First loop
+            for i in range(num_old - 1, -1, -1):
+                al[i] = old_stps[i].dot(q) * ro[i]
+                q.add_(old_dirs[i], alpha=-al[i])
+
+            # Multiply by initial Hessian approximation
+            d = r = torch.mul(q, H_diag)
+
+            # Second loop
+            for i in range(num_old):
+                be_i = old_dirs[i].dot(r) * ro[i]
+                r.add_(old_stps[i], alpha=al[i] - be_i)
+
+        # Store previous gradient and loss
+        prev_flat_grad = flat_grad.clone()
+        prev_loss = loss
+
+        # Compute step length
+        if n_iter == 1:
+            t = min(1.0, 1.0 / flat_grad.abs().sum()) * lr
+        else:
+            t = lr
+
+        # Check directional derivative
+        gtd = flat_grad.dot(d)
+        if gtd > -tolerance_change:
+            break
+
+        # Line search
+        if line_search_fn == 'strong_wolfe':
+            loss, flat_grad, t, ls_evals = _strong_wolfe(
+                directional_evaluate, x, t, d, loss, flat_grad, gtd
+            )
+            x.add_(d, alpha=t)
+        else:
+            # Simple step
+            x.add_(d, alpha=t)
+            x0.copy_(x.reshape(original_shape))
+            if n_iter != max_iter:
+                loss, flat_grad = func(x0)
+                loss = float(loss)
+                flat_grad = flat_grad.flatten()
+            ls_evals = 1
+
+        func_evals += ls_evals
+
+        # Update history
+        if n_iter > 1:
+            y = flat_grad.sub(prev_flat_grad)
+            s = d.mul(t)
+            ys = y.dot(s)
+
+            if ys > 1e-10:
+                if len(old_dirs) == history_size:
+                    old_dirs.pop(0)
+                    old_stps.pop(0)
+                    ro.pop(0)
+
+                old_dirs.append(y)
+                old_stps.append(s)
+                ro.append(1.0 / ys)
+                H_diag = ys / y.dot(y)
+
+        # Check convergence
+        if flat_grad.abs().max() <= tolerance_grad:
+            break
+
+        if func_evals >= max_eval:
+            break
+
+        if d.mul(t).abs().max() <= tolerance_change:
+            break
+
+        if abs(loss - prev_loss) < tolerance_change:
+            break
+
+    # Update x0 with final result
+    x0.copy_(x.reshape(original_shape))
 
     return x0
