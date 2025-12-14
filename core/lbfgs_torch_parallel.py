@@ -4,6 +4,8 @@ from typing import Optional
 import torch
 from torch import Tensor
 
+import kaggle_support as kgs
+
 
 __all__ = ["lbfgs"]
 
@@ -23,10 +25,11 @@ def _cubic_interpolate(x1, f1, g1, x2, f2, g2, bounds=None):
     #   d2 = sqrt(d1^2 - g1*g2);
     #   min_pos = x2 - (x2 - x1)*((g2 + d2 - d1)/(g2 - g1 + 2*d2));
     #   t_new = min(max(min_pos,xmin_bound),xmax_bound);
+    import math
     d1 = g1 + g2 - 3 * (f1 - f2) / (x1 - x2)
     d2_square = d1**2 - g1 * g2
     if d2_square >= 0:
-        d2 = d2_square.sqrt()
+        d2 = math.sqrt(d2_square)
         if x1 <= x2:
             min_pos = x2 - (x2 - x1) * ((g2 + d2 - d1) / (g2 - g1 + 2 * d2))
         else:
@@ -36,148 +39,264 @@ def _cubic_interpolate(x1, f1, g1, x2, f2, g2, bounds=None):
         return (xmin_bound + xmax_bound) / 2.0
 
 
-def _strong_wolfe(
+def _strong_wolfe_batched(
     obj_func, x, t, d, f, g, gtd, c1=1e-4, c2=0.9, tolerance_change=1e-9, max_ls=25
 ):
-    # ported from https://github.com/torch/optim/blob/master/lswolfe.lua
-    d_norm = d.abs().max()
-    g = g.clone(memory_format=torch.contiguous_format)
-    # evaluate objective and gradient using initial step
-    f_new, g_new = obj_func(x, t, d)
-    ls_func_evals = 1
-    gtd_new = g_new.dot(d)
+    """Batched strong Wolfe line search.
 
-    # bracket an interval containing a point satisfying the Wolfe criteria
-    t_prev, f_prev, g_prev, gtd_prev = 0, f, g, gtd
-    done = False
+    Args:
+        obj_func: Function that takes x (M, N) and returns (f, g) with shapes (M,) and (M, N)
+        x: (M, N) current parameters
+        t: (M,) initial step sizes
+        d: (M, N) search directions
+        f: (M,) current function values
+        g: (M, N) current gradients
+        gtd: (M,) directional derivatives
+
+    Returns:
+        f_new: (M,) new function values
+        g_new: (M, N) new gradients
+        t: (M,) final step sizes
+        ls_func_evals: (M,) number of function evaluations per system
+    """
+    M = x.shape[0]
+    device = x.device
+    dtype = x.dtype
+
+    # Initialize tracking for each system
+    d_norm = d.abs().max(dim=1).values  # (M,)
+    g = g.clone()
+
+    # Evaluate initial step for all systems
+    x_new = x + t.unsqueeze(1) * d
+    f_new, g_new = obj_func(x_new)
+    ls_func_evals = torch.ones(M, dtype=torch.long, device=device)
+    gtd_new = (g_new * d).sum(dim=1)  # (M,)
+
+    # Track active systems (still searching)
+    active = torch.ones(M, dtype=torch.bool, device=device)
+
+    # Bracketing phase state (per system)
+    t_prev = torch.zeros(M, dtype=dtype, device=device)
+    f_prev = f.clone()
+    g_prev = g.clone()
+    gtd_prev = gtd.clone()
+
+    # Bracket state: use tensors for values that all systems have
+    bracket_t = torch.zeros((M, 2), dtype=dtype, device=device)
+    bracket_f = torch.zeros((M, 2), dtype=dtype, device=device)
+    bracket_g = torch.zeros((M, 2, x.shape[1]), dtype=dtype, device=device)
+    bracket_gtd = torch.zeros((M, 2), dtype=dtype, device=device)
+    bracket_size = torch.zeros(M, dtype=torch.long, device=device)  # 0, 1, or 2
+
+    done = torch.zeros(M, dtype=torch.bool, device=device)
     ls_iter = 0
-    while ls_iter < max_ls:
-        # check conditions
-        if f_new > (f + c1 * t * gtd) or (ls_iter > 1 and f_new >= f_prev):
-            bracket = [t_prev, t]
-            bracket_f = [f_prev, f_new]
-            bracket_g = [g_prev, g_new.clone(memory_format=torch.contiguous_format)]
-            bracket_gtd = [gtd_prev, gtd_new]
+
+    # Bracketing phase
+    while active.any() and ls_iter < max_ls:
+        # Check Armijo condition
+        armijo_fail = f_new > (f + c1 * t * gtd)
+        not_decreasing = (ls_iter > 1) & (f_new >= f_prev)
+        bracket_condition = armijo_fail | not_decreasing
+
+        newly_bracketed = active & bracket_condition & (bracket_size == 0)
+        if newly_bracketed.any():
+            idx = newly_bracketed
+            bracket_size[idx] = 2
+            bracket_t[idx, 0] = t_prev[idx]
+            bracket_t[idx, 1] = t[idx]
+            bracket_f[idx, 0] = f_prev[idx]
+            bracket_f[idx, 1] = f_new[idx]
+            bracket_g[idx, 0] = g_prev[idx]
+            bracket_g[idx, 1] = g_new[idx]
+            bracket_gtd[idx, 0] = gtd_prev[idx]
+            bracket_gtd[idx, 1] = gtd_new[idx]
+            active[idx] = False
+
+        # Check Wolfe conditions
+        wolfe_satisfied = (gtd_new.abs() <= -c2 * gtd) & active
+        if wolfe_satisfied.any():
+            idx = wolfe_satisfied
+            bracket_size[idx] = 1
+            bracket_t[idx, 0] = t[idx]
+            bracket_f[idx, 0] = f_new[idx]
+            bracket_g[idx, 0] = g_new[idx]
+            done[idx] = True
+            active[idx] = False
+
+        # Check positive curvature
+        pos_curv = (gtd_new >= 0) & active
+        if pos_curv.any():
+            idx = pos_curv
+            bracket_size[idx] = 2
+            bracket_t[idx, 0] = t_prev[idx]
+            bracket_t[idx, 1] = t[idx]
+            bracket_f[idx, 0] = f_prev[idx]
+            bracket_f[idx, 1] = f_new[idx]
+            bracket_g[idx, 0] = g_prev[idx]
+            bracket_g[idx, 1] = g_new[idx]
+            bracket_gtd[idx, 0] = gtd_prev[idx]
+            bracket_gtd[idx, 1] = gtd_new[idx]
+            active[idx] = False
+
+        if not active.any():
             break
 
-        if abs(gtd_new) <= -c2 * gtd:
-            bracket = [t]
-            bracket_f = [f_new]
-            bracket_g = [g_new]
-            done = True
-            break
-
-        if gtd_new >= 0:
-            bracket = [t_prev, t]
-            bracket_f = [f_prev, f_new]
-            bracket_g = [g_prev, g_new.clone(memory_format=torch.contiguous_format)]
-            bracket_gtd = [gtd_prev, gtd_new]
-            break
-
-        # interpolate
+        # Interpolate for active systems
         min_step = t + 0.01 * (t - t_prev)
         max_step = t * 10
-        tmp = t
-        t = _cubic_interpolate(
-            t_prev, f_prev, gtd_prev, t, f_new, gtd_new, bounds=(min_step, max_step)
-        )
 
-        # next step
-        t_prev = tmp
-        f_prev = f_new
-        g_prev = g_new.clone(memory_format=torch.contiguous_format)
-        gtd_prev = gtd_new
-        f_new, g_new = obj_func(x, t, d)
-        ls_func_evals += 1
-        gtd_new = g_new.dot(d)
+        # Cubic interpolation (vectorized over active systems)
+        for m in range(M):
+            if active[m]:
+                t[m] = _cubic_interpolate(
+                    t_prev[m].item(), f_prev[m].item(), gtd_prev[m].item(),
+                    t[m].item(), f_new[m].item(), gtd_new[m].item(),
+                    bounds=(min_step[m].item(), max_step[m].item())
+                )
+
+        # Update previous state
+        t_prev = t.clone()
+        f_prev = f_new.clone()
+        g_prev = g_new.clone()
+        gtd_prev = gtd_new.clone()
+
+        # Evaluate new points for active systems
+        x_new[active] = x[active] + t[active].unsqueeze(1) * d[active]
+        f_new_batch, g_new_batch = obj_func(x_new[active])
+        f_new[active] = f_new_batch
+        g_new[active] = g_new_batch
+        ls_func_evals[active] += 1
+        gtd_new[active] = (g_new[active] * d[active]).sum(dim=1)
+
         ls_iter += 1
 
-    # reached max number of iterations?
-    if ls_iter == max_ls:
-        bracket = [0, t]
-        bracket_f = [f, f_new]
-        bracket_g = [g, g_new]
+    # Systems that hit max_ls without bracketing
+    no_bracket = (bracket_size == 0) & (ls_iter == max_ls)
+    if no_bracket.any():
+        idx = no_bracket
+        bracket_size[idx] = 2
+        bracket_t[idx, 0] = 0
+        bracket_t[idx, 1] = t[idx]
+        bracket_f[idx, 0] = f[idx]
+        bracket_f[idx, 1] = f_new[idx]
+        bracket_g[idx, 0] = g[idx]
+        bracket_g[idx, 1] = g_new[idx]
 
-    # zoom phase: we now have a point satisfying the criteria, or
-    # a bracket around it. We refine the bracket until we find the
-    # exact point satisfying the criteria
-    insuf_progress = False
-    # find high and low points in bracket
-    low_pos, high_pos = (0, 1) if bracket_f[0] <= bracket_f[-1] else (1, 0)  # type: ignore[possibly-undefined]
-    while not done and ls_iter < max_ls:
-        # line-search bracket is so small
-        if abs(bracket[1] - bracket[0]) * d_norm < tolerance_change:  # type: ignore[possibly-undefined]
+    # Zoom phase
+    active = (bracket_size == 2) & ~done  # Only zoom for bracketed, not done systems
+    insuf_progress = torch.zeros(M, dtype=torch.bool, device=device)
+
+    # Find low/high positions in bracket
+    low_pos = (bracket_f[:, 0] <= bracket_f[:, 1]).long()
+    high_pos = 1 - low_pos
+
+    while active.any() and ls_iter < max_ls:
+        # Check bracket size
+        bracket_width = (bracket_t[:, 1] - bracket_t[:, 0]).abs()
+        too_small = (bracket_width * d_norm < tolerance_change) & active
+        active[too_small] = False
+
+        if not active.any():
             break
 
-        # compute new trial value
-        t = _cubic_interpolate(
-            bracket[0],
-            bracket_f[0],
-            bracket_gtd[0],  # type: ignore[possibly-undefined]
-            bracket[1],
-            bracket_f[1],
-            bracket_gtd[1],
-        )
+        # Compute new trial value via cubic interpolation
+        t_new = torch.zeros(M, dtype=dtype, device=device)
+        for m in range(M):
+            if active[m]:
+                t_new[m] = _cubic_interpolate(
+                    bracket_t[m, 0].item(), bracket_f[m, 0].item(), bracket_gtd[m, 0].item(),
+                    bracket_t[m, 1].item(), bracket_f[m, 1].item(), bracket_gtd[m, 1].item()
+                )
 
-        # test that we are making sufficient progress:
-        # in case `t` is so close to boundary, we mark that we are making
-        # insufficient progress, and if
-        #   + we have made insufficient progress in the last step, or
-        #   + `t` is at one of the boundary,
-        # we will move `t` to a position which is `0.1 * len(bracket)`
-        # away from the nearest boundary point.
-        eps = 0.1 * (max(bracket) - min(bracket))
-        if min(max(bracket) - t, t - min(bracket)) < eps:
-            # interpolation close to boundary
-            if insuf_progress or t >= max(bracket) or t <= min(bracket):
-                # evaluate at 0.1 away from boundary
-                if abs(t - max(bracket)) < abs(t - min(bracket)):
-                    t = max(bracket) - eps
+        # Check progress
+        eps = 0.1 * bracket_width
+        dist_to_bounds = torch.stack([
+            bracket_t.max(dim=1).values - t_new,
+            t_new - bracket_t.min(dim=1).values
+        ], dim=1).min(dim=1).values
+
+        close_to_boundary = (dist_to_bounds < eps) & active
+
+        for m in range(M):
+            if close_to_boundary[m]:
+                if insuf_progress[m] or t_new[m] >= bracket_t[m].max() or t_new[m] <= bracket_t[m].min():
+                    # Move to 0.1 away from nearest boundary
+                    if abs(t_new[m] - bracket_t[m].max()) < abs(t_new[m] - bracket_t[m].min()):
+                        t_new[m] = bracket_t[m].max() - eps[m]
+                    else:
+                        t_new[m] = bracket_t[m].min() + eps[m]
+                    insuf_progress[m] = False
                 else:
-                    t = min(bracket) + eps
-                insuf_progress = False
+                    insuf_progress[m] = True
             else:
-                insuf_progress = True
-        else:
-            insuf_progress = False
+                insuf_progress[m] = False
 
-        # Evaluate new point
-        f_new, g_new = obj_func(x, t, d)
-        ls_func_evals += 1
-        gtd_new = g_new.dot(d)
+        # Evaluate new points for active systems
+        x_new[active] = x[active] + t_new[active].unsqueeze(1) * d[active]
+        f_new_batch, g_new_batch = obj_func(x_new[active])
+        f_new[active] = f_new_batch
+        g_new[active] = g_new_batch
+        ls_func_evals[active] += 1
+        gtd_new[active] = (g_new[active] * d[active]).sum(dim=1)
+
         ls_iter += 1
 
-        if f_new > (f + c1 * t * gtd) or f_new >= bracket_f[low_pos]:
-            # Armijo condition not satisfied or not lower than lowest point
-            bracket[high_pos] = t
-            bracket_f[high_pos] = f_new
-            bracket_g[high_pos] = g_new.clone(memory_format=torch.contiguous_format)  # type: ignore[possibly-undefined]
-            bracket_gtd[high_pos] = gtd_new
-            low_pos, high_pos = (0, 1) if bracket_f[0] <= bracket_f[1] else (1, 0)
+        # Update brackets based on conditions
+        for m in range(M):
+            if not active[m]:
+                continue
+
+            lp = low_pos[m].item()
+            hp = high_pos[m].item()
+
+            if f_new[m] > (f[m] + c1 * t_new[m] * gtd[m]) or f_new[m] >= bracket_f[m, lp]:
+                # Update high bracket
+                bracket_t[m, hp] = t_new[m]
+                bracket_f[m, hp] = f_new[m]
+                bracket_g[m, hp] = g_new[m]
+                bracket_gtd[m, hp] = gtd_new[m]
+                # Recompute low/high
+                if bracket_f[m, 0] <= bracket_f[m, 1]:
+                    low_pos[m] = 0
+                    high_pos[m] = 1
+                else:
+                    low_pos[m] = 1
+                    high_pos[m] = 0
+            else:
+                if gtd_new[m].abs() <= -c2 * gtd[m]:
+                    # Wolfe conditions satisfied
+                    done[m] = True
+                    active[m] = False
+                elif gtd_new[m] * (bracket_t[m, hp] - bracket_t[m, lp]) >= 0:
+                    # Old high becomes new low
+                    bracket_t[m, hp] = bracket_t[m, lp]
+                    bracket_f[m, hp] = bracket_f[m, lp]
+                    bracket_g[m, hp] = bracket_g[m, lp]
+                    bracket_gtd[m, hp] = bracket_gtd[m, lp]
+
+                # New point becomes new low
+                bracket_t[m, lp] = t_new[m]
+                bracket_f[m, lp] = f_new[m]
+                bracket_g[m, lp] = g_new[m]
+                bracket_gtd[m, lp] = gtd_new[m]
+
+    # Extract final results from brackets
+    for m in range(M):
+        if bracket_size[m] == 1:
+            t[m] = bracket_t[m, 0]
+            f_new[m] = bracket_f[m, 0]
+            g_new[m] = bracket_g[m, 0]
         else:
-            if abs(gtd_new) <= -c2 * gtd:
-                # Wolfe conditions satisfied
-                done = True
-            elif gtd_new * (bracket[high_pos] - bracket[low_pos]) >= 0:
-                # old high becomes new low
-                bracket[high_pos] = bracket[low_pos]
-                bracket_f[high_pos] = bracket_f[low_pos]
-                bracket_g[high_pos] = bracket_g[low_pos]  # type: ignore[possibly-undefined]
-                bracket_gtd[high_pos] = bracket_gtd[low_pos]
+            lp = low_pos[m].item()
+            t[m] = bracket_t[m, lp]
+            f_new[m] = bracket_f[m, lp]
+            g_new[m] = bracket_g[m, lp]
 
-            # new point becomes new low
-            bracket[low_pos] = t
-            bracket_f[low_pos] = f_new
-            bracket_g[low_pos] = g_new.clone(memory_format=torch.contiguous_format)  # type: ignore[possibly-undefined]
-            bracket_gtd[low_pos] = gtd_new
-
-    # return stuff
-    t = bracket[low_pos]  # type: ignore[possibly-undefined]
-    f_new = bracket_f[low_pos]
-    g_new = bracket_g[low_pos]  # type: ignore[possibly-undefined]
     return f_new, g_new, t, ls_func_evals
 
 
+@kgs.profile_each_line
 def lbfgs(
     func,
     x0: Tensor,
@@ -308,39 +427,25 @@ def lbfgs(
         if not active.any():
             break
 
-        # Line search (per system, unbatched)
-        ls_evals = torch.zeros(M, dtype=torch.long, device=device)
-
-        for m in range(M):
-            if not active[m]:
-                continue
-
-            if line_search_fn == 'strong_wolfe':
-                # Create wrapper that adds batch dimension for this system
-                def directional_evaluate(x_init, t_step, d_step):
-                    x_new = x_init + t_step * d_step
-                    x_batch = x_new.unsqueeze(0)  # (1, N)
-                    loss_new, grad_new = func(x_batch)
-                    return float(loss_new[0]), grad_new[0]
-
-                loss_m, flat_grad_m, t_m, ls_evals_m = _strong_wolfe(
-                    directional_evaluate, x[m], t[m].item(), d[m],
-                    loss[m].item(), flat_grad[m], gtd[m].item()
-                )
-                loss[m] = loss_m
-                flat_grad[m] = flat_grad_m
-                t[m] = t_m
-                ls_evals[m] = ls_evals_m
-                x[m] = x[m] + t[m] * d[m]
-            else:
-                # Simple step
-                x[m] = x[m] + t[m] * d[m]
-                if n_iter != max_iter:
-                    x_batch = x[m].unsqueeze(0)  # (1, N)
-                    loss_batch, grad_batch = func(x_batch)
-                    loss[m] = loss_batch[0]
-                    flat_grad[m] = grad_batch[0]
-                ls_evals[m] = 1
+        # Line search (batched for all active systems)
+        if line_search_fn == 'strong_wolfe':
+            # Batched strong Wolfe line search
+            loss_active, flat_grad_active, t_active, ls_evals_active = _strong_wolfe_batched(
+                func, x[active], t[active], d[active],
+                loss[active], flat_grad[active], gtd[active]
+            )
+            loss[active] = loss_active
+            flat_grad[active] = flat_grad_active
+            t[active] = t_active
+            ls_evals = torch.zeros(M, dtype=torch.long, device=device)
+            ls_evals[active] = ls_evals_active
+            x[active] = x[active] + t[active].unsqueeze(1) * d[active]
+        else:
+            # Simple step
+            x = x + t.unsqueeze(1) * d
+            if n_iter != max_iter:
+                loss, flat_grad = func(x)
+            ls_evals = torch.ones(M, dtype=torch.long, device=device)
 
         func_evals += ls_evals
 
