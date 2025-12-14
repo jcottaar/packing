@@ -312,8 +312,7 @@ class CollisionCost(Cost):
                 total_grad[i] += this_grads
 
             return total_cost, total_grad, cp.zeros_like(h)
-
-    @kgs.profile_each_line    
+  
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         if not sol.periodic:
             self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient)

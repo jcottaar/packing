@@ -412,10 +412,10 @@ def lbfgs(
 
         # Compute step length
         if n_iter == 1:
-            t = torch.zeros(M, dtype=dtype, device=device)
-            for m in range(M):
-                if active[m]:
-                    t[m] = min(1.0, 1.0 / flat_grad[m].abs().sum()) * lr
+            # Vectorized: t = min(1.0, 1.0 / ||g||_1) * lr for each system
+            grad_sum = flat_grad.abs().sum(dim=1)  # (M,)
+            t = torch.minimum(torch.ones_like(grad_sum), 1.0 / grad_sum) * lr
+            t[~active] = 0  # Zero out inactive systems
         else:
             t = torch.full((M,), lr, dtype=dtype, device=device)
 
@@ -478,18 +478,14 @@ def lbfgs(
         converged_eval = func_evals >= max_eval
         active &= ~converged_eval
 
-        for m in range(M):
-            if not active[m]:
-                continue
+        # Vectorized convergence checks
+        param_change = (d * t.unsqueeze(1)).abs().max(dim=1).values  # (M,)
+        converged_param = (param_change <= tolerance_change) & active
+        active &= ~converged_param
 
-            param_change = (d[m] * t[m]).abs().max()
-            if param_change <= tolerance_change:
-                active[m] = False
-                continue
-
-            loss_change = abs(loss[m] - prev_loss_iter[m])
-            if loss_change < tolerance_change:
-                active[m] = False
+        loss_change = (loss - prev_loss_iter).abs()  # (M,)
+        converged_loss = (loss_change < tolerance_change) & active
+        active &= ~converged_loss
 
     # Update x0 with final result
     x0.copy_(x)
