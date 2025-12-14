@@ -362,10 +362,15 @@ def lbfgs(
         x0.copy_(x)
         return x0
 
-    # Initialize history for each system (lists of tensors)
-    old_dirs = [[] for _ in range(M)]  # List of M lists, each containing history
-    old_stps = [[] for _ in range(M)]
-    ro = [[] for _ in range(M)]
+    # Initialize history for each system using preallocated tensors
+    # old_dirs: (M, history_size, N) - stores y vectors
+    # old_stps: (M, history_size, N) - stores s vectors
+    # ro: (M, history_size) - stores 1/ys values
+    # hist_len: (M,) - tracks actual history length for each system (0 to history_size)
+    old_dirs = torch.zeros(M, history_size, N, dtype=dtype, device=device)
+    old_stps = torch.zeros(M, history_size, N, dtype=dtype, device=device)
+    ro = torch.zeros(M, history_size, dtype=dtype, device=device)
+    hist_len = torch.zeros(M, dtype=torch.long, device=device)
     H_diag = torch.ones(M, dtype=dtype, device=device)
 
     n_iter = 0
@@ -374,37 +379,52 @@ def lbfgs(
     while n_iter < max_iter and active.any():
         n_iter += 1
 
-        # Compute search direction for all systems
-        d = torch.zeros_like(flat_grad)
+        # Compute search direction for all systems (vectorized two-loop recursion)
+        if n_iter == 1:
+            # Steepest descent direction for all systems
+            d = -flat_grad.clone()
+            H_diag.fill_(1.0)
+        else:
+            # L-BFGS two-loop recursion (vectorized)
+            # Create mask for valid history entries: (M, history_size)
+            hist_mask = torch.arange(history_size, device=device).unsqueeze(0) < hist_len.unsqueeze(1)
 
-        for m in range(M):
-            if not active[m]:
-                continue
+            # Initialize q for all systems: (M, N)
+            q = -flat_grad.clone()
 
-            if n_iter == 1:
-                # Steepest descent direction
-                d[m] = -flat_grad[m]
-                H_diag[m] = 1.0
-            else:
-                # L-BFGS two-loop recursion
-                q = -flat_grad[m]
-                num_old = len(old_dirs[m])
-                al = [None] * num_old
+            # Storage for alpha values: (M, history_size)
+            al = torch.zeros(M, history_size, dtype=dtype, device=device)
 
-                # First loop
-                for i in range(num_old - 1, -1, -1):
-                    al[i] = old_stps[m][i].dot(q) * ro[m][i]
-                    q = q + old_dirs[m][i] * (-al[i])
+            # First loop (backward through history)
+            for i in range(history_size - 1, -1, -1):
+                # Mask for systems that have history at position i
+                mask_i = hist_mask[:, i]  # (M,)
 
-                # Multiply by initial Hessian approximation
-                r = q * H_diag[m]
+                if mask_i.any():
+                    # Compute alpha[i] = s[i]^T * q * ro[i] for all systems
+                    # old_stps[:, i]: (M, N), q: (M, N)
+                    al[:, i] = (old_stps[:, i] * q).sum(dim=1) * ro[:, i]  # (M,)
 
-                # Second loop
-                for i in range(num_old):
-                    be_i = old_dirs[m][i].dot(r) * ro[m][i]
-                    r = r + old_stps[m][i] * (al[i] - be_i)
+                    # Update q = q - alpha[i] * y[i], but only for systems with history at i
+                    # old_dirs[:, i]: (M, N), al[:, i]: (M,)
+                    q = q - old_dirs[:, i] * al[:, i].unsqueeze(1) * mask_i.unsqueeze(1)
 
-                d[m] = r
+            # Multiply by initial Hessian approximation: r = H_diag * q
+            r = q * H_diag.unsqueeze(1)  # (M, N)
+
+            # Second loop (forward through history)
+            for i in range(history_size):
+                # Mask for systems that have history at position i
+                mask_i = hist_mask[:, i]  # (M,)
+
+                if mask_i.any():
+                    # Compute beta[i] = y[i]^T * r * ro[i] for all systems
+                    be_i = (old_dirs[:, i] * r).sum(dim=1) * ro[:, i]  # (M,)
+
+                    # Update r = r + (alpha[i] - beta[i]) * s[i], but only for systems with history at i
+                    r = r + old_stps[:, i] * (al[:, i] - be_i).unsqueeze(1) * mask_i.unsqueeze(1)
+
+            d = r
 
         # Store previous gradient and loss
         prev_flat_grad = flat_grad.clone()
@@ -449,26 +469,55 @@ def lbfgs(
 
         func_evals += ls_evals
 
-        # Update history for active systems
+        # Update history for active systems (vectorized)
         if n_iter > 1:
-            for m in range(M):
-                if not active[m]:
-                    continue
+            # Compute y and s for all systems: (M, N)
+            y = flat_grad - prev_flat_grad
+            s = d * t.unsqueeze(1)
 
-                y = flat_grad[m] - prev_flat_grad[m]
-                s = d[m] * t[m]
-                ys = y.dot(s)
+            # Compute ys for all systems: (M,)
+            ys = (y * s).sum(dim=1)
 
-                if ys > 1e-10:
-                    if len(old_dirs[m]) == history_size:
-                        old_dirs[m].pop(0)
-                        old_stps[m].pop(0)
-                        ro[m].pop(0)
+            # Mask for systems that should update history (active and ys > threshold)
+            update_mask = active & (ys > 1e-10)  # (M,)
 
-                    old_dirs[m].append(y)
-                    old_stps[m].append(s)
-                    ro[m].append(1.0 / ys.item())
-                    H_diag[m] = ys / y.dot(y)
+            if update_mask.any():
+                # Update H_diag for systems that pass the threshold
+                H_diag[update_mask] = ys[update_mask] / (y[update_mask] * y[update_mask]).sum(dim=1)
+
+                # For systems needing update, determine if we need to shift or append
+                curr_len = hist_len[update_mask]  # lengths of systems being updated
+
+                # Systems with room to append (curr_len < history_size)
+                append_mask = update_mask.clone()
+                append_mask[update_mask] = curr_len < history_size
+
+                # Systems that need to shift (curr_len == history_size)
+                shift_mask = update_mask & ~append_mask
+
+                # Handle append case
+                if append_mask.any():
+                    # Write to position hist_len[m] for each system
+                    for pos in range(history_size):
+                        pos_mask = (hist_len == pos) & append_mask
+                        if pos_mask.any():
+                            old_dirs[pos_mask, pos] = y[pos_mask]
+                            old_stps[pos_mask, pos] = s[pos_mask]
+                            ro[pos_mask, pos] = 1.0 / ys[pos_mask]
+
+                    hist_len[append_mask] += 1
+
+                # Handle shift case - need to shift left and add at end
+                if shift_mask.any():
+                    # Shift all entries left by 1
+                    old_dirs[shift_mask, :-1] = old_dirs[shift_mask, 1:].clone()
+                    old_stps[shift_mask, :-1] = old_stps[shift_mask, 1:].clone()
+                    ro[shift_mask, :-1] = ro[shift_mask, 1:].clone()
+
+                    # Add new entry at end
+                    old_dirs[shift_mask, history_size - 1] = y[shift_mask]
+                    old_stps[shift_mask, history_size - 1] = s[shift_mask]
+                    ro[shift_mask, history_size - 1] = 1.0 / ys[shift_mask]
 
         # Check convergence for each system
         grad_norm = flat_grad.abs().max(dim=1).values  # (M,)
