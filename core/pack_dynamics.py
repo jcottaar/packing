@@ -25,7 +25,7 @@ class OptimizerBFGS(kgs.BaseClass):
 
     # Hyperparameters
     cost = None
-    max_iter = 100
+    n_iterations = 100
     history_size = 3
     max_step = 0.01
     use_line_search = False
@@ -91,7 +91,7 @@ class OptimizerBFGS(kgs.BaseClass):
 
         import lbfgs_torch_parallel
         results = lbfgs_torch_parallel.lbfgs(
-            f_torch,x0,tolerance_grad=0, tolerance_change=0, max_iter=self.max_iter, history_size=self.history_size, max_step=self.max_step,
+            f_torch,x0,tolerance_grad=0, tolerance_change=0, max_iter=self.n_iterations, history_size=self.history_size, max_step=self.max_step,
             line_search_fn = 'strong_wolfe' if self.use_line_search else None)
         x_result = cp.from_dlpack(to_dlpack(results))
         sol.xyt = cp.ascontiguousarray(x_result[:,:sol.N_trees*3].reshape(sol.N_solutions,-1,3))

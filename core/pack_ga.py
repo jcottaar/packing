@@ -541,12 +541,12 @@ class GA(kgs.BaseClass):
     seed: int = field(init=True, default=42)
     plot_fitness_predictors: bool = field(init=True, default=False)
     plot_diversity_matrix: bool = field(init=True, default=False)
-    plot_champions: bool = field(init=True, default=True)
+    plot_champions: bool = field(init=True, default=False)
 
     # Hyperparameters
     population_size:int = field(init=True, default=1000)
     selection_size:list = field(init=True, default_factory=lambda: [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500])
-    n_generations:int = field(init=True, default=5000)    
+    n_generations:int = field(init=True, default=200)    
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
@@ -698,7 +698,7 @@ class GA(kgs.BaseClass):
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
                 best_pop = copy.deepcopy(self.populations[i_N_trees])
                 best_pop.select_ids([best_id])
-                print(best_pop.configuration.h)
+                #print(best_pop.configuration.h)
                 #print(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(best_pop.configuration)[0].get(), 
                 #      pack_cost.CollisionCostSeparation().compute_cost_allocate(best_pop.configuration)[0].get())
                 self.best_cost_per_generation[i_gen, i_N_trees] = self.populations[i_N_trees].fitness[best_id]
