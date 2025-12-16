@@ -68,7 +68,6 @@ def _cubic_interpolate_batch(x1, f1, g1, x2, f2, g2, xmin_bound, xmax_bound):
 
     return torch.where(valid, result_valid, result_invalid)
 
-#@kgs.profile_each_line
 def _strong_wolfe_batched(
     obj_func, x, t, d, f, g, gtd, c1=1e-4, c2=0.9, tolerance_change=1e-9, max_ls=25
 ):
@@ -380,7 +379,6 @@ def _strong_wolfe_batched(
     return f_new, g_new, t, ls_func_evals
 
 
-@kgs.profile_each_line
 def lbfgs(
     func,
     x0: Tensor,

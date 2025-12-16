@@ -148,7 +148,7 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
 class Population(kgs.BaseClass):
     configuration: kgs.SolutionCollection = field(init=True, default=None)
     fitness: np.ndarray = field(init=True, default=None)
-    lineages: list = field(init=True, default=None)
+    # lineages: list = field(init=True, default=None)
 
     # Lineages is a list of lists, each list gives the history for an individual. Each element is a move, itself a list:
     # - First element describes the move (format up to the move itself, often including choices and perhaps some KPI)
@@ -161,7 +161,7 @@ class Population(kgs.BaseClass):
     def _check_constraints(self):
         self.configuration.check_constraints()
         assert self.fitness.shape == (self.configuration.N_solutions,)
-        assert len(self.lineages) == self.configuration.N_solutions
+        # assert len(self.lineages) == self.configuration.N_solutions
 
     def set_dummy_fitness(self):
         self.fitness = np.zeros(self.configuration.N_solutions)
@@ -169,25 +169,25 @@ class Population(kgs.BaseClass):
     def select_ids(self, inds):
         self.configuration.select_ids(inds)
         self.fitness = self.fitness[inds]
-        self.lineages = [self.lineages[i] for i in inds]
-    
+        # self.lineages = [self.lineages[i] for i in inds]
+
     def create_empty(self, N_individuals, N_trees):
-        configuration = self.configuration.create_empty(N_individuals, N_trees)        
+        configuration = self.configuration.create_empty(N_individuals, N_trees)
         population = type(self)(configuration=configuration)
         population.fitness = np.zeros(N_individuals, dtype=kgs.dtype_np)
-        population.lineages = [ None for _ in range(N_individuals) ]
+        # population.lineages = [ None for _ in range(N_individuals) ]
         return population
 
     def create_clone(self, idx: int, other: 'Population', parent_id: int):
         assert idx<self.configuration.N_solutions
         self.configuration.create_clone(idx, other.configuration, parent_id)
         self.fitness[idx] = other.fitness[parent_id]
-        self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
+        # self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
 
     def merge(self, other:'Population'):
         self.configuration.merge(other.configuration)
         self.fitness = np.concatenate([self.fitness, other.fitness], axis=0)
-        self.lineages = self.lineages + other.lineages
+        # self.lineages = self.lineages + other.lineages
 
 
 # ============================================================
@@ -242,7 +242,7 @@ class InitializerRandomJiggled(Initializer):
         sol = self.jiggler.run_simulation(sol)
         sol.snap()
         population = Population(configuration=sol)
-        population.lineages = [ [['InitializerRandomJiggled', [np.inf, np.inf, np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
+        # population.lineages = [ [['InitializerRandomJiggled', [np.inf, np.inf, np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
         return population
     
 
@@ -334,6 +334,7 @@ class JiggleCluster(Move):
     min_N_trees: int = field(init=True, default=2)
     max_N_trees: int = field(init=True, default=5)
     def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
+        return []
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
@@ -601,35 +602,36 @@ class GA(kgs.BaseClass):
         return costs
 
 
-    def _relax_and_score(self, population:Population):        
+    def _relax_and_score(self, population:Population):
         sol = population.configuration
         #sol.snap()
         costs = self._score(sol)
-        for i in range(len(costs)):
-            population.lineages[i][-1][1][3]= costs[i]
+        # for i in range(len(costs)):
+        #     population.lineages[i][-1][1][3]= costs[i]
         for relaxer in self.rough_relaxers:
             sol = relaxer.run_simulation(sol)
         #sol.snap()
         costs = self._score(sol)
-        for i in range(len(costs)):
-            population.lineages[i][-1][1][4]= costs[i]
+        # for i in range(len(costs)):
+        #     population.lineages[i][-1][1][4]= costs[i]
         for relaxer in self.fine_relaxers:
             sol = relaxer.run_simulation(sol)
         costs = self._score(sol)
-        for i in range(len(costs)):
-            population.lineages[i][-1][1][5]= costs[i]
+        # for i in range(len(costs)):
+        #     population.lineages[i][-1][1][5]= costs[i]
         population.configuration = sol
         population.fitness = costs
-        if self.plot_fitness_predictors:
-            fig,ax = plt.subplots(1,3,figsize=(12,4))
-            y_vals = [x[-1][1][5] for x in population.lineages]
-            for i_ax,ii in enumerate([0,3,4]):
-                x_vals = [x[-1][1][ii] for x in population.lineages]
-                plt.sca(ax[i_ax])
-                plt.scatter(x_vals, y_vals)
-                plt.grid(True)
-            plt.pause(0.001)
+        # if self.plot_fitness_predictors:
+        #     fig,ax = plt.subplots(1,3,figsize=(12,4))
+        #     y_vals = [x[-1][1][5] for x in population.lineages]
+        #     for i_ax,ii in enumerate([0,3,4]):
+        #         x_vals = [x[-1][1][ii] for x in population.lineages]
+        #         plt.sca(ax[i_ax])
+        #         plt.scatter(x_vals, y_vals)
+        #         plt.grid(True)
+        #     plt.pause(0.001)
             
+    @kgs.profile_each_line
     def run(self):
         self.check_constraints()
         generator = np.random.default_rng(seed=self.seed)
@@ -667,9 +669,9 @@ class GA(kgs.BaseClass):
                         probs = weights / weights.sum()
                         mate_id = generator.choice(parent_size, p=probs)
 
-                        new_pop.create_clone(i_ind, old_pop, parent_id) 
-                        move_descriptor = self.move.do_move(new_pop, old_pop, i_ind, mate_id, generator)                  
-                        new_pop.lineages[i_ind].append([move_descriptor, [old_pop.fitness[parent_id],old_pop.fitness[mate_id],diversity_matrix[parent_id, mate_id],0.,0.,0.]])  # Placeholder for move description
+                        new_pop.create_clone(i_ind, old_pop, parent_id)
+                        move_descriptor = self.move.do_move(new_pop, old_pop, i_ind, mate_id, generator)
+                        # new_pop.lineages[i_ind].append([move_descriptor, [old_pop.fitness[parent_id],old_pop.fitness[mate_id],diversity_matrix[parent_id, mate_id],0.,0.,0.]])  # Placeholder for move description
 
 
 
@@ -696,8 +698,8 @@ class GA(kgs.BaseClass):
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
                 best_id = np.argmin(self.populations[i_N_trees].fitness)                   
                 print(f'Generation {i_gen}, Trees {N_trees}, Best cost: {self.populations[i_N_trees].fitness[best_id]:.8f}, Est: {100*self.populations[i_N_trees].fitness[best_id]/N_trees:.8f}, h: {self.populations[i_N_trees].configuration.h[best_id,0].get():.6f}')    
-                best_pop = copy.deepcopy(self.populations[i_N_trees])
-                best_pop.select_ids([best_id])
+                #best_pop = copy.deepcopy(self.populations[i_N_trees])
+                #best_pop.select_ids([best_id])
                 #print(best_pop.configuration.h)
                 #print(pack_cost.CollisionCostOverlappingArea().compute_cost_allocate(best_pop.configuration)[0].get(), 
                 #      pack_cost.CollisionCostSeparation().compute_cost_allocate(best_pop.configuration)[0].get())

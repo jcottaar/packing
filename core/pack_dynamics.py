@@ -85,6 +85,7 @@ class OptimizerBFGS(kgs.BaseClass):
             res = cp.zeros_like(tmp_x[:N,:], dtype=kgs.dtype_cp)
             res[:,:N_split] = tmp_grad[:N, :].reshape(sol_tmp.N_solutions,-1)
             res[:,N_split:] = tmp_grad_h[:N, :].reshape(sol_tmp.N_solutions,-1)
+            cp.cuda.Device().synchronize()
             return from_dlpack(tmp_cost[:N].toDlpack()), from_dlpack(res.toDlpack())
         
         
