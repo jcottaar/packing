@@ -11,6 +11,23 @@ import shapely
 import pack_cuda
 import copy
 
+def smoothed_quadratic(s, h):
+    res = copy.deepcopy(s)
+    res = (s-h/2)**2 + h**2/12
+    res[s<h] = s[s<h]**3/(3*h)
+    res[s<0] = 0
+    return res
+
+def smoothed_quadratic_grad(s, h):
+    """Compute gradient of smoothed_quadratic with respect to s."""
+    grad = copy.deepcopy(s)
+    grad = 2*(s-h/2)
+    grad[s<h] = s[s<h]**2/h
+    grad[s<0] = 0
+    return grad
+
+
+
 @dataclass
 class Cost(kgs.BaseClass):
     scaling:float = field(init=True, default=1.0)
@@ -880,6 +897,7 @@ class AreaCost(Cost):
 @dataclass
 class BoundaryDistanceCost(Cost):
     use_kernel : bool = field(init=True, default=True)
+    smoothing_h: float = field(init=True, default=0.0)
     # Cost based on squared distance of vertices outside the square boundary
     # Per tree, use only the vertex with the maximum distance
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
@@ -911,7 +929,7 @@ class BoundaryDistanceCost(Cost):
             vy = coords[:, 1]
             dx = np.maximum(0.0, np.abs(vx) - half)
             dy = np.maximum(0.0, np.abs(vy) - half)
-            dist_sq = dx**2 + dy**2
+            dist_sq = smoothed_quadratic(np.sqrt(dx**2+dy**2), self.smoothing_h)#dx**2 + dy**2
             max_dist_sq = float(np.max(dist_sq))
             total_cost += max_dist_sq
         
@@ -950,7 +968,7 @@ class BoundaryDistanceCost(Cost):
                     vy_p = coords_plus[:, 1]
                     dx_p = np.maximum(0.0, np.abs(vx_p) - half)
                     dy_p = np.maximum(0.0, np.abs(vy_p) - half)
-                    dist_sq_p = dx_p**2 + dy_p**2
+                    dist_sq_p = smoothed_quadratic(np.sqrt(dx_p**2 + dy_p**2), self.smoothing_h)
                     cost_plus = float(np.max(dist_sq_p))
 
                 coords_minus = np.array(tree_minus.exterior.coords[:-1])
@@ -961,7 +979,7 @@ class BoundaryDistanceCost(Cost):
                     vy_m = coords_minus[:, 1]
                     dx_m = np.maximum(0.0, np.abs(vx_m) - half)
                     dy_m = np.maximum(0.0, np.abs(vy_m) - half)
-                    dist_sq_m = dx_m**2 + dy_m**2
+                    dist_sq_m = smoothed_quadratic(np.sqrt(dx_m**2 + dy_m**2), self.smoothing_h)
                     cost_minus = float(np.max(dist_sq_m))
                 
                 grad_val = (cost_plus - cost_minus) / (2.0 * epsilon)
@@ -986,7 +1004,7 @@ class BoundaryDistanceCost(Cost):
             vy = coords[:, 1]
             dx = np.maximum(0.0, np.abs(vx) - half_plus)
             dy = np.maximum(0.0, np.abs(vy) - half_plus)
-            dist_sq = dx**2 + dy**2
+            dist_sq = smoothed_quadratic(np.sqrt(dx**2 + dy**2), self.smoothing_h)
             cost_plus += float(np.max(dist_sq))
 
         cost_minus = 0.0
@@ -998,7 +1016,7 @@ class BoundaryDistanceCost(Cost):
             vy = coords[:, 1]
             dx = np.maximum(0.0, np.abs(vx) - half_minus)
             dy = np.maximum(0.0, np.abs(vy) - half_minus)
-            dist_sq = dx**2 + dy**2
+            dist_sq = smoothed_quadratic(np.sqrt(dx**2 + dy**2), self.smoothing_h)
             cost_minus += float(np.max(dist_sq))
         
         grad_bound[0] = cp.array((cost_plus - cost_minus) / (2.0 * epsilon))
