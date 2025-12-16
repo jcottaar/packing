@@ -357,16 +357,14 @@ class SolutionCollection(BaseClass):
         """Number of solution rows in xyt (N_solutions)."""
         if self.xyt is None:
             return 0
-        arr = to_cpu(self.xyt)
-        return int(np.asarray(arr).shape[0])
+        return self.xyt.shape[0]
 
     @property
     def N_trees(self) -> int:
         """Number of trees per solution (N_trees)."""
         if self.xyt is None:
             return 0
-        arr = to_cpu(self.xyt)
-        return int(np.asarray(arr).shape[1])
+        return self.xyt.shape[1]
     
     def rotate(self, angle:cp.ndarray):
         # rotate xyt by given angle (radians)
@@ -507,7 +505,7 @@ class SolutionCollectionSquare(SolutionCollection):
         # Update h: [size, x_offset, y_offset]
         self.xyt[:,:,0] -= x_center[:, cp.newaxis]
         self.xyt[:,:,1] -= y_center[:, cp.newaxis]
-        self.h = cp.stack([size, 0*size, 0*size], axis=1)  # (n_solutions, 3)
+        self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
 
 @dataclass
 class SolutionCollectionLattice(SolutionCollection):

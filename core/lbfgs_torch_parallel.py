@@ -68,7 +68,7 @@ def _cubic_interpolate_batch(x1, f1, g1, x2, f2, g2, xmin_bound, xmax_bound):
 
     return torch.where(valid, result_valid, result_invalid)
 
-@kgs.profile_each_line
+#@kgs.profile_each_line
 def _strong_wolfe_batched(
     obj_func, x, t, d, f, g, gtd, c1=1e-4, c2=0.9, tolerance_change=1e-9, max_ls=25
 ):
@@ -99,7 +99,7 @@ def _strong_wolfe_batched(
 
     # Evaluate initial step for all systems
     x_new = x + t.unsqueeze(1) * d
-    f_new, g_new = obj_func(x_new)
+    f_new, g_new = obj_func(x_new, True)
     ls_func_evals = torch.ones(M, dtype=torch.long, device=device)
     gtd_new = (g_new * d).sum(dim=1)  # (M,)
 
@@ -192,7 +192,7 @@ def _strong_wolfe_batched(
 
         # Evaluate new points for active systems
         x_new[active] = x[active] + t[active].unsqueeze(1) * d[active]
-        f_new_batch, g_new_batch = obj_func(x_new[active])
+        f_new_batch, g_new_batch = obj_func(x_new[active], False)
         f_new[active] = f_new_batch
         g_new[active] = g_new_batch
         ls_func_evals[active] += 1
@@ -276,7 +276,7 @@ def _strong_wolfe_batched(
 
         # Evaluate new points for active systems
         x_new[active] = x[active] + t_new[active].unsqueeze(1) * d[active]
-        f_new_batch, g_new_batch = obj_func(x_new[active])
+        f_new_batch, g_new_batch = obj_func(x_new[active], False)
         f_new[active] = f_new_batch
         g_new[active] = g_new_batch
         ls_func_evals[active] += 1
@@ -380,7 +380,7 @@ def _strong_wolfe_batched(
     return f_new, g_new, t, ls_func_evals
 
 
-#@kgs.profile_each_line
+@kgs.profile_each_line
 def lbfgs(
     func,
     x0: Tensor,
@@ -391,6 +391,7 @@ def lbfgs(
     tolerance_change: float = 1e-9,
     history_size: int = 100,
     line_search_fn: Optional[str] = None,
+    max_step: Optional[float] = 0.5,
 ):
     """Minimize a function using L-BFGS algorithm (batched version).
 
@@ -408,6 +409,8 @@ def lbfgs(
         tolerance_change: Termination tolerance on function/parameter changes (default: 1e-9)
         history_size: Number of previous gradients to store (default: 100)
         line_search_fn: Line search method, either 'strong_wolfe' or None (default: None)
+        max_step: Maximum change allowed in any parameter per step (default: 0.5).
+                  Set to None to disable step clamping. Useful for constrained problems.
 
     Returns:
         Optimized parameters (same tensor as x0, modified in-place)
@@ -431,7 +434,7 @@ def lbfgs(
     x = x0.detach().clone()
 
     # Evaluate initial function and gradient
-    loss, flat_grad = func(x)  # loss: (M,), flat_grad: (M, N)
+    loss, flat_grad = func(x, True)  # loss: (M,), flat_grad: (M, N)
     func_evals = torch.ones(M, dtype=torch.long, device=device)
 
     # Track which systems are still active
@@ -457,6 +460,27 @@ def lbfgs(
     hist_len = torch.zeros(M, dtype=torch.long, device=device)
     H_diag = torch.ones(M, dtype=dtype, device=device)
 
+    # Pre-allocate reusable buffers to reduce allocation overhead
+    hist_arange = torch.arange(history_size, device=device)  # Reused for hist_mask
+    hist_mask = torch.zeros(M, history_size, dtype=torch.bool, device=device)
+    q_buffer = torch.zeros(M, N, dtype=dtype, device=device)
+    r_buffer = torch.zeros(M, N, dtype=dtype, device=device)
+    al_buffer = torch.zeros(M, history_size, dtype=dtype, device=device)
+    prev_flat_grad = torch.zeros(M, N, dtype=dtype, device=device)
+    prev_loss_iter = torch.zeros(M, dtype=dtype, device=device)
+    t_buffer = torch.zeros(M, dtype=dtype, device=device)
+    grad_sum_buffer = torch.zeros(M, dtype=dtype, device=device)
+    ones_M_buffer = torch.ones(M, dtype=dtype, device=device)
+    ls_evals_buffer = torch.zeros(M, dtype=torch.long, device=device)
+    y_buffer = torch.zeros(M, N, dtype=dtype, device=device)
+    s_buffer = torch.zeros(M, N, dtype=dtype, device=device)
+    ys_buffer = torch.zeros(M, dtype=dtype, device=device)
+    param_change_buffer = torch.zeros(M, dtype=dtype, device=device)
+    loss_change_buffer = torch.zeros(M, dtype=dtype, device=device)
+    append_mask_buffer = torch.zeros(M, dtype=torch.bool, device=device)
+    shift_mask_buffer = torch.zeros(M, dtype=torch.bool, device=device)
+    step_norm_buffer = torch.zeros(M, dtype=dtype, device=device)
+
     n_iter = 0
     prev_loss = loss.clone()
 
@@ -470,14 +494,16 @@ def lbfgs(
             H_diag.fill_(1.0)
         else:
             # L-BFGS two-loop recursion (vectorized)
-            # Create mask for valid history entries: (M, history_size)
-            hist_mask = torch.arange(history_size, device=device).unsqueeze(0) < hist_len.unsqueeze(1)
+            # Create mask for valid history entries: (M, history_size) - reuse buffer
+            torch.less(hist_arange.unsqueeze(0), hist_len.unsqueeze(1), out=hist_mask)
 
-            # Initialize q for all systems: (M, N)
-            q = -flat_grad.clone()
+            # Initialize q for all systems: (M, N) - reuse buffer
+            torch.neg(flat_grad, out=q_buffer)
+            q = q_buffer
 
-            # Storage for alpha values: (M, history_size)
-            al = torch.zeros(M, history_size, dtype=dtype, device=device)
+            # Storage for alpha values: (M, history_size) - reuse buffer
+            al_buffer.zero_()
+            al = al_buffer
 
             # First loop (backward through history)
             for i in range(history_size - 1, -1, -1):
@@ -494,7 +520,8 @@ def lbfgs(
                     q = q - old_dirs[:, i] * al[:, i].unsqueeze(1) * mask_i.unsqueeze(1)
 
             # Multiply by initial Hessian approximation: r = H_diag * q
-            r = q * H_diag.unsqueeze(1)  # (M, N)
+            torch.mul(q, H_diag.unsqueeze(1), out=r_buffer)
+            r = r_buffer
 
             # Second loop (forward through history)
             for i in range(history_size):
@@ -510,18 +537,31 @@ def lbfgs(
 
             d = r
 
-        # Store previous gradient and loss
-        prev_flat_grad = flat_grad.clone()
-        prev_loss_iter = loss.clone()
+        # Store previous gradient and loss - reuse buffers
+        prev_flat_grad.copy_(flat_grad)
+        prev_loss_iter.copy_(loss)
 
         # Compute step length
         if n_iter == 1:
             # Vectorized: t = min(1.0, 1.0 / ||g||_1) * lr for each system
-            grad_sum = flat_grad.abs().sum(dim=1)  # (M,)
-            t = torch.minimum(torch.ones_like(grad_sum), 1.0 / grad_sum) * lr
-            t[~active] = 0  # Zero out inactive systems
+            grad_sum_buffer[:] = flat_grad.abs().sum(dim=1)
+            t_buffer.copy_(ones_M_buffer)
+            torch.div(t_buffer, grad_sum_buffer, out=t_buffer)
+            torch.minimum(ones_M_buffer, t_buffer, out=t_buffer)
+            t_buffer.mul_(lr)
+            t_buffer[~active] = 0  # Zero out inactive systems
+            t = t_buffer
         else:
-            t = torch.full((M,), lr, dtype=dtype, device=device)
+            t_buffer.fill_(lr)
+            t = t_buffer
+
+        # Clamp step size to prevent wild updates (trust region)
+        if max_step is not None:
+            param_change_buffer[:] = (d * t.unsqueeze(1)).abs().max(dim=1).values
+            needs_scaling = param_change_buffer > max_step
+            if needs_scaling.any():
+                scale_factor = max_step / param_change_buffer[needs_scaling]
+                t[needs_scaling] *= scale_factor
 
         # Check directional derivative and mark converged
         gtd = (flat_grad * d).sum(dim=1)  # (M,)
@@ -541,26 +581,29 @@ def lbfgs(
             loss[active] = loss_active
             flat_grad[active] = flat_grad_active
             t[active] = t_active
-            ls_evals = torch.zeros(M, dtype=torch.long, device=device)
-            ls_evals[active] = ls_evals_active
+            ls_evals_buffer.zero_()
+            ls_evals_buffer[active] = ls_evals_active
             x[active] = x[active] + t[active].unsqueeze(1) * d[active]
         else:
             # Simple step
             x = x + t.unsqueeze(1) * d
             if n_iter != max_iter:
-                loss, flat_grad = func(x)
-            ls_evals = torch.ones(M, dtype=torch.long, device=device)
+                loss, flat_grad = func(x, True)
+            ls_evals_buffer.fill_(1)
 
-        func_evals += ls_evals
+        func_evals += ls_evals_buffer
 
         # Update history for active systems (vectorized)
         if n_iter > 1:
-            # Compute y and s for all systems: (M, N)
-            y = flat_grad - prev_flat_grad
-            s = d * t.unsqueeze(1)
+            # Compute y and s for all systems: (M, N) - reuse buffers
+            torch.sub(flat_grad, prev_flat_grad, out=y_buffer)
+            torch.mul(d, t.unsqueeze(1), out=s_buffer)
+            y = y_buffer
+            s = s_buffer
 
-            # Compute ys for all systems: (M,)
-            ys = (y * s).sum(dim=1)
+            # Compute ys for all systems: (M,) - reuse buffer
+            ys_buffer[:] = (y * s).sum(dim=1)
+            ys = ys_buffer
 
             # Mask for systems that should update history (active and ys > threshold)
             update_mask = active & (ys > 1e-10)  # (M,)
@@ -572,12 +615,14 @@ def lbfgs(
                 # For systems needing update, determine if we need to shift or append
                 curr_len = hist_len[update_mask]  # lengths of systems being updated
 
-                # Systems with room to append (curr_len < history_size)
-                append_mask = update_mask.clone()
-                append_mask[update_mask] = curr_len < history_size
+                # Systems with room to append (curr_len < history_size) - reuse buffer
+                append_mask_buffer.copy_(update_mask)
+                append_mask_buffer[update_mask] = curr_len < history_size
+                append_mask = append_mask_buffer
 
-                # Systems that need to shift (curr_len == history_size)
-                shift_mask = update_mask & ~append_mask
+                # Systems that need to shift (curr_len == history_size) - reuse buffer
+                torch.logical_and(update_mask, ~append_mask, out=shift_mask_buffer)
+                shift_mask = shift_mask_buffer
 
                 # Handle append case (vectorized)
                 if append_mask.any():
@@ -615,13 +660,15 @@ def lbfgs(
         converged_eval = func_evals >= max_eval
         active &= ~converged_eval
 
-        # Vectorized convergence checks
-        param_change = (d * t.unsqueeze(1)).abs().max(dim=1).values  # (M,)
-        converged_param = (param_change <= tolerance_change) & active
+        # Vectorized convergence checks - reuse buffers
+        torch.mul(d, t.unsqueeze(1), out=s_buffer)  # Recompute s for convergence check
+        param_change_buffer[:] = s_buffer.abs().max(dim=1).values
+        converged_param = (param_change_buffer <= tolerance_change) & active
         active &= ~converged_param
 
-        loss_change = (loss - prev_loss_iter).abs()  # (M,)
-        converged_loss = (loss_change < tolerance_change) & active
+        torch.sub(loss, prev_loss_iter, out=loss_change_buffer)
+        loss_change_buffer.abs_()
+        converged_loss = (loss_change_buffer < tolerance_change) & active
         active &= ~converged_loss
 
     # Update x0 with final result

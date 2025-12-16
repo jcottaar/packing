@@ -4,7 +4,6 @@ sys.path.insert(0, os.path.join(os.getcwd(), '../core'))
 import kaggle_support as kgs
 import importlib
 import matplotlib.pyplot as plt
-importlib.reload(kgs)
 import numpy as np
 import cupy as cp
 import time
@@ -16,6 +15,98 @@ import copy
 from IPython.display import HTML, display, clear_output
 from scipy import stats
 from typeguard import typechecked
+from torch.utils.dlpack import to_dlpack, from_dlpack
+
+@dataclass
+class OptimizerBFGS(kgs.BaseClass):
+    # Configuration    
+    track_cost = False  # Record cost history
+    plot_cost = False  # Plot cost history at end
+
+    # Hyperparameters
+    cost = None
+    max_iter = 100
+    history_size = 3
+    max_step = 0.01
+    use_line_search = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-2), 
+                                        pack_cost.BoundaryDistanceCost(scaling=1.), 
+                                        pack_cost.CollisionCostOverlappingArea(scaling=1.)])
+        
+    @typechecked
+    def run_simulation(self, sol:kgs.SolutionCollection):
+
+        sol.check_constraints()
+        sol = copy.deepcopy(sol)
+        #sol.snap()
+
+        #print('snapped', cp.min(self.cost.compute_cost_allocate(sol)[0]))
+
+        sol_tmp = copy.deepcopy(sol)
+
+        if self.track_cost:
+            n_steps = self.max_iter
+            cost_history = np.zeros((n_steps, sol.N_solutions), dtype=kgs.dtype_np)
+
+        counter = 0
+
+        x0 = cp.concatenate((sol_tmp.xyt.reshape(sol_tmp.N_solutions,-1), sol_tmp.h.reshape(sol_tmp.N_solutions,-1)),axis=1)
+        tmp_x = cp.zeros_like(x0, dtype=kgs.dtype_cp)
+        tmp_res = cp.zeros_like(x0, dtype=kgs.dtype_cp)
+        x0 = from_dlpack(x0.toDlpack())
+        
+        tmp_xyt = copy.deepcopy(sol.xyt)
+        tmp_h = copy.deepcopy(sol.h)
+        tmp_cost = cp.zeros(sol.N_solutions, dtype=kgs.dtype_cp)
+        tmp_grad = cp.zeros_like(sol.xyt, dtype=kgs.dtype_cp)
+        tmp_grad_h = cp.zeros_like(sol.h, dtype=kgs.dtype_cp)
+        
+        def f_torch(x, is_main_loop):            
+            nonlocal tmp_xyt, tmp_h, tmp_cost, tmp_grad, tmp_grad_h, tmp_res, tmp_x
+            tmp_x[:x.shape[0]] = cp.from_dlpack(to_dlpack(x))
+            nonlocal sol_tmp, counter
+            N_split = sol_tmp.N_trees*3
+            N = x.shape[0]
+
+            # This has to go via tmp_xyt/tmp_h for contiguity
+            tmp_xyt[:N, :] = tmp_x[:N,:N_split].reshape(N,-1,3)
+            tmp_h[:N, :] = tmp_x[:N,N_split:].reshape(N,-1)
+            sol_tmp.xyt = tmp_xyt[:N, :]
+            sol_tmp.h = tmp_h[:N, :]
+
+            self.cost.compute_cost(sol_tmp, tmp_cost[:N], tmp_grad[:N, :], tmp_grad_h[:N, :])
+
+            if self.track_cost:
+                cost_history[counter-1,:] = tmp_cost.get()
+                
+            res = cp.zeros_like(tmp_x[:N,:], dtype=kgs.dtype_cp)
+            res[:,:N_split] = tmp_grad[:N, :].reshape(sol_tmp.N_solutions,-1)
+            res[:,N_split:] = tmp_grad_h[:N, :].reshape(sol_tmp.N_solutions,-1)
+            return from_dlpack(tmp_cost[:N].toDlpack()), from_dlpack(res.toDlpack())
+        
+        
+
+        import lbfgs_torch_parallel
+        results = lbfgs_torch_parallel.lbfgs(
+            f_torch,x0,tolerance_grad=0, tolerance_change=0, max_iter=self.max_iter, history_size=self.history_size, max_step=self.max_step,
+            line_search_fn = 'strong_wolfe' if self.use_line_search else None)
+        x_result = cp.from_dlpack(to_dlpack(results))
+        sol.xyt = cp.ascontiguousarray(x_result[:,:sol.N_trees*3].reshape(sol.N_solutions,-1,3))
+        sol.h = cp.ascontiguousarray(x_result[:,sol.N_trees*3:].reshape(sol.N_solutions,-1))
+
+        if self.plot_cost and self.track_cost:
+            plt.figure(figsize=(8,8))
+            plt.plot(cost_history)
+            plt.xlabel('Iteration')
+            plt.ylabel('Cost')
+            plt.pause(0.001)
+
+        #print('after', cp.min(self.cost.compute_cost_allocate(sol)[0]))
+
+        return sol
 
 @dataclass
 class Optimizer(kgs.BaseClass):
@@ -24,6 +115,8 @@ class Optimizer(kgs.BaseClass):
     # Configuration    
     plot_interval = None
     use_lookahead = False  # Enable second-order lookahead (predictor-corrector)
+    track_cost = False  # Record cost history
+    plot_cost = False  # Plot cost history at end
 
     # Hyperparameters
     cost = None
@@ -43,7 +136,7 @@ class Optimizer(kgs.BaseClass):
 
         sol.check_constraints()
         sol = copy.deepcopy(sol)
-        sol.snap()
+        #sol.snap()
 
         xyt = sol.xyt
         h = sol.h        
@@ -61,6 +154,9 @@ class Optimizer(kgs.BaseClass):
 
         t_total0 = kgs.dtype_np(0.)   
         t_last_plot = kgs.dtype_np(-np.inf)
+
+        if self.track_cost:
+            cost_history = np.zeros((self.n_iterations, n_ensembles), dtype=kgs.dtype_np)
         
         # For second-order lookahead, store previous gradients
         if self.use_lookahead:
@@ -90,6 +186,9 @@ class Optimizer(kgs.BaseClass):
             else:
                 xyt -= dt * total_grad
                 h -= dt * bound_grad
+                
+            if self.track_cost:
+                cost_history[i_iteration, :] = total_cost.get()
             
             if self.use_lookahead:
                 # Store current gradients for next iteration
@@ -105,6 +204,12 @@ class Optimizer(kgs.BaseClass):
                 ax.set_title(f'Time: {t_total0:.2f}, cost: {total_cost[0].get().item():.12f}, {sol.h[0,0].get()}, {bound_grad[0,0].get()}')
                 display(fig)
                 clear_output(wait=True)       
+        if self.plot_cost and self.track_cost:
+            plt.figure(figsize=(8,8))
+            plt.plot(cost_history)
+            plt.xlabel('Iteration')
+            plt.ylabel('Cost')
+            plt.pause(0.001)
         return sol
 
 @dataclass

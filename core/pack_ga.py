@@ -603,13 +603,13 @@ class GA(kgs.BaseClass):
 
     def _relax_and_score(self, population:Population):        
         sol = population.configuration
-        sol.snap()
+        #sol.snap()
         costs = self._score(sol)
         for i in range(len(costs)):
             population.lineages[i][-1][1][3]= costs[i]
         for relaxer in self.rough_relaxers:
             sol = relaxer.run_simulation(sol)
-        sol.snap()
+        #sol.snap()
         costs = self._score(sol)
         for i in range(len(costs)):
             population.lineages[i][-1][1][4]= costs[i]
@@ -649,6 +649,48 @@ class GA(kgs.BaseClass):
 
         self.best_cost_per_generation = np.zeros((self.n_generations, len(self.N_trees_to_do)))
         for i_gen in range(self.n_generations):
+
+            if i_gen>0:
+                # Offspring generation
+                for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
+                    old_pop = self.populations[i_N_trees]
+                    parent_size = old_pop.configuration.N_solutions
+                    new_pop = old_pop.create_empty(self.population_size-parent_size, N_trees)
+
+                    for i_ind in range(new_pop.configuration.N_solutions):
+                        # Pick a random parent
+                        parent_id = generator.integers(0, parent_size)
+                        # Pick a random mate, but preferring champions
+                        # pick a mate, where the worst (last) individual gets weight 1, the next best weight 2, etc. (DISABLED FOR NOW)
+                        weights = 0*np.arange(parent_size, 0, -1, dtype=float)+1  # best has largest weight
+                        weights[parent_id] = 0.0
+                        probs = weights / weights.sum()
+                        mate_id = generator.choice(parent_size, p=probs)
+
+                        new_pop.create_clone(i_ind, old_pop, parent_id) 
+                        move_descriptor = self.move.do_move(new_pop, old_pop, i_ind, mate_id, generator)                  
+                        new_pop.lineages[i_ind].append([move_descriptor, [old_pop.fitness[parent_id],old_pop.fitness[mate_id],diversity_matrix[parent_id, mate_id],0.,0.,0.]])  # Placeholder for move description
+
+
+
+                        # new_pop.create_clone(i_ind, old_pop, parent_id)                    
+                        # new_h = new_pop.configuration.h
+                        # new_xyt = new_pop.configuration.xyt
+                        # if generator.uniform() < self.p_move:
+                        #     tree_to_mutate = generator.integers(0, N_trees)
+                        #     h_size = new_h[i_ind, 0].get()  # Square size
+                        #     h_offset_x = new_h[i_ind, 1].get()  # x offset
+                        #     h_offset_y = new_h[i_ind, 2].get()  # y offset
+                        #     new_xyt[i_ind, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
+                        #     new_xyt[i_ind, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
+                        #     new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta                
+                        # new_pop.lineages[i_ind].append(['dummy', [new_pop.fitness[i_ind],0.,0.,0.]])  # Placeholder for move description
+                    self._relax_and_score(new_pop)
+                    old_pop.merge(new_pop)
+                    current_pop = old_pop
+                    
+                    current_pop.check_constraints()
+                    self.populations[i_N_trees] = current_pop
 
             # Selection and diversity maintenance
             for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
@@ -692,46 +734,5 @@ class GA(kgs.BaseClass):
                     plt.title(f'Diversity matrix, Generation {i_gen}, Trees {N_trees}')
                     plt.pause(0.001)
 
-            
-
-            # Offspring generation
-            for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
-                old_pop = self.populations[i_N_trees]
-                parent_size = old_pop.configuration.N_solutions
-                new_pop = old_pop.create_empty(self.population_size-parent_size, N_trees)
-
-                for i_ind in range(new_pop.configuration.N_solutions):
-                    # Pick a random parent
-                    parent_id = generator.integers(0, parent_size)
-                    # Pick a random mate, but preferring champions
-                    # pick a mate, where the worst (last) individual gets weight 1, the next best weight 2, etc. (DISABLED FOR NOW)
-                    weights = 0*np.arange(parent_size, 0, -1, dtype=float)+1  # best has largest weight
-                    weights[parent_id] = 0.0
-                    probs = weights / weights.sum()
-                    mate_id = generator.choice(parent_size, p=probs)
-
-                    new_pop.create_clone(i_ind, old_pop, parent_id) 
-                    move_descriptor = self.move.do_move(new_pop, old_pop, i_ind, mate_id, generator)                  
-                    new_pop.lineages[i_ind].append([move_descriptor, [old_pop.fitness[parent_id],old_pop.fitness[mate_id],diversity_matrix[parent_id, mate_id],0.,0.,0.]])  # Placeholder for move description
-
-
-
-                    # new_pop.create_clone(i_ind, old_pop, parent_id)                    
-                    # new_h = new_pop.configuration.h
-                    # new_xyt = new_pop.configuration.xyt
-                    # if generator.uniform() < self.p_move:
-                    #     tree_to_mutate = generator.integers(0, N_trees)
-                    #     h_size = new_h[i_ind, 0].get()  # Square size
-                    #     h_offset_x = new_h[i_ind, 1].get()  # x offset
-                    #     h_offset_y = new_h[i_ind, 2].get()  # y offset
-                    #     new_xyt[i_ind, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
-                    #     new_xyt[i_ind, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
-                    #     new_xyt[i_ind, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta                
-                    # new_pop.lineages[i_ind].append(['dummy', [new_pop.fitness[i_ind],0.,0.,0.]])  # Placeholder for move description
-                self._relax_and_score(new_pop)
-                old_pop.merge(new_pop)
-                current_pop = old_pop
-                 
-                current_pop.check_constraints()
-                self.populations[i_N_trees] = current_pop
+        
         
