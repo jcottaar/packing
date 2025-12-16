@@ -165,7 +165,8 @@ __device__ double process_tree_pair_piece(
     const double s_ref,
     const int use_separation,
     const int compute_grads,
-    double3* d_ref_local)  // output: accumulated gradient (modified in-place)
+    double3* d_ref_local,  // output: accumulated gradient (modified in-place)
+    const double smoothing_h)
 {
     // Early exit: check if tree centers are too far apart
     double dx = other.x - ref.x;
@@ -242,13 +243,14 @@ __device__ double process_tree_pair_piece(
 
             // Only positive penetration contributes
             if (sep > 0.0) {
-                total += sep * sep;
+                total += smoothed_quadratic(sep, smoothing_h);
 
                 if (compute_grads) {
-                    // Gradient of sep^2: 2 * sep * dsep/dparam
-                    d_ref_local->x += 2.0 * sep * dsep_dx;
-                    d_ref_local->y += 2.0 * sep * dsep_dy;
-                    d_ref_local->z += 2.0 * sep * dsep_dtheta;
+                    // Gradient using chain rule: d(smoothed_quadratic)/dparam = grad_smoothed * dsep/dparam
+                    double grad_sep = smoothed_quadratic_grad(sep, smoothing_h);
+                    d_ref_local->x += grad_sep * dsep_dx;
+                    d_ref_local->y += grad_sep * dsep_dy;
+                    d_ref_local->z += grad_sep * dsep_dtheta;
                 }
             }
         }
@@ -268,7 +270,8 @@ __device__ double overlap_ref_with_list_piece(
     const int compute_grads, // if non-zero, compute gradients
     const int use_crystal, // if non-zero, loop over 3x3 cell for each tree
     const CrystalAxes crystal_axes, // crystal axes (only used if use_crystal is non-zero)
-    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
+    const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
+    const double smoothing_h)
 {
     double sum = 0.0;
 
@@ -349,7 +352,7 @@ __device__ double overlap_ref_with_list_piece(
                         ref_aabb_min_y, ref_aabb_max_y,
                         c_ref, s_ref,
                         use_separation, compute_grads_here,
-                        &d_ref_local);
+                        &d_ref_local, smoothing_h);
 
                     sum += total;
                 }
@@ -368,7 +371,7 @@ __device__ double overlap_ref_with_list_piece(
                 ref_aabb_min_y, ref_aabb_max_y,
                 c_ref, s_ref,
                 use_separation, compute_grads,
-                &d_ref_local);
+                &d_ref_local, smoothing_h);
 
             sum += total;
         }
@@ -577,7 +580,8 @@ __device__ void overlap_list_total(
     const int use_separation, // non-zero -> use separation sum-of-squares path
     const int use_crystal, // if non-zero, loop over 3x3 cell for each tree
     const CrystalAxes crystal_axes, // crystal axes (only used if use_crystal is non-zero)
-    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
+    const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
+    const double smoothing_h)
 {
     // Thread organization: 4 threads per tree
     // tid = tree_idx * 4 + piece_idx
@@ -609,7 +613,7 @@ __device__ void overlap_list_total(
 
         // Each thread computes overlap (or separation) for one piece of the reference tree
         double3* d_ref_output = compute_grads ? (double3*)(&out_grads[tree_idx * 3]) : NULL;
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx, compute_grads, use_crystal, crystal_axes, only_self_interactions);
+        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx, compute_grads, use_crystal, crystal_axes, only_self_interactions, smoothing_h);
 
         // Atomic add for overlap sum
         // If only_self_interactions, don't divide by 2 since we're not double-counting
@@ -648,7 +652,8 @@ __global__ void multi_overlap_list_total(
     const int use_separation,
     const int use_crystal,
     const double* __restrict__ crystal_axes_base, // base pointer to [num_ensembles, 4] (NULL if use_crystal is 0)
-    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
+    const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
+    const double smoothing_h)
 {
     int ensemble_id = blockIdx.x;
 
@@ -700,7 +705,7 @@ __global__ void multi_overlap_list_total(
     __syncthreads();
 
     // Call overlap_list_total - it now reads (n_trees, 3) format directly
-    overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads, use_separation, use_crystal, crystal_axes, only_self_interactions);
+    overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads, use_separation, use_crystal, crystal_axes, only_self_interactions, smoothing_h);
 }
 
 // Multi-ensemble kernel for boundary: one block per ensemble
@@ -1194,7 +1199,7 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: bool, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, crystal_axes: cp.ndarray | None = None, only_self_interactions: bool = False, stream: cp.cuda.Stream | None = None):
+def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: bool, smoothing_h: float, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, crystal_axes: cp.ndarray | None = None, only_self_interactions: bool = False, stream: cp.cuda.Stream | None = None):
     """Compute total overlap sum for multiple ensembles in parallel.
 
     Parameters
@@ -1206,6 +1211,8 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
     use_separation : bool
         If True, compute separation-based cost (sum of sep^2) instead of overlap area.
         This flag is required (no default) and is propagated to the CUDA kernel.
+    smoothing_h : float
+        Smoothing parameter for the smoothed quadratic cost function.
     out_cost : cp.ndarray, shape (n_ensembles,)
         Preallocated array for output costs. Must be provided.
     out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
@@ -1305,6 +1312,9 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
     use_crystal = 1 if crystal_axes is not None else 0
     crystal_axes_ptr = crystal_axes if crystal_axes is not None else np.intp(0)
 
+    # Convert smoothing_h to appropriate dtype
+    smoothing_h_typed = kgs.dtype_np(smoothing_h)
+
     for _ in range(1):
         _multi_overlap_list_total_kernel(
             (blocks,),
@@ -1320,6 +1330,7 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
                 np.int32(use_crystal),
                 crystal_axes_ptr,
                 np.int32(1 if only_self_interactions else 0),
+                smoothing_h_typed,
             ),
             stream=stream,
         )

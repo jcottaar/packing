@@ -12,19 +12,35 @@ import pack_cuda
 import copy
 
 def smoothed_quadratic(s, h):
-    res = copy.deepcopy(s)
-    res = (s-h/2)**2 + h**2/12
-    res[s<h] = s[s<h]**3/(3*h)
-    res[s<0] = 0
-    return res
+    # Handle both scalars and arrays
+    if np.isscalar(s):
+        if s < 0.0:
+            return 0.0
+        if s < h:
+            return (s**3) / (3*h)
+        return (s - h/2)**2 + h**2/12
+    else:
+        res = copy.deepcopy(s)
+        res = (s-h/2)**2 + h**2/12
+        res[s<h] = s[s<h]**3/(3*h)
+        res[s<0] = 0
+        return res
 
 def smoothed_quadratic_grad(s, h):
     """Compute gradient of smoothed_quadratic with respect to s."""
-    grad = copy.deepcopy(s)
-    grad = 2*(s-h/2)
-    grad[s<h] = s[s<h]**2/h
-    grad[s<0] = 0
-    return grad
+    # Handle both scalars and arrays
+    if np.isscalar(s):
+        if s <= 0.0:
+            return 0.0
+        if s < h:
+            return (s**2) / h
+        return 2*(s - h/2)
+    else:
+        grad = copy.deepcopy(s)
+        grad = 2*(s-h/2)
+        grad[s<h] = s[s<h]**2/h
+        grad[s<0] = 0
+        return grad
 
 
 
@@ -455,20 +471,21 @@ class CollisionCostOverlappingArea(CollisionCost):
                                only_self_interactions=False):
         # Use fast CUDA implementation
         if evaluate_gradient:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, 0.0, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
             grad_bound[:] = 0
         else:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, 0.0, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
 
 @dataclass
 class CollisionCostSeparation(CollisionCost):
     # Collision cost based on minimum separation distance between trees
-    # Cost = sum(separation_distance^2) over all pairwise overlaps
+    # Cost = smoothed_quadratic(separation_distance) over all pairwise overlaps
     # Only overlapping pairs contribute (separated pairs have zero cost)
     # Separation distance = minimum distance trees must move to no longer overlap
 
     use_max:bool = field(init=True, default=False)
     TEMP_use_kernel:bool = field(init=True, default=False)
+    smoothing_h: float = field(init=True, default=0.0)
     
     def _compute_separation_distance(
         self,
@@ -776,12 +793,13 @@ class CollisionCostSeparation(CollisionCost):
                         # Sum contributions over all piece-pairs instead of taking the max.
                         if sep <= 0.0:
                             continue
-                        # Add sep^2 contribution and its gradient 2*sep*dsep
-                        total_sep_squared += sep ** 2
+                        # Add smoothed_quadratic(sep) contribution and its gradient
+                        total_sep_squared += smoothed_quadratic(sep, self.smoothing_h)
                         grad = cp.zeros_like(xyt1)
-                        grad[0] = 2.0 * sep * float(dsep_dx)
-                        grad[1] = 2.0 * sep * float(dsep_dy)
-                        grad[2] = 2.0 * sep * float(dsep_dtheta)
+                        grad_sep = smoothed_quadratic_grad(sep, self.smoothing_h)
+                        grad[0] = grad_sep * float(dsep_dx)
+                        grad[1] = grad_sep * float(dsep_dy)
+                        grad[2] = grad_sep * float(dsep_dtheta)
                         total_grad += grad
 
             # If using max behavior, handle the accumulated max for this other-tree.
@@ -789,14 +807,15 @@ class CollisionCostSeparation(CollisionCost):
                 if max_sep <= 0.0:
                     continue
 
-                # Cost contribution: sep^2
-                total_sep_squared += max_sep ** 2
+                # Cost contribution: smoothed_quadratic(sep)
+                total_sep_squared += smoothed_quadratic(max_sep, self.smoothing_h)
 
-                # Gradient of sep^2: 2 * sep * dsep/dparam
+                # Gradient using chain rule: smoothed_quadratic_grad(sep) * dsep/dparam
                 grad = cp.zeros_like(xyt1)
-                grad[0] = 2.0 * max_sep * float(best_dsep_dx)
-                grad[1] = 2.0 * max_sep * float(best_dsep_dy)
-                grad[2] = 2.0 * max_sep * float(best_dsep_dtheta)
+                grad_sep = smoothed_quadratic_grad(max_sep, self.smoothing_h)
+                grad[0] = grad_sep * float(best_dsep_dx)
+                grad[1] = grad_sep * float(best_dsep_dy)
+                grad[2] = grad_sep * float(best_dsep_dtheta)
 
                 total_grad += grad
 
@@ -806,10 +825,10 @@ class CollisionCostSeparation(CollisionCost):
                                only_self_interactions=False):
         # Use fast CUDA implementation
         if evaluate_gradient:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, self.smoothing_h, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
             grad_bound[:] = 0
         else:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, self.smoothing_h, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
         
     
 
