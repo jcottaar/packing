@@ -65,9 +65,11 @@ class OptimizerBFGS(kgs.BaseClass):
         tmp_grad_h = cp.zeros_like(sol.h, dtype=kgs.dtype_cp)
         
         def f_torch(x, is_main_loop):            
+            
             nonlocal tmp_xyt, tmp_h, tmp_cost, tmp_grad, tmp_grad_h, tmp_res, tmp_x
             tmp_x[:x.shape[0]] = cp.from_dlpack(to_dlpack(x))
             nonlocal sol_tmp, counter
+            counter+=1
             N_split = sol_tmp.N_trees*3
             N = x.shape[0]
 
