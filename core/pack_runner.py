@@ -126,6 +126,16 @@ def set_rough_bfgs(ga, name, value):
         ga.rough_relaxers[0].track_cost = False
         ga.rough_relaxers[0].plot_cost = False
 
+def disable_move(ga, name, value):
+    """Disable a specific move by setting its weight to 0 if value is True"""
+    if value:
+        # Extract move name from modifier name (e.g., 'disable_Crossover' -> 'Crossover')
+        move_name = name.replace('disable_', '')
+        for move_item in ga.move.moves:
+            if move_item[1] == move_name:
+                move_item[2] = 0.0  # Set weight to 0
+                break
+
 
 # ============================================================
 # Example runner configurations
@@ -144,6 +154,16 @@ def baseline_runner(fast_mode=False):
     res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.1,1.), scale_fine_iterations)
     res.modifier_dict['rough_steps'] = pm(1, lambda r:r.choice([0,1]), set_number_of_rough_steps)
     res.modifier_dict['fine_steps'] = pm(3, lambda r:r.choice([1,2,3]), set_number_of_fine_steps)
+
+    # Add modifiers to disable each move with 20% probability
+    # Get move names from base_ga
+    for move_item in res.base_ga.move.moves:
+        move_name = move_item[1]  # Extract move name
+        res.modifier_dict[f'disable_{move_name}'] = pm(
+            False,
+            lambda r: r.uniform() < 0.2,  # 20% chance to disable
+            disable_move
+        )
 
     runner = res.base_ga
     runner.fine_relaxers[0] = pack_dynamics.OptimizerBFGS()
