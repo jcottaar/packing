@@ -334,7 +334,6 @@ class JiggleCluster(Move):
     min_N_trees: int = field(init=True, default=2)
     max_N_trees: int = field(init=True, default=5)
     def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
-        return []
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
