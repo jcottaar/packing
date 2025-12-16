@@ -89,6 +89,20 @@ __constant__ int const_n_tree_vertices;
 
 """ + pack_cuda_primitives.PRIMITIVE_SRC + r"""
 
+// Smoothed quadratic function: smoothly interpolates from s^3/(3h) to (s-h/2)^2 + h^2/12
+__device__ inline double smoothed_quadratic(double s, double h) {
+    if (s < 0.0) return 0.0;
+    if (s < h) return (s*s*s) / (3.0*h);
+    return (s - h/2.0)*(s - h/2.0) + h*h/12.0;
+}
+
+// Gradient of smoothed_quadratic with respect to s
+__device__ inline double smoothed_quadratic_grad(double s, double h) {
+    if (s <= 0.0) return 0.0;
+    if (s < h) return (s*s) / h;
+    return 2.0*(s - h/2.0);
+}
+
 __device__ __forceinline__ void compute_tree_poly_and_aabb(
     double3 pose,
     int pi,  // which piece to compute
@@ -751,10 +765,11 @@ __global__ void multi_boundary_list_total(
 }
 
 // Compute boundary distance cost for a single tree
-// Returns the maximum squared distance of any vertex outside the boundary
+// Returns the maximum smoothed quadratic distance of any vertex outside the boundary
 __device__ double boundary_distance_tree(
     const double3 pose,
     const double3 h,      // h.x = boundary size, h.y = x_offset, h.z = y_offset
+    const double smoothing_h,  // smoothing parameter for smoothed_quadratic
     double3* d_pose,      // output: gradient w.r.t. pose (can be NULL)
     double3* d_h)         // output: gradient w.r.t. h (can be NULL)
 {
@@ -788,8 +803,9 @@ __device__ double boundary_distance_tree(
         double abs_vy = fabs(vy);
         double dx = (abs_vx > half) ? (abs_vx - half) : 0.0;
         double dy = (abs_vy > half) ? (abs_vy - half) : 0.0;
-        double dist_sq = dx * dx + dy * dy;
-        
+        double r = sqrt(dx * dx + dy * dy);
+        double dist_sq = smoothed_quadratic(r, smoothing_h);
+
         if (dist_sq > max_dist_sq) {
             max_dist_sq = dist_sq;
             max_idx = v;
@@ -809,13 +825,20 @@ __device__ double boundary_distance_tree(
         double abs_vy_max = fabs(vy_max);
         double dx_max = (abs_vx_max > half) ? (abs_vx_max - half) : 0.0;
         double dy_max = (abs_vy_max > half) ? (abs_vy_max - half) : 0.0;
-        
+
         // Compute grad_vx_max and grad_vy_max (needed for both d_pose and d_h)
-        // Analytical gradients
-        // d(dist_sq)/d(vx) = 2*dx*sign(vx) if dx > 0 else 0
-        // d(dist_sq)/d(vy) = 2*dy*sign(vy) if dy > 0 else 0
-        double grad_vx_max = (dx_max > 0.0) ? 2.0 * dx_max * ((vx_max >= 0.0) ? 1.0 : -1.0) : 0.0;
-        double grad_vy_max = (dy_max > 0.0) ? 2.0 * dy_max * ((vy_max >= 0.0) ? 1.0 : -1.0) : 0.0;
+        // Analytical gradients using chain rule: d(smoothed_quad(r))/d(vx) = grad_r * dr/dvx
+        double r_max = sqrt(dx_max * dx_max + dy_max * dy_max);
+        double grad_vx_max = 0.0;
+        double grad_vy_max = 0.0;
+
+        if (r_max > 0.0) {
+            double grad_r = smoothed_quadratic_grad(r_max, smoothing_h);
+            // dr/dvx = (dx/r) * sign(vx) when dx > 0
+            // dr/dvy = (dy/r) * sign(vy) when dy > 0
+            grad_vx_max = grad_r * (dx_max / r_max) * ((vx_max >= 0.0) ? 1.0 : -1.0);
+            grad_vy_max = grad_r * (dy_max / r_max) * ((vy_max >= 0.0) ? 1.0 : -1.0);
+        }
         
         if (d_pose != NULL) {
             // d(vx)/d(x) = 1, d(vy)/d(y) = 1
@@ -831,13 +854,18 @@ __device__ double boundary_distance_tree(
         }
         
         if (d_h != NULL) {
-            // d(dist_sq)/d(h.x) = d(dist_sq)/d(half) * d(half)/d(h.x)
-            // d(dist_sq)/d(half) = -2*dx - 2*dy (chain rule through abs)
+            // d(smoothed_quad(r))/d(h.x) = d(smoothed_quad(r))/d(r) * d(r)/d(half) * d(half)/d(h.x)
+            // d(r)/d(half) = -(dx_max/r + dy_max/r) when r > 0
             // d(half)/d(h.x) = 0.5
-            d_h->x = -(dx_max + dy_max);
-            
-            // d(dist_sq)/d(offset_x) = -d(dist_sq)/d(vx) = -grad_vx_max
-            // d(dist_sq)/d(offset_y) = -d(dist_sq)/d(vy) = -grad_vy_max
+            if (r_max > 0.0) {
+                double grad_r = smoothed_quadratic_grad(r_max, smoothing_h);
+                d_h->x = -grad_r * (dx_max + dy_max) / r_max * 0.5;
+            } else {
+                d_h->x = 0.0;
+            }
+
+            // d(smoothed_quad(r))/d(offset_x) = -d(smoothed_quad(r))/d(vx) = -grad_vx_max
+            // d(smoothed_quad(r))/d(offset_y) = -d(smoothed_quad(r))/d(vy) = -grad_vy_max
             d_h->y = -grad_vx_max;
             d_h->z = -grad_vy_max;
         }
@@ -852,6 +880,7 @@ __device__ void boundary_distance_list_total(
     const double* __restrict__ xyt_Nx3,  // flattened: [n, 3] in C-contiguous layout
     const int n,
     const double3 h,                     // h.x = boundary size, h.y = x_offset, h.z = y_offset
+    const double smoothing_h,            // smoothing parameter for smoothed_quadratic
     double* __restrict__ out_total,
     double* __restrict__ out_grads,      // if non-NULL, write gradients [n*3]
     double* __restrict__ out_grad_h)     // if non-NULL, write gradient w.r.t. h [3]
@@ -873,7 +902,7 @@ __device__ void boundary_distance_list_total(
         double3 d_h_local;
         
         // Each thread computes boundary distance cost for one tree with gradients
-        local_cost = boundary_distance_tree(pose, h, 
+        local_cost = boundary_distance_tree(pose, h, smoothing_h,
                                              (out_grads != NULL) ? &d_pose : NULL,
                                              (out_grad_h != NULL) ? &d_h_local : NULL);
         
@@ -904,6 +933,7 @@ __device__ void boundary_distance_list_total(
 //   xyt_base: base pointer to 3D array [num_ensembles, n_trees, 3] in C-contiguous layout
 //   n_trees: number of trees per ensemble (same for all)
 //   h_list: array of h values (boundary size+offsets) for each ensemble [num_ensembles, 3]
+//   smoothing_h: global smoothing parameter for smoothed_quadratic
 //   out_totals: array of output totals, one per ensemble
 //   out_grads_base: base pointer to gradient output [num_ensembles, n_trees, 3] (can be NULL)
 //   out_grad_h: array of h gradients [num_ensembles, 3] (can be NULL)
@@ -912,6 +942,7 @@ __global__ void multi_boundary_distance_list_total(
     const double* __restrict__ xyt_base,       // base pointer to [num_ensembles, n_trees, 3]
     const int n_trees,                          // number of trees per ensemble
     const double* __restrict__ h_list,         // [num_ensembles, 3]
+    const double smoothing_h,                  // global smoothing parameter
     double* __restrict__ out_totals,           // [num_ensembles]
     double* __restrict__ out_grads_base,       // base pointer to [num_ensembles, n_trees, 3] (NULL allowed)
     double* __restrict__ out_grad_h,           // [num_ensembles, 3] (NULL allowed)
@@ -958,7 +989,7 @@ __global__ void multi_boundary_distance_list_total(
     __syncthreads();
     
     // Call boundary_distance_list_total - it reads (n_trees, 3) format directly
-    boundary_distance_list_total(xyt_ensemble, n, h, out_total, out_grads, out_grad_h_elem);
+    boundary_distance_list_total(xyt_ensemble, n, h, smoothing_h, out_total, out_grads, out_grad_h_elem);
 }
 
 } // extern "C"
@@ -1400,18 +1431,20 @@ def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray
     )
 
 
-def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, out_grad_h: cp.ndarray | None = None, stream: cp.cuda.Stream | None = None):
+def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, smoothing_h: float, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, out_grad_h: cp.ndarray | None = None, stream: cp.cuda.Stream | None = None):
     """Compute total boundary distance cost for multiple ensembles in parallel.
-    
-    For each tree, computes the maximum squared distance of any vertex outside the boundary.
+
+    For each tree, computes the maximum smoothed quadratic distance of any vertex outside the boundary.
     Sum over all trees in each ensemble.
-    
+
     Parameters
     ----------
     xyt : cp.ndarray, shape (n_ensembles, n_trees, 3)
         Pose arrays. Must be C-contiguous and correct dtype.
     h : cp.ndarray, shape (n_ensembles, 3)
         Boundary parameters for each ensemble: [size, x_offset, y_offset].
+    smoothing_h : float
+        Smoothing parameter for smoothed_quadratic function.
     out_cost : cp.ndarray, shape (n_ensembles,)
         Preallocated array for output costs. Must be provided.
     out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
@@ -1422,7 +1455,7 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: c
         CUDA stream for kernel execution. If None, uses default stream.
     """
     _ensure_initialized()
-    
+
     num_ensembles = xyt.shape[0]
     n_trees = xyt.shape[1]
     dtype = xyt.dtype
@@ -1496,6 +1529,9 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: c
     out_grads_ptr = out_grads if out_grads is not None else np.intp(0)
     out_grad_h_ptr = out_grad_h if out_grad_h is not None else np.intp(0)
     
+    # Convert smoothing_h to appropriate dtype
+    smoothing_h_typed = kgs.dtype_np(smoothing_h)
+
     _multi_boundary_distance_list_total_kernel(
         (blocks,),
         (threads_per_block,),
@@ -1503,6 +1539,7 @@ def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: c
             xyt,
             np.int32(n_trees),
             h,
+            smoothing_h_typed,
             out_cost,
             out_grads_ptr,
             out_grad_h_ptr,

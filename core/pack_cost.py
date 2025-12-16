@@ -1033,9 +1033,9 @@ class BoundaryDistanceCost(Cost):
         assert not sol.periodic
         if self.use_kernel:
             if evaluate_gradient:
-                pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_bound)
+                pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, self.smoothing_h, out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_bound)
             else:
-                pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, out_cost=cost)
+                pack_cuda.boundary_distance_multi_ensemble(sol.xyt, sol.h, self.smoothing_h, out_cost=cost)
         else:
             super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
             
@@ -1081,8 +1081,9 @@ class BoundaryDistanceCost(Cost):
         # Compute boundary distance for each vertex
         dx = cp.maximum(0.0, cp.abs(vx_final) - half)  # (n_trees, n_vertices)
         dy = cp.maximum(0.0, cp.abs(vy_final) - half)  # (n_trees, n_vertices)
-        dist_sq = dx**2 + dy**2  # (n_trees, n_vertices)
-        
+        r = cp.sqrt(dx**2 + dy**2)  # (n_trees, n_vertices)
+        dist_sq = smoothed_quadratic(r, self.smoothing_h)  # (n_trees, n_vertices)
+
         # Max per tree
         max_dist_sq = cp.max(dist_sq, axis=1)  # (n_trees,)
         total_cost = cp.sum(max_dist_sq)
@@ -1102,12 +1103,20 @@ class BoundaryDistanceCost(Cost):
         # Compute dx, dy for max vertex of each tree
         dx_max = cp.maximum(0.0, cp.abs(vx_max) - half)  # (n_trees,)
         dy_max = cp.maximum(0.0, cp.abs(vy_max) - half)  # (n_trees,)
-        
-        # Analytical gradients (vectorized over all trees)
-        # d(dist_sq)/d(vx_final) = 2*dx * sign(vx_final) if dx > 0 else 0
-        # d(dist_sq)/d(vy_final) = 2*dy * sign(vy_final) if dy > 0 else 0
-        grad_vx_max = cp.where(dx_max > 0, 2.0 * dx_max * cp.sign(vx_max), 0.0)  # (n_trees,)
-        grad_vy_max = cp.where(dy_max > 0, 2.0 * dy_max * cp.sign(vy_max), 0.0)  # (n_trees,)
+
+        # Analytical gradients using chain rule with smoothed_quadratic_grad
+        # d(smoothed_quad(r))/d(vx) = smoothed_quadratic_grad(r, h) * dr/dvx
+        # dr/dvx = (dx/r) * sign(vx) when r > 0
+        r_max = cp.sqrt(dx_max**2 + dy_max**2)  # (n_trees,)
+        grad_vx_max = cp.zeros_like(dx_max)  # (n_trees,)
+        grad_vy_max = cp.zeros_like(dy_max)  # (n_trees,)
+
+        # Only compute gradients where r_max > 0
+        mask = r_max > 0.0
+        if cp.any(mask):
+            grad_r = smoothed_quadratic_grad(r_max[mask], self.smoothing_h)
+            grad_vx_max[mask] = grad_r * (dx_max[mask] / r_max[mask]) * cp.sign(vx_max[mask])
+            grad_vy_max[mask] = grad_r * (dy_max[mask] / r_max[mask]) * cp.sign(vy_max[mask])
         
         # d(vx_final)/d(x) = 1, d(vy_final)/d(y) = 1
         grad[:, 0] = grad_vx_max
@@ -1132,11 +1141,14 @@ class BoundaryDistanceCost(Cost):
         grad[:, 2] = grad_theta
         
         # Analytical gradient for h (bound) via backpropagation (vectorized)
-        # For the h gradient, we don't use the previous grad_vx/vy_max which include sign factors.
-        # Instead: d(dist_sq)/d(half) = -2*dx - 2*dy (regardless of sign of vx/vy)
-        # And d(dist_sq)/d(b) = d(dist_sq)/d(half) * d(half)/d(b) = -2*(dx_max + dy_max) * (1/2)
-        
-        grad_h = -(dx_max + dy_max)  # (n_trees,)
+        # d(smoothed_quad(r))/d(h.x) = d(smoothed_quad(r))/d(r) * d(r)/d(half) * d(half)/d(h.x)
+        # d(r)/d(half) = -(dx/r + dy/r) when r > 0
+        # d(half)/d(h.x) = 0.5
+        grad_h = cp.zeros_like(dx_max)  # (n_trees,)
+        if cp.any(mask):
+            grad_r = smoothed_quadratic_grad(r_max[mask], self.smoothing_h)
+            grad_h[mask] = -grad_r * (dx_max[mask] + dy_max[mask]) / r_max[mask] * 0.5
+
         grad_bound_0 = cp.sum(grad_h)
         
         # Gradient w.r.t. h[1] (x-offset) and h[2] (y-offset)
