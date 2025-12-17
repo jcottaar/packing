@@ -95,7 +95,7 @@ def set_genetic_diversity(ga, name, value):
 
 def set_alt_diversity(ga, name, value):
     if value:
-        ga.selection_size = [np.round(x).astype(int) for x in np.arange(1/32,1.001,1/32)*ga.population_size]
+        ga.selection_size = [np.round(x).astype(int)+1 for x in np.arange(0/32,0.999,1/32)*ga.population_size]
         print(ga.selection_size)
 
 def set_no_jiggle(ga, name, value):
@@ -195,8 +195,8 @@ def baseline_runner(fast_mode=False):
     
     res.modifier_dict['scale_population'] = pm(1., lambda r:r.uniform(1.,3.), scale_population_size)
     res.modifier_dict['genetic_diversity'] = pm(True, lambda r:r.choice([True]), set_genetic_diversity)
-    res.modifier_dict['alt_diversity'] = pm(False, lambda r:r.choice([True]), set_alt_diversity)
-    res.modifier_dict['no_jiggle'] = pm(False, lambda r:r.choice([True, False]), set_no_jiggle)
+    res.modifier_dict['alt_diversity'] = pm(False, lambda r:r.choice([False, True]), set_alt_diversity)
+    res.modifier_dict['no_jiggle'] = pm(False, lambda  r:r.choice([True, False]), set_no_jiggle)
     res.modifier_dict['bfgs_for_rough'] = pm(False, lambda r:r.choice([True]), set_rough_bfgs)
     res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.1,0.5), scale_rough_iterations)
     res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.1,0.5), scale_fine_iterations)
