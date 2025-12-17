@@ -250,6 +250,8 @@ def baseline_runner(fast_mode=False):
         runner.population_size = 100
         runner.selection_size = [1,2,5,10]
 
+    print(res.base_ga.rough_relaxers)
+
     return res
 
 
