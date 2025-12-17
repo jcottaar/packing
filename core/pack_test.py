@@ -9,6 +9,7 @@ import pack_cost
 import pack_basics
 import pack_cuda
 import pack_cuda_primitives_test
+import pack_runner
 import matplotlib.pyplot as plt
 import pack_vis_sol
 import copy
@@ -17,11 +18,25 @@ CUDA_float32 = False
 kgs.set_float32(CUDA_float32)
 pack_cuda._ensure_initialized()
 
-def run_all_tests():
+def run_all_tests(regenerate_reference=False):
     kgs.debugging_mode = 2    
+    test_ga(regenerate_reference)
     pack_cuda_primitives_test.run_all_tests()
     test_costs()
     print("All tests passed.")
+
+def test_ga(regenerate_reference):
+    runner = pack_runner.baseline_runner(fast_mode=True)
+    runner.use_missing_value = True
+    runner.base_ga.n_generations = 5
+    runner.base_ga.initializer.jiggler.n_rounds=0
+    runner.base_ga.N_trees_to_do = np.array([10])
+    runner.modifier_dict['no_jiggle'].missing_value = True
+    runner.run()
+    if regenerate_reference:
+        kgs.dill_save(kgs.code_dir + 'ref_ga.pickle', runner.result_ga.populations[-1].fitness)
+    ref = kgs.dill_load(kgs.code_dir + 'ref_ga.pickle')
+    assert np.all(ref==runner.result_ga.populations[-1].fitness), "GA test failed: final fitness does not match reference."
 
 def test_costs():
     print('Testing cost computation and gradients')

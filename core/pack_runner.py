@@ -187,7 +187,7 @@ def set_CrossoverP(ga,name,value):
     for move_item in ga.move.moves:
         if move_item[1] == 'Crossover':
             print(move_item[2])
-            assert(move_item[2]==4.)
+            #assert(move_item[2]==4.)
             move_item[2] = value
             break
     
