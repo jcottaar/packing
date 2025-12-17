@@ -97,7 +97,6 @@ def set_alt_diversity(ga, name, value):
     if value:
         ga.selection_size = [np.round(x).astype(int) for x in np.arange(1/32,1.001,1/32)*ga.population_size]
         print(ga.selection_size)
-        raise Error('test')
 
 def set_no_jiggle(ga, name, value):
     if value:
@@ -142,6 +141,48 @@ def disable_move(ga, name, value):
                 move_item[2] = 0.0  # Set weight to 0
                 break
 
+def set_JiggleClusterSmallMaxN(ga, name, value):
+    """Set max_N_trees for JiggleClusterSmall move"""
+    for move_item in ga.move.moves:
+        if move_item[1] == 'JiggleClusterSmall':
+            move_item[0].max_N_trees = value
+            break
+
+def set_JiggleClusterBigMaxN(ga, name, value):
+    """Set max_N_trees for JiggleClusterBig move"""
+    for move_item in ga.move.moves:
+        if move_item[1] == 'JiggleClusterBig':
+            move_item[0].max_N_trees = value
+            break
+
+def set_TwistMinRadius(ga, name, value):
+    """Set min_radius for Twist move"""
+    for move_item in ga.move.moves:
+        if move_item[1] == 'Twist':
+            move_item[0].min_radius = value
+            break
+
+def set_TwistMaxRadius(ga, name, value):
+    """Set max_radius for Twist move"""
+    for move_item in ga.move.moves:
+        if move_item[1] == 'Twist':
+            move_item[0].max_radius = value
+            break
+
+def set_CrossoverMaxNtrees(ga, name, value):
+    """Set max_N_trees for Crossover move"""
+    for move_item in ga.move.moves:
+        if move_item[1] == 'Crossover':
+            move_item[0].max_N_trees = value
+            break
+
+def set_CrossoverSimpleMate(ga, name, value):
+    """Set simple_mate_location for Crossover move"""
+    for move_item in ga.move.moves:
+        if move_item[1] == 'Crossover':
+            move_item[0].simple_mate_location = value
+            break
+
 
 # ============================================================
 # Example runner configurations
@@ -161,12 +202,12 @@ def baseline_runner(fast_mode=False):
     res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.1,0.5), scale_fine_iterations)
     res.modifier_dict['rough_steps'] = pm(1, lambda r:r.choice([1]), set_number_of_rough_steps)
     res.modifier_dict['fine_steps'] = pm(3, lambda r:r.choice([2,3]), set_number_of_fine_steps)
-    res.modifier_dict['JiggleClusterSmallMaxN'] = pm(5, lamda r:r.integers(3,20), set_JiggleClusterSmallMaxN)
-    res.modifier_dict['JiggleClusterBigMaxN'] = pm(5, lamda r:r.integers(3,20), set_JiggleClusterBigMaxN)
+    res.modifier_dict['JiggleClusterSmallMaxN'] = pm(5, lambda r:r.integers(3,20), set_JiggleClusterSmallMaxN)
+    res.modifier_dict['JiggleClusterBigMaxN'] = pm(5, lambda r:r.integers(3,20), set_JiggleClusterBigMaxN)
     res.modifier_dict['TwistMinRadius'] = pm(0., lambda r:r.uniform(0.,1.), set_TwistMinRadius)
     res.modifier_dict['TwistMaxRadius'] = pm(0., lambda r:r.uniform(1.,3.), set_TwistMaxRadius)
-    res.modifier_dict['CrossoverMaxNtrees'] = pm(20, lambda r:r.integers(10,40), set_TwistMaxRadius)
-    res.modifier_dict['CrossoverSimpleMate'] = pm(False, lambdar:.choice([True, False]), set_CrossoverSimpleMate)
+    res.modifier_dict['CrossoverMaxNtrees'] = pm(20, lambda r:r.integers(10,40), set_CrossoverMaxNtrees)
+    res.modifier_dict['CrossoverSimpleMate'] = pm(False, lambda r:r.choice([True, False]), set_CrossoverSimpleMate)
     
 
     # Add modifiers to disable each move with 20% probability

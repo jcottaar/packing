@@ -457,7 +457,7 @@ class Crossover(Move):
         # Pick mate center at random position with same distance from edge as individual
         # Distance from edge: h_size/2 - |offset|, so |mate_offset| = |offset| but sign is random
         mate_h_size = mate_h_params[0]
-        if simple_mate_location:
+        if self.simple_mate_location:
             mate_offset_x = generator.uniform(-h_size / 2, h_size / 2)
             mate_offset_y = generator.uniform(-h_size / 2, h_size / 2)
         else:
