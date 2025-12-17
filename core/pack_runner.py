@@ -93,6 +93,12 @@ def set_genetic_diversity(ga, name, value):
     if not value:
         ga.selection_size = list(np.arange(len(ga.selection_size))+1)
 
+def set_alt_diversity(ga, name, value):
+    if value:
+        ga.selection_size = [np.round(x).astype(int) for x in np.arange(1/32,1.001,1/32)*ga.population_size]
+        print(ga.selection_size)
+        raise Error('test')
+
 def set_no_jiggle(ga, name, value):
     if value:
         ga.initializer.jiggler.n_rounds = 0
@@ -146,14 +152,22 @@ def baseline_runner(fast_mode=False):
     res = Runner()
     res.label = 'Baseline'
     
-    res.modifier_dict['scale_population'] = pm(1., lambda r:r.uniform(1.,10.), scale_population_size)
-    res.modifier_dict['genetic_diversity'] = pm(True, lambda r:r.choice([True, False]), set_genetic_diversity)
+    res.modifier_dict['scale_population'] = pm(1., lambda r:r.uniform(1.,3.), scale_population_size)
+    res.modifier_dict['genetic_diversity'] = pm(True, lambda r:r.choice([True]), set_genetic_diversity)
+    res.modifier_dict['alt_diversity'] = pm(False, lambda r:r.choice([True]), set_alt_diversity)
     res.modifier_dict['no_jiggle'] = pm(False, lambda r:r.choice([True, False]), set_no_jiggle)
-    res.modifier_dict['bfgs_for_rough'] = pm(False, lambda r:r.choice([True, False]), set_rough_bfgs)
-    res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.1,1.), scale_rough_iterations)
-    res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.1,1.), scale_fine_iterations)
-    res.modifier_dict['rough_steps'] = pm(1, lambda r:r.choice([0,1]), set_number_of_rough_steps)
-    res.modifier_dict['fine_steps'] = pm(3, lambda r:r.choice([1,2,3]), set_number_of_fine_steps)
+    res.modifier_dict['bfgs_for_rough'] = pm(False, lambda r:r.choice([True]), set_rough_bfgs)
+    res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.1,0.5), scale_rough_iterations)
+    res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.1,0.5), scale_fine_iterations)
+    res.modifier_dict['rough_steps'] = pm(1, lambda r:r.choice([1]), set_number_of_rough_steps)
+    res.modifier_dict['fine_steps'] = pm(3, lambda r:r.choice([2,3]), set_number_of_fine_steps)
+    res.modifier_dict['JiggleClusterSmallMaxN'] = pm(5, lamda r:r.integers(3,20), set_JiggleClusterSmallMaxN)
+    res.modifier_dict['JiggleClusterBigMaxN'] = pm(5, lamda r:r.integers(3,20), set_JiggleClusterBigMaxN)
+    res.modifier_dict['TwistMinRadius'] = pm(0., lambda r:r.uniform(0.,1.), set_TwistMinRadius)
+    res.modifier_dict['TwistMaxRadius'] = pm(0., lambda r:r.uniform(1.,3.), set_TwistMaxRadius)
+    res.modifier_dict['CrossoverMaxNtrees'] = pm(20, lambda r:r.integers(10,40), set_TwistMaxRadius)
+    res.modifier_dict['CrossoverSimpleMate'] = pm(False, lambdar:.choice([True, False]), set_CrossoverSimpleMate)
+    
 
     # Add modifiers to disable each move with 20% probability
     # Get move names from base_ga
@@ -178,8 +192,7 @@ def baseline_runner(fast_mode=False):
     if fast_mode:
         runner.initializer.jiggler.duration_compact /= 10
         runner.initializer.jiggler.plot_interval = None
-        runner.initializer.jiggler.n_rounds = 1    
-        runner.rough_relaxers[0].n_iterations//=5        
+        runner.initializer.jiggler.n_rounds = 1            
         runner.n_generations = 5
         runner.population_size = 100
         runner.selection_size = [1,2,5,10]

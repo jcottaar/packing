@@ -435,6 +435,7 @@ class Crossover(Move):
     """
     min_N_trees: int = field(init=True, default=4)
     max_N_trees: int = field(init=True, default=20)
+    simple_mate_location: bool = field(init=True, default=False)
 
     def _do_move(self, population: Population, old_pop: Population, individual_id: int, 
                  mate_id: int, generator: np.random.Generator):
@@ -456,8 +457,12 @@ class Crossover(Move):
         # Pick mate center at random position with same distance from edge as individual
         # Distance from edge: h_size/2 - |offset|, so |mate_offset| = |offset| but sign is random
         mate_h_size = mate_h_params[0]
-        mate_offset_x = abs(offset_x) * (mate_h_size / h_size) * generator.choice([-1, 1])
-        mate_offset_y = abs(offset_y) * (mate_h_size / h_size) * generator.choice([-1, 1])
+        if simple_mate_location:
+            mate_offset_x = generator.uniform(-h_size / 2, h_size / 2)
+            mate_offset_y = generator.uniform(-h_size / 2, h_size / 2)
+        else:
+            mate_offset_x = abs(offset_x) * (mate_h_size / h_size) * generator.choice([-1, 1])
+            mate_offset_y = abs(offset_y) * (mate_h_size / h_size) * generator.choice([-1, 1])
         mate_center_x = mate_offset_x + mate_h_params[1]
         mate_center_y = mate_offset_y + mate_h_params[2]
         
