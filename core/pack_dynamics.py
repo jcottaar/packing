@@ -331,9 +331,9 @@ class Dynamics(kgs.BaseClass):
 
 class DynamicsInitialize(Dynamics):
     n_rounds = 5
-    duration_init = 10.
-    duration_compact = 150.
-    duration_final = 10.
+    duration_init = 10./10000
+    duration_compact = 150./10000
+    duration_final = 10./10000
     dt = 0.04
     friction_min = 0.18
     friction_max = 0.

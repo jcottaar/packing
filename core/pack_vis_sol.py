@@ -37,7 +37,7 @@ def _iter_geoms(geom):
         raise TypeError(f"Expected Polygon or MultiPolygon, got {type(geom)}")
 
 
-def _plot_polygons(polygons, ax, color_indices=None):
+def _plot_polygons(polygons, ax, color_indices=None, alpha=1.0):
     """
     Plot a list of Shapely polygons with distinct unsaturated colors.
     Overlapping regions are highlighted in bright red.
@@ -49,6 +49,9 @@ def _plot_polygons(polygons, ax, color_indices=None):
     color_indices : list of int, optional
         If provided, color_indices[i] determines the color for polygon i.
         Polygons with the same index will have the same color.
+    alpha : float, optional
+        Transparency level for polygons (0.0 = fully transparent, 1.0 = fully opaque)
+        Default: 1.0
     """
     # Flatten any MultiPolygons
     flat_polys = []
@@ -75,6 +78,7 @@ def _plot_polygons(polygons, ax, color_indices=None):
             closed=True,
             facecolor=facecolor,
             edgecolor='none',
+            alpha=alpha,
             zorder=1,
         )
         ax.add_patch(patch)
@@ -115,7 +119,7 @@ def _plot_polygons(polygons, ax, color_indices=None):
             ax.add_patch(red_patch)
 
 
-def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1):
+def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
     """
     Visualize a solution from a SolutionCollection.
 
@@ -129,6 +133,9 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1):
         Existing axes to plot on (if None, creates new figure)
     margin_factor : float
         Fraction of the plot range to add as margin outside the boundary (default: 0.1)
+    alpha : float, optional
+        Transparency level for tree polygons (0.0 = fully transparent, 1.0 = fully opaque)
+        Default: 1.0
 
     Returns
     -------
@@ -160,7 +167,7 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1):
         ax.add_patch(patch)
 
         # Plot the trees
-        _plot_polygons(trees, ax=ax)
+        _plot_polygons(trees, ax=ax, alpha=alpha)
 
         # Set plot limits based on both square AND trees to ensure all are visible
         square_bounds = square.bounds  # (minx, miny, maxx, maxy)
@@ -213,7 +220,7 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1):
                 cell_idx += 1
 
         # Plot all tiled trees with color indices for each unit cell
-        _plot_polygons(all_trees, ax=ax, color_indices=color_indices)
+        _plot_polygons(all_trees, ax=ax, color_indices=color_indices, alpha=alpha)
 
         # Draw the unit cell outline (centered at origin)
         # Unit cell vertices: origin, a, a+b, b
@@ -247,7 +254,7 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1):
 
     else:
         # Generic SolutionCollection: just plot trees
-        _plot_polygons(trees, ax=ax)
+        _plot_polygons(trees, ax=ax, alpha=alpha)
 
         # Compute bounds from trees
         all_bounds = [tree.bounds for tree in trees]

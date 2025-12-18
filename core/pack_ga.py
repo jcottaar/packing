@@ -11,6 +11,7 @@ import shapely
 import pack_cost
 import pack_vis_sol
 import pack_dynamics
+import pack_io
 import copy
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
@@ -572,6 +573,8 @@ class GA(kgs.BaseClass):
     # Outputs
     populations: list = field(init=True, default_factory=list)
     best_cost_per_generation = None
+    best_individual_legalized = None
+    scores = None
 
     def __post_init__(self):
         self.fitness_cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-2), 
@@ -784,6 +787,18 @@ class GA(kgs.BaseClass):
                     plt.colorbar(label='Diversity distance')
                     plt.title(f'Diversity matrix, Generation {i_gen}, Trees {N_trees}')
                     plt.pause(0.001)
+    
+        # Final best individual legalization
+        self.best_individual_legalized = []
+        self.scores = []
+        for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
+            pop = copy.deepcopy(self.populations[i_N_trees])
+            best_id = np.argmin(pop.fitness)       
+            pop.select_ids([best_id])
+            sol = pop.configuration
+            pack_io.legalize(sol)
+            self.best_individual_legalized.append(sol)
+            self.scores.append((sol.h[0,0]**2/N_trees).get())
 
         
         

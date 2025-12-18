@@ -65,13 +65,14 @@ Precision control - note set to float32 at the end of the module
 '''
 USE_FLOAT32, dtype_cp, dtype_np, just_over_one = None, None, None, None
 def set_float32(use_float32:bool):
-    global USE_FLOAT32, dtype_cp, dtype_np, just_over_one
+    global USE_FLOAT32, dtype_cp, dtype_np, just_over_one, TREE_EXPANSION
     if use_float32:
         USE_FLOAT32, dtype_cp, dtype_np = True, cp.float32, np.float32
         just_over_one = 1.000001
     else:
         USE_FLOAT32, dtype_cp, dtype_np = False, cp.float64, np.float64
         just_over_one = 1.00000000000001
+    TREE_EXPANSION = 10*(just_over_one-1)
 
     # Initialize tree globals after dtype is set (defined later in module)
     # Use late binding to avoid forward reference issues
@@ -210,20 +211,21 @@ from shapely.prepared import prep
 from typeguard import typechecked
 
 scale_factor = 1.
+TREE_EXPANSION = 0.0  # Outward expansion distance for trees
+
 def create_center_tree():
-    """Initializes the Christmas tree"""    
-    shift=0.
-    
-    trunk_w = 0.15
-    trunk_h = 0.2
-    base_w = 0.7
-    mid_w = 0.4
-    top_w = 0.25
-    tip_y = 0.8 + shift
-    tier_1_y = 0.5 + shift
-    tier_2_y = 0.25 + shift
-    base_y = 0.0 + shift
-    trunk_bottom_y = -trunk_h + shift
+    """Initializes the Christmas tree"""
+
+    trunk_w = 0.15 + 2*TREE_EXPANSION
+    trunk_h = 0.2 + TREE_EXPANSION
+    base_w = 0.7 + 4*TREE_EXPANSION
+    mid_w = 0.4 + 6*TREE_EXPANSION
+    top_w = 0.25 + 4*TREE_EXPANSION
+    tip_y = 0.8 + TREE_EXPANSION
+    tier_1_y = 0.5 - TREE_EXPANSION
+    tier_2_y = 0.25 - TREE_EXPANSION
+    base_y = 0.0 - TREE_EXPANSION
+    trunk_bottom_y = -trunk_h
     
     sf = scale_factor
     initial_polygon = Polygon(

@@ -17,6 +17,37 @@ from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_metric
 
+def legalize(sol):
+    solx = copy.deepcopy(sol)
+    solx.use_fixed_h = False
+    solx.snap()
+    import pack_ga
+    ga = pack_ga.GA()
+    cost = copy.deepcopy(ga.fitness_cost)
+    #cost.costs[0].scaling*=0.1
+    cost_overlap = copy.deepcopy(cost)
+    cost_overlap.costs.pop(0)
+    optimizer = pack_dynamics.OptimizerBFGS()
+    optimizer.cost = copy.deepcopy(cost)
+    optimizer.n_iterations = 20000
+    optimizer.max_step = 1e-4
+    optimizer.history_size = 10
+    optimizer.track_cost = False
+    optimizer.plot_cost = False
+    optimizer.use_line_search = False
+    print("Before optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
+    for _ in range(20):
+        optimizer.cost.costs[0].scaling*=0.5
+        optimizer.max_step*=np.sqrt(0.5)    
+        solx = optimizer.run_simulation(solx)
+        optimizer.n_iterations = 200
+        print("After optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
+        if cost_overlap.compute_cost_allocate(solx)[0].get().item()<1e-10:
+                break   
+    #assert cost_overlap.compute_cost_allocate(solx)[0].get().item()<1e-8
+    return solx
+
+
 def solution_list_to_dataframe(sol_list, compact=True):
     res_df_list = []
     score = 0.0
@@ -56,11 +87,12 @@ def solution_list_to_dataframe(sol_list, compact=True):
                 try:
                     pack_metric.score(submission_copy, submission_copy, '', allow_error=False)
                     return False
-                except:
+                except Exception as err:
+                    #rint(err)
                     return True
 
             import boolean_line_search
-            factor = boolean_line_search.boolean_line_search(f, 0.999, 1.001)
+            factor = boolean_line_search.boolean_line_search(f, 0.9, 1.)
             #print(sol.N_trees, factor)
             submission['x'] *= factor
             submission['y'] *= factor

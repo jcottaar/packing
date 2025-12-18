@@ -5,10 +5,11 @@ from dataclasses import dataclass, field
 import pack_ga
 import pack_cost
 import pack_dynamics
+import kaggle_support as kgs
 
 
 @dataclass
-class Runner:
+class Runner(kgs.BaseClass):
     """Runner for hyperparameter analysis of pack_ga.GA()"""
     # Inputs
     label: str = field(init=False, default='')
@@ -196,7 +197,12 @@ def disable_init(ga,name,value):
         ga.initializer.jiggler.duration_init /=10000
         ga.initializer.jiggler.duration_compact /=10000
         ga.initializer.jiggler.duration_final/=10000
-    
+
+
+def set_fixed_h(ga,name,value):
+    import cupy as cp    
+    ga.initializer.base_solution.fixed_h = cp.array([value,0.,0.], dtype=kgs.dtype_cp)
+
 
 
 # ============================================================
@@ -226,6 +232,8 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['CrossoverP'] = pm(0.4, lambda r:3., set_CrossoverP)
     #res.modifier_dict['disable_init'] = pm(False, lambda r:r.choice([False,True]), disable_init)
 
+    res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.6,3.9), set_fixed_h)
+
     # # Add modifiers to disable each move with 20% probability
     # # Get move names from base_ga
     # for move_item in res.base_ga.move.moves:
@@ -239,6 +247,10 @@ def baseline_runner(fast_mode=False):
     # del res.modifier_dict['disable_JiggleTreeSmall']
 
     runner = res.base_ga
+
+    runner.initializer.base_solution.use_fixed_h = True
+    import cupy as cp
+    runner.initializer.base_solution.fixed_h = cp.array([3.7,0.,0.], dtype=kgs.dtype_cp)
     # runner.fine_relaxers[0] = pack_dynamics.OptimizerBFGS()
     # runner.fine_relaxers[0].cost = pack_ga.GA().fine_relaxers[0].cost
     # runner.fine_relaxers[0].track_cost = False
