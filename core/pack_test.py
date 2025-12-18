@@ -27,12 +27,9 @@ def run_all_tests(regenerate_reference=False):
 
 def test_ga(regenerate_reference):
     runner = pack_runner.baseline_runner(fast_mode=True)
-    runner.use_missing_value = True
+    runner.use_missing_value = False
     runner.base_ga.n_generations = 5
-    runner.base_ga.initializer.jiggler.n_rounds=0
     runner.base_ga.N_trees_to_do = np.array([10])
-    runner.modifier_dict['no_jiggle'].missing_value = True
-    runner.modifier_dict['bfgs_for_rough'].missing_value = True
     runner.run()
     if regenerate_reference:
         kgs.dill_save(kgs.code_dir + 'ref_ga.pickle', runner.result_ga.populations[-1].fitness)
