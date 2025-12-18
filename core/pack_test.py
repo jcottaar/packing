@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import pack_vis_sol
 import copy
 
-CUDA_float32 = False
+CUDA_float32 = True
 kgs.set_float32(CUDA_float32)
 pack_cuda._ensure_initialized()
 
@@ -26,9 +26,9 @@ def run_all_tests(regenerate_reference=False):
     print("All tests passed.")
 
 def test_ga(regenerate_reference):
-    runner = pack_runner.baseline_runner(fast_mode=True)
+    runner = pack_runner.baseline_runner(fast_mode=False)
     runner.use_missing_value = False
-    runner.base_ga.n_generations = 5
+    runner.base_ga.n_generations = 2
     runner.base_ga.N_trees_to_do = np.array([10])
     runner.run()
     if regenerate_reference:
