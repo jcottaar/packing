@@ -72,7 +72,7 @@ def set_float32(use_float32:bool):
     else:
         USE_FLOAT32, dtype_cp, dtype_np = False, cp.float64, np.float64
         just_over_one = 1.00000000000001
-    TREE_EXPANSION = 10*(just_over_one-1)
+    TREE_EXPANSION = 10*(1.000001-1)
 
     # Initialize tree globals after dtype is set (defined later in module)
     # Use late binding to avoid forward reference issues
