@@ -798,7 +798,7 @@ class GA(kgs.BaseClass):
                 best_id = np.argmin(pop.fitness)       
                 pop.select_ids([best_id])
                 sol = pop.configuration
-                pack_io.legalize(sol)
+                sol = pack_io.legalize(sol)
                 self.best_individual_legalized.append(sol)
                 self.scores.append((sol.h[0,0]**2/N_trees).get())
 
