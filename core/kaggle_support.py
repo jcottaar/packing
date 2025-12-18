@@ -530,7 +530,10 @@ class SolutionCollectionSquare(SolutionCollection):
         # Update h: [size, x_offset, y_offset]
         self.xyt[:,:,0] -= x_center[:, cp.newaxis]
         self.xyt[:,:,1] -= y_center[:, cp.newaxis]
-        self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
+        if self.h is None:
+            self.h = cp.stack([size, 0*size, 0*size], axis=1)  # (n_solutions, 3)
+        else:
+            self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
 
 @dataclass
 class SolutionCollectionLattice(SolutionCollection):

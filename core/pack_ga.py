@@ -558,6 +558,7 @@ class GA(kgs.BaseClass):
     plot_fitness_predictors: bool = field(init=True, default=False)
     plot_diversity_matrix: bool = field(init=True, default=False)
     plot_champions: bool = field(init=True, default=False)
+    do_legalize: bool = field(init=True, default=True)
 
     # Hyperparameters
     population_size:int = field(init=True, default=4000)
@@ -788,17 +789,18 @@ class GA(kgs.BaseClass):
                     plt.title(f'Diversity matrix, Generation {i_gen}, Trees {N_trees}')
                     plt.pause(0.001)
     
-        # Final best individual legalization
-        self.best_individual_legalized = []
-        self.scores = []
-        for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
-            pop = copy.deepcopy(self.populations[i_N_trees])
-            best_id = np.argmin(pop.fitness)       
-            pop.select_ids([best_id])
-            sol = pop.configuration
-            pack_io.legalize(sol)
-            self.best_individual_legalized.append(sol)
-            self.scores.append((sol.h[0,0]**2/N_trees).get())
+        if self.do_legalize:
+            # Final best individual legalization
+            self.best_individual_legalized = []
+            self.scores = []
+            for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
+                pop = copy.deepcopy(self.populations[i_N_trees])
+                best_id = np.argmin(pop.fitness)       
+                pop.select_ids([best_id])
+                sol = pop.configuration
+                pack_io.legalize(sol)
+                self.best_individual_legalized.append(sol)
+                self.scores.append((sol.h[0,0]**2/N_trees).get())
 
         
         
