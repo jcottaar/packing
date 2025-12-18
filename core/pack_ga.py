@@ -220,17 +220,20 @@ class InitializerRandomJiggled(Initializer):
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
         xyt = cp.array(xyt, dtype=kgs.dtype_np)    
         sol = copy.deepcopy(self.base_solution)
-        sol.xyt = xyt    
-        if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
-            sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
-        elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
-            sol.h = cp.array([[size_setup_scaled,size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)         
-        elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeFixed):
-            sol.h = cp.array([[size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)  
-            sol.aspect_ratios = cp.array([sol.aspect_ratios[0]]*N_individuals, dtype=kgs.dtype_cp)       
+        sol.xyt = xyt   
+        if not sol.use_fixed_h: 
+            if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
+                sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
+            elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
+                sol.h = cp.array([[size_setup_scaled,size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)         
+            elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeFixed):
+                sol.h = cp.array([[size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)  
+                sol.aspect_ratios = cp.array([sol.aspect_ratios[0]]*N_individuals, dtype=kgs.dtype_cp)       
+            else:
+                assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
+                sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)     
         else:
-            assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
-            sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)               
+            sol.h = cp.tile(sol.fixed_h[cp.newaxis, :], (N_individuals, 1))          
         # NN=10
         # global ax
         # _,ax =  plt.subplots(NN,3,figsize=(24,8*NN))
@@ -601,6 +604,8 @@ class GA(kgs.BaseClass):
         self.move.moves.append( [Translate(), 'Translate', 1.0] )
         self.move.moves.append( [Twist(), 'Twist', 1.0] )
         self.move.moves.append( [Crossover(), 'Crossover', 3.0] )
+
+        super().__post_init__()
         # relaxer = pack_dynamics.Optimizer()
         # relaxer.cost = pack_cost.CollisionCostSeparation(scaling=1.)
         # relaxer.n_iterations *= 2

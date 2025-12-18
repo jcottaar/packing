@@ -342,6 +342,8 @@ class TreeList(BaseClass):
 class SolutionCollection(BaseClass):
     xyt: cp.ndarray = field(default=None)  # (N,3) array of tree positions and angles
     h: cp.ndarray = field(default=None)      # (N,_N_h_DOF) array
+    use_fixed_h: bool = field(default=False)
+    fixed_h: cp.ndarray = field(default=None)
     periodic: bool = field(default=False)  # whether to use periodic boundaries
 
     _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
@@ -349,6 +351,10 @@ class SolutionCollection(BaseClass):
     def _check_constraints(self):
         if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
             raise ValueError("Solution: xyt must be an array with shape (N_solutions, N_trees, 3)")
+        if self.use_fixed_h:
+            print('check')
+            assert(self.fixed_h.shape == (self._N_h_DOF,))
+            assert(cp.all(self.h == self.fixed_h))
         assert self.h.shape == (self.xyt.shape[0],self._N_h_DOF)
 
     # add N_solutions and N_trees properties
@@ -454,6 +460,10 @@ class SolutionCollectionSquare(SolutionCollection):
         Vectorized implementation using tree_vertices32.
         Assumes xyt is kgs.dtype_cp.
         """
+
+        if self.use_fixed_h:
+            return
+
         # xyt shape: (n_solutions, n_trees, 3)
         # tree_vertices32 shape: (n_vertices, 2)
         

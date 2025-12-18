@@ -190,6 +190,12 @@ def set_CrossoverP(ga,name,value):
             #assert(move_item[2]==4.)
             move_item[2] = value
             break
+
+def disable_init(ga,name,value):
+    if value:
+        ga.initializer.jiggler.duration_init /=10000
+        ga.initializer.jiggler.duration_compact /=10000
+        ga.initializer.jiggler.duration_final/=10000
     
 
 
@@ -218,7 +224,7 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['CrossoverMaxNtrees'] = pm(20, lambda r:20, set_CrossoverMaxNtrees)
     #res.modifier_dict['CrossoverSimpleMate'] = pm(False, lambda r:False, set_CrossoverSimpleMate)
     #res.modifier_dict['CrossoverP'] = pm(0.4, lambda r:3., set_CrossoverP)
-    
+    #res.modifier_dict['disable_init'] = pm(False, lambda r:r.choice([False,True]), disable_init)
 
     # # Add modifiers to disable each move with 20% probability
     # # Get move names from base_ga

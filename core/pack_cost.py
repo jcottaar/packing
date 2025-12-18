@@ -24,6 +24,8 @@ class Cost(kgs.BaseClass):
         assert cost.shape == (sol.N_solutions,)
         assert grad_xyt.shape == sol.xyt.shape
         assert grad_bound.shape == sol.h.shape 
+        if sol.use_fixed_h:
+            grad_bound[:] = 0
         return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
     
     def _compute_cost_ref(self, sol:kgs.SolutionCollection):        
@@ -51,7 +53,10 @@ class Cost(kgs.BaseClass):
         cost *= self.scaling
         if evaluate_gradient:
             grad_xyt *= self.scaling
-            grad_bound *= self.scaling
+            if sol.use_fixed_h:
+                grad_bound[:] = 0
+            else:
+                grad_bound *= self.scaling
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # Subclass can implement faster version with preallocated gradients
