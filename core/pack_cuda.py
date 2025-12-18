@@ -1143,7 +1143,7 @@ def _ensure_initialized() -> None:
 
     # Copy tree vertices to constant memory for boundary distance computation
     # Get tree vertices from kgs.tree_vertices (should be CuPy array on GPU)
-    tree_verts = kgs.tree_vertices64.get()  # Convert to NumPy for copying to constant memory
+    tree_verts = kgs.tree_vertices.get()  # Convert to NumPy for copying to constant memory
     tree_verts_flat = tree_verts.ravel()  # Flatten (n_vertices, 2) to 1D array
     n_tree_verts = tree_verts.shape[0]
     

@@ -61,7 +61,7 @@ os.makedirs(temp_dir, exist_ok=True)
 
 
 '''
-Precision control
+Precision control - note set to float32 at the end of the module
 '''
 USE_FLOAT32, dtype_cp, dtype_np, just_over_one = None, None, None, None
 def set_float32(use_float32:bool):
@@ -71,8 +71,11 @@ def set_float32(use_float32:bool):
         just_over_one = 1.000001
     else:
         USE_FLOAT32, dtype_cp, dtype_np = False, cp.float64, np.float64
-        just_over_one = 1.00000000000001 
-set_float32(True)
+        just_over_one = 1.00000000000001
+
+    # Initialize tree globals after dtype is set (defined later in module)
+    # Use late binding to avoid forward reference issues
+    initialize_tree_globals()
 
 '''
 Helper classes and functions
@@ -272,11 +275,22 @@ def create_center_tree():
         if dist > max_radius:
             max_radius = dist
     return initial_polygon, convex_breakdown, max_radius, (cx, cy)
-center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset = create_center_tree()
-center_tree_prepped = prep(center_tree)
-tree_area = center_tree.area
-tree_vertices64 = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float64)
-tree_vertices32 = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=cp.float32)
+
+# Global tree properties - initialized by calling initialize_tree_globals()
+center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset = None, None, None, None
+center_tree_prepped = None
+tree_area = None
+tree_vertices = None
+
+def initialize_tree_globals():
+    """Initialize global tree properties. Must be called explicitly before using trees."""
+    global center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset
+    global center_tree_prepped, tree_area, tree_vertices
+
+    center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset = create_center_tree()
+    center_tree_prepped = prep(center_tree)
+    tree_area = center_tree.area
+    tree_vertices = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=dtype_cp)  # (n_vertices, 2)
 
 
 @typechecked
@@ -352,7 +366,6 @@ class SolutionCollection(BaseClass):
         if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
             raise ValueError("Solution: xyt must be an array with shape (N_solutions, N_trees, 3)")
         if self.use_fixed_h:
-            print('check')
             assert(self.fixed_h.shape == (self._N_h_DOF,))
             assert(cp.all(self.h == self.fixed_h))
         assert self.h.shape == (self.xyt.shape[0],self._N_h_DOF)
@@ -419,8 +432,8 @@ class SolutionCollection(BaseClass):
 
     def create_empty(self, N_solutions: int, N_trees: int):
         xyt = cp.zeros((N_solutions, N_trees, 3), dtype=dtype_cp)
-        h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)
-        return type(self)(xyt=xyt, h=h)
+        h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
+        return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, fixed_h=self.fixed_h, periodic=self.periodic)
     # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
     
 
@@ -457,7 +470,7 @@ class SolutionCollectionSquare(SolutionCollection):
 
     def snap(self):
         """Set h such that for each solution it's the smallest possible square containing all trees.
-        Vectorized implementation using tree_vertices32.
+        Vectorized implementation using tree_vertices.
         Assumes xyt is kgs.dtype_cp.
         """
 
@@ -465,11 +478,11 @@ class SolutionCollectionSquare(SolutionCollection):
             return
 
         # xyt shape: (n_solutions, n_trees, 3)
-        # tree_vertices32 shape: (n_vertices, 2)
+        # tree_vertices shape: (n_vertices, 2)
         
         n_solutions = self.xyt.shape[0]
         n_trees = self.xyt.shape[1]
-        n_vertices = tree_vertices32.shape[0]
+        n_vertices = tree_vertices.shape[0]
         
         # Extract pose components
         x = self.xyt[:, :, 0:1]  # (n_solutions, n_trees, 1)
@@ -481,8 +494,8 @@ class SolutionCollectionSquare(SolutionCollection):
         sin_t = cp.sin(theta)  # (n_solutions, n_trees, 1)
         
         # Get local vertices (n_vertices, 2)
-        vx_local = tree_vertices32[:, 0]  # (n_vertices,)
-        vy_local = tree_vertices32[:, 1]  # (n_vertices,)
+        vx_local = tree_vertices[:, 0]  # (n_vertices,)
+        vy_local = tree_vertices[:, 1]  # (n_vertices,)
         
         # Apply rotation and translation for all trees
         # Broadcast: (n_solutions, n_trees, 1) * (n_vertices,) -> (n_solutions, n_trees, n_vertices)
@@ -783,3 +796,5 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
         res = super().create_empty(N_solutions, N_trees)
         res.aspect_ratios = cp.array([self.aspect_ratios[0]]*N_solutions, dtype=dtype_cp)
         return res
+
+set_float32(True)

@@ -48,7 +48,7 @@ class OptimizerBFGS(kgs.BaseClass):
         sol_tmp = copy.deepcopy(sol)
 
         if self.track_cost:
-            n_steps = self.max_iter
+            n_steps = self.n_iterations
             cost_history = np.zeros((n_steps, sol.N_solutions), dtype=kgs.dtype_np)
 
         counter = 0
@@ -68,6 +68,7 @@ class OptimizerBFGS(kgs.BaseClass):
             nonlocal tmp_xyt, tmp_h, tmp_cost, tmp_grad, tmp_grad_h, tmp_res, tmp_x
             tmp_x[:x.shape[0]] = cp.from_dlpack(to_dlpack(x))
             nonlocal sol_tmp, counter
+            counter+=1
             N_split = sol_tmp.N_trees*3
             N = x.shape[0]
 

@@ -60,7 +60,7 @@ def solution_list_to_dataframe(sol_list, compact=True):
                     return True
 
             import boolean_line_search
-            factor = boolean_line_search.boolean_line_search(f, 0.9, 1.1)
+            factor = boolean_line_search.boolean_line_search(f, 0.999, 1.001)
             #print(sol.N_trees, factor)
             submission['x'] *= factor
             submission['y'] *= factor

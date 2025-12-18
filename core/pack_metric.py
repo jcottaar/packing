@@ -17,7 +17,7 @@ from shapely.strtree import STRtree
 
 # Decimal precision and scaling factor
 getcontext().prec = 25
-scale_factor = Decimal('1e18')
+base_scale_factor = Decimal('1e18')
 
 
 class ParticipantVisibleError(Exception):
@@ -27,7 +27,7 @@ class ParticipantVisibleError(Exception):
 class ChristmasTree:
     """Represents a single, rotatable Christmas tree of a fixed size."""
 
-    def __init__(self, center_x='0', center_y='0', angle='0'):
+    def __init__(self, center_x='0', center_y='0', angle='0', scale_factor=base_scale_factor):
         """Initializes the Christmas tree with a specific position and rotation."""
         self.center_x = Decimal(center_x)
         self.center_y = Decimal(center_y)
@@ -79,7 +79,8 @@ class ChristmasTree:
 
 
 
-def score(solution: pd.DataFrame, submission: pd.DataFrame, row_id_column_name: str, allow_error=False) -> float:
+def score(solution: pd.DataFrame, submission: pd.DataFrame, row_id_column_name: str, allow_error=False,
+          scale_factor=base_scale_factor) -> float:
     """
     For each n-tree configuration, the metric calculates the bounding square
     volume divided by n, summed across all configurations.
@@ -124,7 +125,7 @@ def score(solution: pd.DataFrame, submission: pd.DataFrame, row_id_column_name: 
         # Create tree objects from the submission values
         placed_trees = []
         for _, row in df_group.iterrows():
-            placed_trees.append(ChristmasTree(row['x'], row['y'], row['deg']))
+            placed_trees.append(ChristmasTree(row['x'], row['y'], row['deg'], scale_factor))
 
         # Check for collisions using neighborhood search
         all_polygons = [p.polygon for p in placed_trees]

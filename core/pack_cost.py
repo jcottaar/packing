@@ -875,12 +875,19 @@ class BoundaryCost(Cost):
 @dataclass 
 class AreaCost(Cost):
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
-        cost, grad_bound = sol.compute_cost_single_ref()
-        return cost, cp.zeros_like(sol.xyt[0]), grad_bound
+        if sol.use_fixed_h:
+            return cp.array(0.0), cp.zeros_like(sol.xyt[0]), cp.zeros_like(sol.h[0])
+        else:
+            cost, grad_bound = sol.compute_cost_single_ref()
+            return cost, cp.zeros_like(sol.xyt[0]), grad_bound
     
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool):
+    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool):        
         grad_xyt[:] = 0
-        sol.compute_cost(sol, cost, grad_bound)        
+        if sol.use_fixed_h:
+            cost[:] = 0
+            grad_bound[:] = 0
+        else:
+            sol.compute_cost(sol, cost, grad_bound)        
 
 @dataclass
 class BoundaryDistanceCost(Cost):
@@ -1053,8 +1060,8 @@ class BoundaryDistanceCost(Cost):
         sin_t = cp.sin(theta)  # (n_trees, 1)
         
         # kgs.tree_vertices is on GPU as CuPy array (n_vertices, 2)
-        vx = kgs.tree_vertices64[:, 0]  # (n_vertices,)
-        vy = kgs.tree_vertices64[:, 1]  # (n_vertices,)
+        vx = kgs.tree_vertices[:, 0]  # (n_vertices,)
+        vy = kgs.tree_vertices[:, 1]  # (n_vertices,)
         
         # Apply rotation and translation: R @ v + t for each tree
         # Rotated vertices: (n_trees, n_vertices) via broadcasting
