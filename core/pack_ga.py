@@ -332,7 +332,7 @@ class JiggleCluster(Move):
     max_xy_move: float = field(init=True, default=0.1)
     max_theta_move: float = field(init=True, default=np.pi)
     min_N_trees: int = field(init=True, default=2)
-    max_N_trees: int = field(init=True, default=5)
+    max_N_trees: int = field(init=True, default=20)
     def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
@@ -383,7 +383,7 @@ class Translate(Move):
 @dataclass
 class Twist(Move):
     # Twist trees around a center. Angle of twist decreases linearly with distance from center
-    min_radius: float = field(init=True, default=0.)
+    min_radius: float = field(init=True, default=0.5)
     max_radius: float = field(init=True, default=2.)
     def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
         new_h = population.configuration.h
@@ -549,8 +549,8 @@ class GA(kgs.BaseClass):
     plot_champions: bool = field(init=True, default=False)
 
     # Hyperparameters
-    population_size:int = field(init=True, default=1000)
-    selection_size:list = field(init=True, default_factory=lambda: [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500])
+    population_size:int = field(init=True, default=4000)
+    selection_size:list = field(init=True, default_factory=lambda: [int(4.*x) for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
     n_generations:int = field(init=True, default=200)    
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
@@ -567,18 +567,28 @@ class GA(kgs.BaseClass):
         self.fitness_cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-2), 
                                         pack_cost.BoundaryDistanceCost(scaling=1.), 
                                         pack_cost.CollisionCostSeparation(scaling=1.)])
+        
+        self.initializer.jiggler.n_rounds=0
+
         self.rough_relaxers = []
-        relaxer = pack_dynamics.Optimizer()
+        relaxer = pack_dynamics.OptimizerBFGS()
         relaxer.cost = copy.deepcopy(self.fitness_cost)
         relaxer.cost.costs[2] = pack_cost.CollisionCostOverlappingArea(scaling=1.)
-        relaxer.n_iterations *= 2
+        relaxer.n_iterations = 120
         self.rough_relaxers.append(relaxer)
 
         self.fine_relaxers = []
-        relaxer = pack_dynamics.Optimizer()
+        relaxer = pack_dynamics.OptimizerBFGS()
         relaxer.cost = copy.deepcopy(self.fitness_cost)
         relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
-        relaxer.n_iterations *= 2
+        relaxer.n_iterations = 30
+        relaxer.max_step = 1e-2
+        self.fine_relaxers.append(relaxer)
+        relaxer = pack_dynamics.OptimizerBFGS()
+        relaxer.cost = copy.deepcopy(self.fitness_cost)
+        relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        relaxer.n_iterations = 30
+        relaxer.max_step = 1e-3
         self.fine_relaxers.append(relaxer)
 
         self.move = MoveSelector()
@@ -590,7 +600,7 @@ class GA(kgs.BaseClass):
         self.move.moves.append( [JiggleCluster(max_xy_move=0.1, max_theta_move=np.pi), 'JiggleClusterBig', 1.0] )
         self.move.moves.append( [Translate(), 'Translate', 1.0] )
         self.move.moves.append( [Twist(), 'Twist', 1.0] )
-        self.move.moves.append( [Crossover(), 'Crossover', 4.0] )
+        self.move.moves.append( [Crossover(), 'Crossover', 3.0] )
         # relaxer = pack_dynamics.Optimizer()
         # relaxer.cost = pack_cost.CollisionCostSeparation(scaling=1.)
         # relaxer.n_iterations *= 2
