@@ -550,7 +550,7 @@ class GA(kgs.BaseClass):
 
     # Hyperparameters
     population_size:int = field(init=True, default=4000)
-    selection_size:list = field(init=True, default_factory=lambda: [int(4.*x) for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
+    selection_size:list = field(init=True, default_factory=lambda: [int(4.*(x-1))+1 for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
     n_generations:int = field(init=True, default=200)    
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)

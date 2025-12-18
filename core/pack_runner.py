@@ -87,7 +87,7 @@ class PropertyModifier:
 
 def scale_population_size(ga, name, value):
     ga.population_size = int(ga.population_size * value)
-    ga.selection_size = [int(s * value) for s in ga.selection_size]
+    ga.selection_size = [int((s-1) * value)+1 for s in ga.selection_size]
 
 def set_genetic_diversity(ga, name, value):
     if not value:

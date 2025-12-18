@@ -30,6 +30,7 @@ def test_ga(regenerate_reference):
     runner.use_missing_value = False
     runner.base_ga.n_generations = 2
     runner.base_ga.N_trees_to_do = np.array([10])
+    runner.modifier_dict['scale_population_size'] = pack_runner.pm(1., lambda r:0.25, pack_runner.scale_population_size)
     runner.run()
     if regenerate_reference:
         kgs.dill_save(kgs.code_dir + 'ref_ga.pickle', runner.result_ga.populations[-1].fitness)
