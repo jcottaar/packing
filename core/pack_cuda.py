@@ -1125,11 +1125,26 @@ def _ensure_initialized() -> None:
     if nvcc_path is None:
         raise RuntimeError("nvcc not found in PATH; please install the CUDA toolkit or add nvcc to PATH")
 
-    # Detect GPU compute capability
+    # Detect GPU compute capability and device properties
     device = cp.cuda.Device()
-    compute_capability = device.compute_capability
-    sm_arch = f"sm_{compute_capability[0]}{compute_capability[1]}"
-    print(f"Detected GPU compute capability: {compute_capability[0]}.{compute_capability[1]} (arch={sm_arch})")
+    compute_capability_str = device.compute_capability  # Returns string like "89" or "120"
+
+    # Parse compute capability string into major.minor
+    # For sm_89: major=8, minor=9
+    # For sm_120: major=12, minor=0
+    if len(compute_capability_str) == 2:
+        # Two digits: XY -> X.Y (e.g., "89" -> 8.9)
+        major = int(compute_capability_str[0])
+        minor = int(compute_capability_str[1])
+    else:
+        # Three digits: XYZ -> XY.Z (e.g., "120" -> 12.0)
+        major = int(compute_capability_str[:-1])
+        minor = int(compute_capability_str[-1])
+
+    sm_arch = f"sm_{compute_capability_str}"
+    max_threads_per_block = device.attributes['MaxThreadsPerBlock']
+    print(f"Detected GPU compute capability: {major}.{minor} (arch={sm_arch})")
+    print(f"GPU max threads per block: {max_threads_per_block}")
 
     # Helper function to compile a kernel variant with specific preprocessor defines
     def compile_kernel_variant(variant_name: str, defines: list[str]) -> cp.RawModule:
@@ -1172,23 +1187,39 @@ def _ensure_initialized() -> None:
         # Load compiled CUBIN into a CuPy RawModule
         return cp.RawModule(path=cubin_path)
 
+    # Helper function to print kernel attributes
+    def print_kernel_attributes(kernel: cp.RawKernel, name: str):
+        """Print diagnostic information about a compiled kernel."""
+        print(f"\n--- Kernel: {name} ---")
+        print(f"  Max threads per block (kernel): {kernel.max_threads_per_block}")
+        print(f"  Num registers: {kernel.num_regs}")
+        print(f"  Shared memory (bytes): {kernel.shared_size_bytes}")
+        print(f"  Const memory (bytes): {kernel.const_size_bytes}")
+        print(f"  Local memory (bytes): {kernel.local_size_bytes}")
+
     # Compile three specialized kernel variants
     # 1. Crystal variant: supports crystal axes + both separation modes
     module_crystal = compile_kernel_variant("crystal", ["ENABLE_CRYSTAL_AXES", "ENABLE_OVERLAP_AREA", "ENABLE_SEPARATION"])
     _multi_overlap_list_total_kernel_crystal = module_crystal.get_function("multi_overlap_list_total")
+    print_kernel_attributes(_multi_overlap_list_total_kernel_crystal, "multi_overlap_list_total [crystal]")
 
     # 2. No-crystal, overlap-area-only variant
     module_no_sep = compile_kernel_variant("no_sep", ["ENABLE_OVERLAP_AREA"])
     _multi_overlap_list_total_kernel_no_sep = module_no_sep.get_function("multi_overlap_list_total")
+    print_kernel_attributes(_multi_overlap_list_total_kernel_no_sep, "multi_overlap_list_total [no_sep]")
 
     # 3. No-crystal, separation-only variant
     module_sep = compile_kernel_variant("sep", ["ENABLE_SEPARATION"])
     _multi_overlap_list_total_kernel_sep = module_sep.get_function("multi_overlap_list_total")
+    print_kernel_attributes(_multi_overlap_list_total_kernel_sep, "multi_overlap_list_total [sep]")
 
     # Use the first module for boundary kernels (they don't use the specialized branches)
     _raw_module = module_crystal
     _multi_boundary_list_total_kernel = _raw_module.get_function("multi_boundary_list_total")
+    print_kernel_attributes(_multi_boundary_list_total_kernel, "multi_boundary_list_total")
+
     _multi_boundary_distance_list_total_kernel = _raw_module.get_function("multi_boundary_distance_list_total")
+    print_kernel_attributes(_multi_boundary_distance_list_total_kernel, "multi_boundary_distance_list_total")
 
     # Copy polygon data to constant memory for all three modules
     # Convert to appropriate dtype if using float32
