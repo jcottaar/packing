@@ -569,6 +569,9 @@ class GA(kgs.BaseClass):
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
     h_schedule: list = field(init=True, default=None)
+    reduce_h_threshold: float = field(init=True, default=-1.)
+    reduce_h_amount: float = field(init=True, default=0.001)
+
 
     move: Move = field(init=True, default=None)
 
@@ -710,6 +713,11 @@ class GA(kgs.BaseClass):
                     h_val = self.h_schedule[i_gen]
                     self.populations[i_N_trees].configuration.h[:, 0] = cp.array([h_val]*self.populations[i_N_trees].configuration.N_solutions, dtype=kgs.dtype_np)
                     self.populations[i_N_trees].configuration.fixed_h[0] = h_val
+                    self.populations[i_N_trees].fitness = self._score(self.populations[i_N_trees].configuration)
+                if np.min(self.populations[i_N_trees].fitness)<self.reduce_h_threshold:
+                    # Reduce h if below threshold
+                    self.populations[i_N_trees].configuration.h[:, 0] -= self.reduce_h_amount
+                    self.populations[i_N_trees].configuration.fixed_h[0] -= self.reduce_h_amount
                     self.populations[i_N_trees].fitness = self._score(self.populations[i_N_trees].configuration)
 
 

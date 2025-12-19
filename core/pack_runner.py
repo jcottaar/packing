@@ -199,6 +199,10 @@ def disable_init(ga,name,value):
         ga.initializer.jiggler.duration_final/=10000
 
 
+def set_used_fixed_h(ga,name,value):
+    ga.initializer.base_solution.use_fixed_h = bool(value)
+
+
 def set_fixed_h(ga,name,value):
     import cupy as cp    
     ga.initializer.base_solution.fixed_h = cp.array([value,0.,0.], dtype=kgs.dtype_cp)
@@ -211,6 +215,11 @@ def set_h_schedule(ga,name,value):
     h_schedule = list(np.linspace(end_val+value, end_val, n_gens-end_part)) + [end_val]*end_part
     ga.h_schedule = h_schedule
     print('h_schedule', ga.h_schedule)
+
+def set_ga_prop(ga, name, value):
+    """Generic setter for GA properties - sets ga.{name} = value"""
+    # Handle special case where modifier name differs from property name
+    setattr(ga, name, value)
 
 
 # ============================================================
@@ -240,8 +249,12 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['CrossoverP'] = pm(0.4, lambda r:3., set_CrossoverP)
     #res.modifier_dict['disable_init'] = pm(False, lambda r:r.choice([False,True]), disable_init)
 
-    res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.74,3.77), set_fixed_h)
-    res.modifier_dict['set_h_schedule'] = pm(0., lambda r:r.uniform(0,0.15), set_h_schedule)
+    res.modifier_dict['set_used_fixed_h'] = pm(True, lambda r:r.choice([False,True]), set_used_fixed_h)
+    res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.77,3.8), set_fixed_h)
+    res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:10**r.uniform(-5,-4), set_ga_prop)
+    res.modifier_dict['reduce_h_amount'] = pm(1e-3, lambda r:r.uniform(1e-3, 2e-3), set_ga_prop)
+    
+    #res.modifier_dict['set_h_schedule'] = pm(0., lambda r:r.uniform(0,0.15), set_h_schedule)
     # # Add modifiers to disable each move with 20% probability
     # # Get move names from base_ga
     # for move_item in res.base_ga.move.moves:
@@ -257,9 +270,6 @@ def baseline_runner(fast_mode=False):
     runner = res.base_ga
     runner.n_generations = 300
 
-    runner.initializer.base_solution.use_fixed_h = True
-    import cupy as cp
-    runner.initializer.base_solution.fixed_h = cp.array([3.7,0.,0.], dtype=kgs.dtype_cp)
     # runner.fine_relaxers[0] = pack_dynamics.OptimizerBFGS()
     # runner.fine_relaxers[0].cost = pack_ga.GA().fine_relaxers[0].cost
     # runner.fine_relaxers[0].track_cost = False
