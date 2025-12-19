@@ -710,6 +710,7 @@ class GA(kgs.BaseClass):
                     h_val = self.h_schedule[i_gen]
                     self.populations[i_N_trees].configuration.h[:, 0] = cp.array([h_val]*self.populations[i_N_trees].configuration.N_solutions, dtype=kgs.dtype_np)
                     self.populations[i_N_trees].configuration.fixed_h[0] = h_val
+                    self.populations[i_N_trees].fitness = self._score(self.populations[i_N_trees].configuration)
 
 
             if i_gen>0:
@@ -787,11 +788,12 @@ class GA(kgs.BaseClass):
                 current_pop.select_ids(np.where(selected)[0])
                 self.populations[i_N_trees] = current_pop
                 self.populations[i_N_trees].check_constraints()
-                # Compute diversity matrix
-                diversity_matrix = np.zeros((self.populations[i_N_trees].configuration.N_solutions, self.populations[i_N_trees].configuration.N_solutions), dtype=kgs.dtype_np)
-                for i in range(self.populations[i_N_trees].configuration.N_solutions):
-                    diversity_matrix[:,i] = compute_genetic_diversity(cp.array(self.populations[i_N_trees].configuration.xyt), cp.array(self.populations[i_N_trees].configuration.xyt[i])).get()
                 if self.plot_diversity_matrix:
+                    # Compute diversity matrix
+                    diversity_matrix = np.zeros((self.populations[i_N_trees].configuration.N_solutions, self.populations[i_N_trees].configuration.N_solutions), dtype=kgs.dtype_np)
+                    for i in range(self.populations[i_N_trees].configuration.N_solutions):
+                        diversity_matrix[:,i] = compute_genetic_diversity(cp.array(self.populations[i_N_trees].configuration.xyt), cp.array(self.populations[i_N_trees].configuration.xyt[i])).get()
+
                     plt.figure(figsize=(6,6))
                     plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix))
                     plt.colorbar(label='Diversity distance')
