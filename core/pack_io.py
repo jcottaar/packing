@@ -48,7 +48,7 @@ def legalize(sol):
     return solx
 
 
-def solution_list_to_dataframe(sol_list, compact=True):
+def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1.):
     res_df_list = []
     score = 0.0
 
@@ -92,7 +92,7 @@ def solution_list_to_dataframe(sol_list, compact=True):
                     return True
 
             import boolean_line_search
-            factor = boolean_line_search.boolean_line_search(f, 0.9, 1.)
+            factor = boolean_line_search.boolean_line_search(f, 0.9, compact_hi)
             #print(sol.N_trees, factor)
             submission['x'] *= factor
             submission['y'] *= factor

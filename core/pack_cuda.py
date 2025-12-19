@@ -1062,13 +1062,19 @@ def _ensure_initialized() -> None:
     Subsequent calls are no-ops, so you can safely call this at the start
     of public API functions.
     """
+    
     global _initialized, _piece_xy_d, _piece_nverts_d
     global _num_pieces, _raw_module, _multi_overlap_list_total_kernel, _multi_boundary_list_total_kernel, _multi_boundary_distance_list_total_kernel
 
     if _initialized:
         return
+    
+    print('init CUDA')
 
-    piece_xy_flat, piece_nverts = _build_convex_piece_arrays(CONVEX_PIECES)
+    # Use kgs.convex_breakdown directly instead of CONVEX_PIECES to ensure we get
+    # the current tree geometry (CONVEX_PIECES is assigned at module import time
+    # and becomes stale if kgs.initialize_tree_globals() is called after import)
+    piece_xy_flat, piece_nverts = _build_convex_piece_arrays(kgs.convex_breakdown)
 
     _num_pieces = piece_nverts.shape[0]
 

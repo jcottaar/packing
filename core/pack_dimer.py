@@ -18,7 +18,7 @@ import lap_batch
 from itertools import product
 
 def create_dimer():
-    res = cp.array([[-0.15/2, 0.1+kgs.tree_centroid_offset[1], 0.],[0.15/2, -0.1-kgs.tree_centroid_offset[1], np.pi]], dtype=kgs.dtype_cp)
+    res = cp.array([[-0.15/2-kgs.TREE_EXPANSION, 0.1+kgs.tree_centroid_offset[1]+kgs.TREE_EXPANSION, 0.],[0.15/2+kgs.TREE_EXPANSION, -0.1-kgs.tree_centroid_offset[1]-kgs.TREE_EXPANSION, np.pi]], dtype=kgs.dtype_cp)
     res[:,:2]*=kgs.just_over_one
     return res
 
