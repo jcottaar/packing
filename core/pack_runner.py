@@ -249,7 +249,7 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['CrossoverP'] = pm(0.4, lambda r:3., set_CrossoverP)
     #res.modifier_dict['disable_init'] = pm(False, lambda r:r.choice([False,True]), disable_init)
 
-    res.modifier_dict['set_used_fixed_h'] = pm(True, lambda r:r.choice([False,True]), set_used_fixed_h)
+    res.modifier_dict['set_used_fixed_h'] = pm(True, lambda r:r.choice([False,True], p=[0.25,0.75]), set_used_fixed_h)
     res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.77,3.8), set_fixed_h)
     res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:10**r.uniform(-5,-4), set_ga_prop)
     res.modifier_dict['reduce_h_amount'] = pm(1e-3, lambda r:r.uniform(1e-3, 2e-3), set_ga_prop)
