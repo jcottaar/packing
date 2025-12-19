@@ -1125,17 +1125,35 @@ def _ensure_initialized() -> None:
     if nvcc_path is None:
         raise RuntimeError("nvcc not found in PATH; please install the CUDA toolkit or add nvcc to PATH")
 
+    # Detect GPU compute capability
+    device = cp.cuda.Device()
+    compute_capability = device.compute_capability
+    sm_arch = f"sm_{compute_capability[0]}{compute_capability[1]}"
+    print(f"Detected GPU compute capability: {compute_capability[0]}.{compute_capability[1]} (arch={sm_arch})")
+
     # Helper function to compile a kernel variant with specific preprocessor defines
     def compile_kernel_variant(variant_name: str, defines: list[str]) -> cp.RawModule:
-        """Compile a kernel variant with specific -D flags."""
-        ptx_path = os.path.join(persist_dir, f'pack_cuda_{variant_name}.ptx')
+        """Compile a kernel variant with specific -D flags directly to CUBIN."""
         cubin_path = os.path.join(persist_dir, f'pack_cuda_{variant_name}.cubin')
 
         # Build nvcc command with -D flags for preprocessor defines
         define_flags = [f"-D{define}" for define in defines]
 
-        # First compile to cubin to get ptxas verbose output
-        cmd_cubin = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89"] + define_flags + ["-cubin", persist_path, "-o", cubin_path]
+        # Compile directly to cubin with ptxas verbose output
+        # Performance flags:
+        # -O3: Maximum optimization
+        # -use_fast_math: Aggressive math optimizations (implies --ftz=true --prec-div=false --prec-sqrt=false)
+        # --extra-device-vectorization: Enable additional vectorization passes
+        # --ptxas-options=-v: Verbose register/memory usage output
+        # --ptxas-options=--warn-on-spills: Warn if registers spill to local memory
+        cmd_cubin = [
+            nvcc_path,
+            "-O3",
+            "-use_fast_math",
+            "--extra-device-vectorization",
+            "--ptxas-options=-v,--warn-on-spills",
+            f"-arch={sm_arch}"
+        ] + define_flags + ["-cubin", persist_path, "-o", cubin_path]
 
         print(f"=== Compiling kernel variant: {variant_name} ===")
         print(f"Defines: {', '.join(defines)}")
@@ -1151,15 +1169,8 @@ def _ensure_initialized() -> None:
         if proc.stdout:
             print(proc.stdout)
 
-        # Now compile to PTX for actual use
-        cmd_ptx = [nvcc_path, "-O3", "-use_fast_math", "-arch=sm_89"] + define_flags + ["-ptx", persist_path, "-o", ptx_path]
-        proc = subprocess.run(cmd_ptx, text=True, capture_output=True)
-
-        if proc.returncode != 0:
-            raise RuntimeError(f"nvcc PTX compilation failed for {variant_name} (exit {proc.returncode})\n{proc.stderr}")
-
-        # Load compiled PTX into a CuPy RawModule
-        return cp.RawModule(path=ptx_path)
+        # Load compiled CUBIN into a CuPy RawModule
+        return cp.RawModule(path=cubin_path)
 
     # Compile three specialized kernel variants
     # 1. Crystal variant: supports crystal axes + both separation modes
