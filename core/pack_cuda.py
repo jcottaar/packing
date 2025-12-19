@@ -73,6 +73,13 @@ extern "C" {
 #define MAX_INTERSECTION_VERTS 8
 #define MAX_RADIUS """ + str(MAX_RADIUS) + r"""
 
+// Compiler directives to specialize kernel variants (reduce register pressure)
+// ENABLE_CRYSTAL_AXES: Allow use_crystal branch in overlap_ref_with_list_piece
+// ENABLE_OVERLAP_AREA: Allow !use_separation branch in process_tree_pair_piece
+// ENABLE_SEPARATION: Allow use_separation branch in process_tree_pair_piece
+// When disabled, branches produce compile-time errors instead of dead code
+// These will be defined at compile time via -D flags
+
 // Struct to hold crystal axes (axis A and axis B, each with x and y components)
 struct CrystalAxes {
     double ax, ay;  // Axis A vector
@@ -186,6 +193,7 @@ __device__ double process_tree_pair_piece(
         }
 
         if (!use_separation) {
+#ifdef ENABLE_OVERLAP_AREA
             // Pass NULL for gradient outputs when not computing gradients
             d2 d_ref_poly[MAX_VERTS_PER_PIECE];
             d2 d_other_poly[MAX_VERTS_PER_PIECE];
@@ -209,7 +217,9 @@ __device__ double process_tree_pair_piece(
                 d_ref_local->y += d_ref_pose_piece.y;
                 d_ref_local->z += d_ref_pose_piece.z;
             }
+#endif
         } else {
+#ifdef ENABLE_SEPARATION
             // Separation-based primitive
             double sep = 0.0;
             double dsep_dx = 0.0;
@@ -237,6 +247,7 @@ __device__ double process_tree_pair_piece(
                     d_ref_local->z += 2.0 * sep * dsep_dtheta;
                 }
             }
+#endif
         }
     }
 
@@ -310,6 +321,7 @@ __device__ double overlap_ref_with_list_piece(
         }
 
         if (use_crystal) {
+#ifdef ENABLE_CRYSTAL_AXES
             // Loop over 3x3 cell: cell_x and cell_y each go from -1 to 1
             for (int cell_x = -2; cell_x <= 2; ++cell_x) {
                 for (int cell_y = -2; cell_y <= 2; ++cell_y) {
@@ -340,6 +352,7 @@ __device__ double overlap_ref_with_list_piece(
                     sum += total;
                 }
             }
+#endif
         } else {
             // No crystal: skip self-comparison entirely
             if (is_self) {
@@ -976,11 +989,15 @@ _piece_nverts_d: cp.ndarray | None = None    # [num_pieces]
 
 _num_pieces: int = 0
 
-# Compiled CUDA module and kernel
+# Compiled CUDA modules and kernels
 _raw_module: cp.RawModule | None = None
-_multi_overlap_list_total_kernel: cp.RawKernel | None = None
 _multi_boundary_list_total_kernel: cp.RawKernel | None = None
 _multi_boundary_distance_list_total_kernel: cp.RawKernel | None = None
+
+# Three specialized overlap kernel variants (reduce register pressure)
+_multi_overlap_list_total_kernel_crystal: cp.RawKernel | None = None  # Crystal + both separation modes
+_multi_overlap_list_total_kernel_no_sep: cp.RawKernel | None = None   # No crystal, overlap area only
+_multi_overlap_list_total_kernel_sep: cp.RawKernel | None = None      # No crystal, separation only
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
@@ -1064,7 +1081,8 @@ def _ensure_initialized() -> None:
     """
     
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module, _multi_overlap_list_total_kernel, _multi_boundary_list_total_kernel, _multi_boundary_distance_list_total_kernel
+    global _num_pieces, _raw_module, _multi_boundary_list_total_kernel, _multi_boundary_distance_list_total_kernel
+    global _multi_overlap_list_total_kernel_crystal, _multi_overlap_list_total_kernel_no_sep, _multi_overlap_list_total_kernel_sep
 
     if _initialized:
         return
@@ -1107,58 +1125,85 @@ def _ensure_initialized() -> None:
     if nvcc_path is None:
         raise RuntimeError("nvcc not found in PATH; please install the CUDA toolkit or add nvcc to PATH")
 
-    ptx_path = os.path.join(persist_dir, 'pack_cuda_saved.ptx')
-    
-    # # First compile to cubin to get ptxas verbose output (ptxas only runs for cubin, not ptx)
-    # cubin_path = os.path.join(persist_dir, 'pack_cuda_saved.cubin')
-    # cmd_cubin = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89", "-cubin", persist_path, "-o", cubin_path]
-    
-    # print("=== Running NVCC Compilation (cubin for ptxas info) ===")
-    # print(f"Command: {' '.join(cmd_cubin)}")
-    # proc = subprocess.run(cmd_cubin, text=True)
-    
-    # if proc.returncode != 0:
-    #     raise RuntimeError(f"nvcc cubin compilation failed (exit {proc.returncode})")
-    
-    # Now compile to PTX for actual use
-    cmd = [nvcc_path, "-O3", "-use_fast_math", "-arch=sm_89", "-ptx", persist_path, "-o", ptx_path]
-    proc = subprocess.run(cmd, text=True)
-    
-    if proc.returncode != 0:
-        raise RuntimeError(f"nvcc failed (exit {proc.returncode})")
+    # Helper function to compile a kernel variant with specific preprocessor defines
+    def compile_kernel_variant(variant_name: str, defines: list[str]) -> cp.RawModule:
+        """Compile a kernel variant with specific -D flags."""
+        ptx_path = os.path.join(persist_dir, f'pack_cuda_{variant_name}.ptx')
+        cubin_path = os.path.join(persist_dir, f'pack_cuda_{variant_name}.cubin')
 
-    # Load compiled PTX into a CuPy RawModule
-    _raw_module = cp.RawModule(path=ptx_path)
-    #_raw_module = cp.RawModule(code=_CUDA_SRC, backend='nvcc', options=())
-    _multi_overlap_list_total_kernel = _raw_module.get_function("multi_overlap_list_total")
+        # Build nvcc command with -D flags for preprocessor defines
+        define_flags = [f"-D{define}" for define in defines]
+
+        # First compile to cubin to get ptxas verbose output
+        cmd_cubin = [nvcc_path, "-O3", "-use_fast_math", "--ptxas-options=-v", "-arch=sm_89"] + define_flags + ["-cubin", persist_path, "-o", cubin_path]
+
+        print(f"=== Compiling kernel variant: {variant_name} ===")
+        print(f"Defines: {', '.join(defines)}")
+        print(f"Command: {' '.join(cmd_cubin)}")
+        proc = subprocess.run(cmd_cubin, text=True, capture_output=True)
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"nvcc cubin compilation failed for {variant_name} (exit {proc.returncode})\n{proc.stderr}")
+
+        # Print ptxas register usage info (goes to stderr with --ptxas-options=-v)
+        if proc.stderr:
+            print(proc.stderr)
+        if proc.stdout:
+            print(proc.stdout)
+
+        # Now compile to PTX for actual use
+        cmd_ptx = [nvcc_path, "-O3", "-use_fast_math", "-arch=sm_89"] + define_flags + ["-ptx", persist_path, "-o", ptx_path]
+        proc = subprocess.run(cmd_ptx, text=True, capture_output=True)
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"nvcc PTX compilation failed for {variant_name} (exit {proc.returncode})\n{proc.stderr}")
+
+        # Load compiled PTX into a CuPy RawModule
+        return cp.RawModule(path=ptx_path)
+
+    # Compile three specialized kernel variants
+    # 1. Crystal variant: supports crystal axes + both separation modes
+    module_crystal = compile_kernel_variant("crystal", ["ENABLE_CRYSTAL_AXES", "ENABLE_OVERLAP_AREA", "ENABLE_SEPARATION"])
+    _multi_overlap_list_total_kernel_crystal = module_crystal.get_function("multi_overlap_list_total")
+
+    # 2. No-crystal, overlap-area-only variant
+    module_no_sep = compile_kernel_variant("no_sep", ["ENABLE_OVERLAP_AREA"])
+    _multi_overlap_list_total_kernel_no_sep = module_no_sep.get_function("multi_overlap_list_total")
+
+    # 3. No-crystal, separation-only variant
+    module_sep = compile_kernel_variant("sep", ["ENABLE_SEPARATION"])
+    _multi_overlap_list_total_kernel_sep = module_sep.get_function("multi_overlap_list_total")
+
+    # Use the first module for boundary kernels (they don't use the specialized branches)
+    _raw_module = module_crystal
     _multi_boundary_list_total_kernel = _raw_module.get_function("multi_boundary_list_total")
     _multi_boundary_distance_list_total_kernel = _raw_module.get_function("multi_boundary_distance_list_total")
 
-    # Copy polygon data to constant memory (cached on-chip, broadcast to all threads)
+    # Copy polygon data to constant memory for all three modules
     # Convert to appropriate dtype if using float32
     if kgs.USE_FLOAT32:
         piece_xy_flat_device = piece_xy_flat.astype(kgs.dtype_np)
     else:
         piece_xy_flat_device = piece_xy_flat
-    
-    const_piece_xy_ptr = _raw_module.get_global('const_piece_xy')
-    const_piece_nverts_ptr = _raw_module.get_global('const_piece_nverts')
-    # Use memcpyHtoD to copy to device constant memory
-    cp.cuda.runtime.memcpy(const_piece_xy_ptr.ptr, piece_xy_flat_device.ctypes.data, piece_xy_flat_device.nbytes, cp.cuda.runtime.memcpyHostToDevice)
-    cp.cuda.runtime.memcpy(const_piece_nverts_ptr.ptr, piece_nverts.ctypes.data, piece_nverts.nbytes, cp.cuda.runtime.memcpyHostToDevice)
+
+    # Copy to all three kernel variants
+    for module in [module_crystal, module_no_sep, module_sep]:
+        const_piece_xy_ptr = module.get_global('const_piece_xy')
+        const_piece_nverts_ptr = module.get_global('const_piece_nverts')
+        cp.cuda.runtime.memcpy(const_piece_xy_ptr.ptr, piece_xy_flat_device.ctypes.data, piece_xy_flat_device.nbytes, cp.cuda.runtime.memcpyHostToDevice)
+        cp.cuda.runtime.memcpy(const_piece_nverts_ptr.ptr, piece_nverts.ctypes.data, piece_nverts.nbytes, cp.cuda.runtime.memcpyHostToDevice)
 
     # Copy tree vertices to constant memory for boundary distance computation
-    # Get tree vertices from kgs.tree_vertices (should be CuPy array on GPU)
     tree_verts = kgs.tree_vertices.get()  # Convert to NumPy for copying to constant memory
     tree_verts_flat = tree_verts.ravel()  # Flatten (n_vertices, 2) to 1D array
     n_tree_verts = tree_verts.shape[0]
-    
     tree_verts_flat_device = tree_verts_flat.astype(kgs.dtype_np)
-    
+    n_tree_verts_np = np.array([n_tree_verts], dtype=np.int32)
+
+    # Copy to _raw_module (used for boundary kernels)
     const_tree_vertices_xy_ptr = _raw_module.get_global('const_tree_vertices_xy')
     const_n_tree_vertices_ptr = _raw_module.get_global('const_n_tree_vertices')
     cp.cuda.runtime.memcpy(const_tree_vertices_xy_ptr.ptr, tree_verts_flat_device.ctypes.data, tree_verts_flat_device.nbytes, cp.cuda.runtime.memcpyHostToDevice)
-    n_tree_verts_np = np.array([n_tree_verts], dtype=np.int32)
     cp.cuda.runtime.memcpy(const_n_tree_vertices_ptr.ptr, n_tree_verts_np.ctypes.data, n_tree_verts_np.nbytes, cp.cuda.runtime.memcpyHostToDevice)
 
     _initialized = True
@@ -1280,8 +1325,19 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
     use_crystal = 1 if crystal_axes is not None else 0
     crystal_axes_ptr = crystal_axes if crystal_axes is not None else np.intp(0)
 
+    # Select the appropriate kernel variant based on parameters
+    if crystal_axes is not None:
+        # Use crystal kernel (supports both separation modes)
+        kernel = _multi_overlap_list_total_kernel_crystal
+    elif use_separation:
+        # Use separation-only kernel
+        kernel = _multi_overlap_list_total_kernel_sep
+    else:
+        # Use overlap-area-only kernel
+        kernel = _multi_overlap_list_total_kernel_no_sep
+
     for _ in range(1):
-        _multi_overlap_list_total_kernel(
+        kernel(
             (blocks,),
             (threads_per_block,),
             (
