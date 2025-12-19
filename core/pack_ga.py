@@ -568,6 +568,7 @@ class GA(kgs.BaseClass):
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
+    h_schedule: list = field(init=True, default=None)
 
     move: Move = field(init=True, default=None)
 
@@ -702,6 +703,14 @@ class GA(kgs.BaseClass):
 
         self.best_cost_per_generation = np.zeros((self.n_generations, len(self.N_trees_to_do)))
         for i_gen in range(self.n_generations):
+
+            for (i_N_trees, N_trees) in enumerate(self.N_trees_to_do):
+                if not self.h_schedule is None:
+                    # Update h according to schedule
+                    h_val = self.h_schedule[i_gen]
+                    self.populations[i_N_trees].configuration.h[:, 0] = cp.array([h_val]*self.populations[i_N_trees].configuration.N_solutions, dtype=kgs.dtype_np)
+                    self.populations[i_N_trees].configuration.fixed_h[0] = h_val
+
 
             if i_gen>0:
                 # Offspring generation

@@ -203,6 +203,14 @@ def set_fixed_h(ga,name,value):
     import cupy as cp    
     ga.initializer.base_solution.fixed_h = cp.array([value,0.,0.], dtype=kgs.dtype_cp)
 
+def set_h_schedule(ga,name,value):
+    n_gens = ga.n_generations
+    end_part = np.round(n_gens/3).astype(int)
+    print(n_gens)
+    end_val = ga.initializer.base_solution.fixed_h[0]
+    h_schedule = list(np.linspace(end_val+value, end_val, n_gens-end_part)) + [end_val]*end_part
+    ga.h_schedule = h_schedule
+    print('h_schedule', ga.h_schedule)
 
 
 # ============================================================
@@ -232,8 +240,8 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['CrossoverP'] = pm(0.4, lambda r:3., set_CrossoverP)
     #res.modifier_dict['disable_init'] = pm(False, lambda r:r.choice([False,True]), disable_init)
 
-    res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.6,3.9), set_fixed_h)
-
+    res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.74,3.77), set_fixed_h)
+    res.modifier_dict['set_h_schedule'] = pm(0., lambda r:r.uniform(0,0.15), set_h_schedule)
     # # Add modifiers to disable each move with 20% probability
     # # Get move names from base_ga
     # for move_item in res.base_ga.move.moves:
@@ -247,6 +255,7 @@ def baseline_runner(fast_mode=False):
     # del res.modifier_dict['disable_JiggleTreeSmall']
 
     runner = res.base_ga
+    runner.n_generations = 300
 
     runner.initializer.base_solution.use_fixed_h = True
     import cupy as cp

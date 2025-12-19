@@ -20,8 +20,8 @@ pack_cuda._ensure_initialized()
 
 def run_all_tests(regenerate_reference=False):
     kgs.debugging_mode = 2    
-    test_costs()    
     test_ga(regenerate_reference)
+    test_costs()        
     pack_cuda_primitives_test.run_all_tests()    
     print("All tests passed.")
 

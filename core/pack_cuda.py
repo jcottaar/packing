@@ -186,7 +186,29 @@ __device__ double process_tree_pair_piece(
         }
 
         if (!use_separation) {
-            
+            // Pass NULL for gradient outputs when not computing gradients
+            d2 d_ref_poly[MAX_VERTS_PER_PIECE];
+            d2 d_other_poly[MAX_VERTS_PER_PIECE];
+
+            double area = convex_intersection_area(ref_poly, n1, other_poly, n2,
+                                                    compute_grads ? d_ref_poly : NULL,
+                                                    compute_grads ? d_other_poly : NULL);
+            total += area;
+
+            if (compute_grads) {
+                // Backward through transform for ref piece
+                double3 d_ref_pose_piece;
+                backward_transform_vertices(
+                    ref_local_piece, n1,
+                    d_ref_poly,
+                    c_ref, s_ref,
+                    &d_ref_pose_piece);
+
+                // Accumulate into local gradient
+                d_ref_local->x += d_ref_pose_piece.x;
+                d_ref_local->y += d_ref_pose_piece.y;
+                d_ref_local->z += d_ref_pose_piece.z;
+            }
         } else {
             // Separation-based primitive
             double sep = 0.0;
@@ -288,7 +310,36 @@ __device__ double overlap_ref_with_list_piece(
         }
 
         if (use_crystal) {
-            
+            // Loop over 3x3 cell: cell_x and cell_y each go from -1 to 1
+            for (int cell_x = -2; cell_x <= 2; ++cell_x) {
+                for (int cell_y = -2; cell_y <= 2; ++cell_y) {
+                    // Skip self-comparison at original position (0,0)
+                    if (is_self && cell_x == 0 && cell_y == 0) {
+                        continue;
+                    }
+
+                    // Compute shifted position: other = other_base + cell_x * axis_A + cell_y * axis_B
+                    double3 other;
+                    other.x = other_base.x + cell_x * crystal_axes.ax + cell_y * crystal_axes.bx;
+                    other.y = other_base.y + cell_x * crystal_axes.ay + cell_y * crystal_axes.by;
+                    other.z = other_base.z;
+
+                    // For self-comparisons with periodic copies, don't accumulate gradients
+                    int compute_grads_here = (is_self) ? 0 : compute_grads;
+
+                    // Process this tree pair using the extracted subfunction
+                    double total = process_tree_pair_piece(
+                        ref, other, pi,
+                        ref_poly, n1, ref_local_piece,
+                        ref_aabb_min_x, ref_aabb_max_x,
+                        ref_aabb_min_y, ref_aabb_max_y,
+                        c_ref, s_ref,
+                        use_separation, compute_grads_here,
+                        &d_ref_local);
+
+                    sum += total;
+                }
+            }
         } else {
             // No crystal: skip self-comparison entirely
             if (is_self) {
