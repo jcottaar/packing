@@ -432,6 +432,11 @@ class SolutionCollection(BaseClass):
         self.xyt[idx] = other.xyt[parent_id]
         self.h[idx] = other.h[parent_id]
 
+    def create_clone_batch(self, inds: np.ndarray, other: 'SolutionCollection', parent_ids: np.ndarray):
+        """Vectorized batch clone operation."""
+        self.xyt[inds] = other.xyt[parent_ids]
+        self.h[inds] = other.h[parent_ids]
+
     def create_empty(self, N_solutions: int, N_trees: int):
         xyt = cp.zeros((N_solutions, N_trees, 3), dtype=dtype_cp)
         h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
@@ -796,7 +801,12 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
     def create_clone(self, idx, other, parent_id):
         self.aspect_ratios[idx] = other.aspect_ratios[parent_id]
         super().create_clone(idx, other, parent_id)
-    
+
+    def create_clone_batch(self, inds, other, parent_ids):
+        """Vectorized batch clone operation."""
+        self.aspect_ratios[inds] = other.aspect_ratios[parent_ids]
+        super().create_clone_batch(inds, other, parent_ids)
+
     def create_empty(self, N_solutions: int, N_trees: int):
         res = super().create_empty(N_solutions, N_trees)
         res.aspect_ratios = cp.array([self.aspect_ratios[0]]*N_solutions, dtype=dtype_cp)

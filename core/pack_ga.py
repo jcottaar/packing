@@ -194,6 +194,12 @@ class Population(kgs.BaseClass):
         self.parent_fitness[idx] = other.fitness[parent_id]
         # self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
 
+    def create_clone_batch(self, inds: np.ndarray, other: 'Population', parent_ids: np.ndarray):
+        """Vectorized batch clone operation."""
+        self.configuration.create_clone_batch(inds, other.configuration, parent_ids)
+        self.fitness[inds] = other.fitness[parent_ids]
+        self.parent_fitness[inds] = other.fitness[parent_ids]
+
     def merge(self, other:'Population'):
         self.configuration.merge(other.configuration)
         self.fitness = np.concatenate([self.fitness, other.fitness], axis=0)
@@ -265,29 +271,7 @@ class InitializerRandomJiggled(Initializer):
 # ============================================================
 @dataclass
 class Move(kgs.BaseClass):
-    def do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):
-        move_descriptor =  self._do_move(population, old_pop, individual_id, mate_id, generator)
-        # Check if any trees are within 1e-6 of each other -> error
-        # moved = population.configuration.xyt[individual_id]  # (N_trees, 3) (cupy)
-        # moved_arr = moved.get() if isinstance(moved, cp.ndarray) else np.array(moved)
-        # x = moved_arr[:, 0][:, None]
-        # y = moved_arr[:, 1][:, None]
-        # theta = moved_arr[:, 2][:, None]
-        # dx = x - x.T
-        # dy = y - y.T
-        # dtheta = theta - theta.T
-        # dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
-        # pairwise_dist = np.sqrt(dx**2 + dy**2 + dtheta**2)
-        # np.fill_diagonal(pairwise_dist, np.inf)
-        # min_dist = pairwise_dist.min()
-        # if min_dist < 1e-6:
-        #     pairwise_dist[pairwise_dist<1e-6] = 1e-6
-        #     plt.figure()
-        #     plt.imshow(np.log(pairwise_dist))
-        #     plt.colorbar()
-        #     plt.pause(0.001)
-        #     raise AssertionError(f"Two trees in individual {individual_id} are closer than 1e-6 (min_dist={min_dist})")
-        return move_descriptor
+    
 
     def do_move_vec(self, population:Population, inds_to_do:np.ndarray, old_pop:Population,
                     inds_mate:np.ndarray, generator:np.random.Generator):
@@ -317,7 +301,7 @@ class Move(kgs.BaseClass):
         Subclasses can override this for better performance.
         """
         for ind_to_do, ind_mate in zip(inds_to_do, inds_mate):
-            self.do_move(population, old_pop, ind_to_do, ind_mate, generator)    
+            self._do_move(population, old_pop, ind_to_do, ind_mate, generator)    
     
 class NoOp(Move):
     def _do_move(self, population, old_pop, individual_id, mate_id, generator):
@@ -327,14 +311,6 @@ class NoOp(Move):
 class MoveSelector(Move):
     moves: list = field(init=True, default_factory=list) # each move is [Move, name, weight]
     _probabilities: np.ndarray = field(init=False, default=None)
-
-    def _do_move(self, population, old_pop, individual_id, mate_id, generator):
-        if self._probabilities is None:
-            total_weight = sum([m[2] for m in self.moves])
-            self._probabilities = np.array([m[2]/total_weight for m in self.moves], dtype=kgs.dtype_np)
-        chosen_id = generator.choice(len(self.moves), p=self._probabilities)
-        move_descriptor = self.moves[chosen_id][0].do_move(population, old_pop, individual_id, mate_id, generator)
-        return [self.moves[chosen_id][1], move_descriptor]
 
     def _do_move_vec(self, population:Population, inds_to_do:np.ndarray, old_pop:Population,
                      inds_mate:np.ndarray, generator:np.random.Generator):
@@ -809,13 +785,11 @@ class GA(kgs.BaseClass):
                     # If mate_id >= parent_id, increment by 1 to skip the parent
                     mate_ids = np.where(mate_ids >= parent_ids, mate_ids + 1, mate_ids)
 
-                    # Clone parents into new_pop and set parent fitness
-                    for i_ind in range(N_offspring):
-                        new_pop.create_clone(i_ind, old_pop, parent_ids[i_ind])
-                        new_pop.parent_fitness[i_ind] = old_pop.fitness[parent_ids[i_ind]]
+                    # Clone parents into new_pop and set parent fitness (vectorized)
+                    inds_to_do = np.arange(N_offspring)
+                    new_pop.create_clone_batch(inds_to_do, old_pop, parent_ids)
 
                     # Apply moves using vectorized interface (clones already in place)
-                    inds_to_do = np.arange(N_offspring)
                     self.move.do_move_vec(new_pop, inds_to_do, old_pop, mate_ids, generator)
 
 
