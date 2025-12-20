@@ -357,23 +357,12 @@ class MoveRandomTree(Move):
         # Get h parameters (transfer to CPU once)
         h_params = new_h[inds_to_do].get()  # (N_moves, 3) on CPU
 
-        # Generate random values and apply (loop to maintain exact RNG call order per individual)
-        trees_to_mutate = []
-        new_x_values = []
-        new_y_values = []
-        new_theta_values = []
-
-        for i in range(N_moves):
-            h_size = h_params[i, 0]
-            tree_id = generator.integers(0, N_trees)
-            x = generator.uniform(-h_size / 2, h_size / 2) + h_params[i, 1]
-            y = generator.uniform(-h_size / 2, h_size / 2) + h_params[i, 2]
-            theta = generator.uniform(-np.pi, np.pi)
-
-            trees_to_mutate.append(tree_id)
-            new_x_values.append(x)
-            new_y_values.append(y)
-            new_theta_values.append(theta)
+        # Generate all random values at once (vectorized RNG)
+        trees_to_mutate = generator.integers(0, N_trees, size=N_moves)
+        h_sizes = h_params[:, 0]
+        new_x_values = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
+        new_y_values = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
+        new_theta_values = generator.uniform(-np.pi, np.pi, size=N_moves)
 
         # Convert to GPU arrays
         new_x_gpu = cp.array(new_x_values)
@@ -398,22 +387,11 @@ class JiggleRandomTree(Move):
         N_trees = new_xyt.shape[1]
         N_moves = len(inds_to_do)
 
-        # Generate random choices (loop to maintain RNG order)
-        trees_to_mutate = []
-        offset_x = []
-        offset_y = []
-        offset_theta = []
-
-        for i in range(N_moves):
-            tree_id = generator.integers(0, N_trees)
-            ox = generator.uniform(-self.max_xy_move, self.max_xy_move)
-            oy = generator.uniform(-self.max_xy_move, self.max_xy_move)
-            ot = generator.uniform(-self.max_theta_move, self.max_theta_move)
-
-            trees_to_mutate.append(tree_id)
-            offset_x.append(ox)
-            offset_y.append(oy)
-            offset_theta.append(ot)
+        # Generate all random values at once (vectorized RNG)
+        trees_to_mutate = generator.integers(0, N_trees, size=N_moves)
+        offset_x = generator.uniform(-self.max_xy_move, self.max_xy_move, size=N_moves)
+        offset_y = generator.uniform(-self.max_xy_move, self.max_xy_move, size=N_moves)
+        offset_theta = generator.uniform(-self.max_theta_move, self.max_theta_move, size=N_moves)
 
         # Convert to GPU arrays
         offset_x_gpu = cp.array(offset_x)
@@ -444,33 +422,46 @@ class JiggleCluster(Move):
         # Get h parameters (batch transfer)
         h_params = new_h[inds_to_do].get()  # (N_moves, 3)
 
-        # Process each individual (RNG order matters, also different cluster sizes)
-        for i, ind in enumerate(inds_to_do):
-            h_size = h_params[i, 0]
-            h_offset_x = h_params[i, 1]
-            h_offset_y = h_params[i, 2]
+        # Generate random centers (vectorized)
+        h_sizes = h_params[:, 0]
+        center_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
+        center_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
 
-            # Pick random center point
-            center_x = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x
-            center_y = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y
+        # Generate n_trees_to_jiggle for all individuals (vectorized)
+        max_jiggle = min(self.max_N_trees, N_trees)
+        n_trees_to_jiggle_all = generator.integers(max_jiggle, max_jiggle + 1, size=N_moves)
+
+        # Pre-generate all random offsets (max possible needed per individual)
+        total_offsets_needed = N_moves * max_jiggle
+        all_offset_x = generator.uniform(-self.max_xy_move, self.max_xy_move, size=total_offsets_needed)
+        all_offset_y = generator.uniform(-self.max_xy_move, self.max_xy_move, size=total_offsets_needed)
+        all_offset_theta = generator.uniform(-self.max_theta_move, self.max_theta_move, size=total_offsets_needed)
+
+        offset_idx = 0
+
+        # Process each individual
+        for i, ind in enumerate(inds_to_do):
+            center_x = center_x_all[i]
+            center_y = center_y_all[i]
+            n_trees_to_jiggle = n_trees_to_jiggle_all[i]
 
             # Get tree positions and compute distances
             tree_positions = new_xyt[ind, :, :2].get()  # (N_trees, 2)
             distances = (tree_positions[:, 0] - center_x)**2 + (tree_positions[:, 1] - center_y)**2
 
             # Find closest trees
-            n_trees_to_jiggle = generator.integers(min(self.max_N_trees, N_trees), min(self.max_N_trees, N_trees) + 1)
             closest_tree_ids = np.argsort(distances)[:n_trees_to_jiggle]
 
-            # Jiggle each selected tree
-            for tree_id in closest_tree_ids:
-                offset_x = generator.uniform(-self.max_xy_move, self.max_xy_move)
-                offset_y = generator.uniform(-self.max_xy_move, self.max_xy_move)
-                offset_theta = generator.uniform(-self.max_theta_move, self.max_theta_move)
+            # Get pre-generated offsets for this individual's trees
+            offsets_x = all_offset_x[offset_idx:offset_idx + n_trees_to_jiggle]
+            offsets_y = all_offset_y[offset_idx:offset_idx + n_trees_to_jiggle]
+            offsets_theta = all_offset_theta[offset_idx:offset_idx + n_trees_to_jiggle]
+            offset_idx += n_trees_to_jiggle
 
-                new_xyt[ind, tree_id, 0] += offset_x
-                new_xyt[ind, tree_id, 1] += offset_y
-                new_xyt[ind, tree_id, 2] += offset_theta
+            # Apply offsets (vectorized on GPU)
+            new_xyt[ind, closest_tree_ids, 0] += cp.array(offsets_x)
+            new_xyt[ind, closest_tree_ids, 1] += cp.array(offsets_y)
+            new_xyt[ind, closest_tree_ids, 2] += cp.array(offsets_theta)
 
 @dataclass
 class Translate(Move):
@@ -484,13 +475,10 @@ class Translate(Move):
         # Get h parameters (batch transfer)
         h_params = new_h[inds_to_do].get()  # (N_moves, 3)
 
-        # Generate random offsets (loop to maintain RNG order)
-        offset_x_list = []
-        offset_y_list = []
-        for i in range(N_moves):
-            h_size = h_params[i, 0]
-            offset_x_list.append(generator.uniform(-h_size / 2, h_size / 2))
-            offset_y_list.append(generator.uniform(-h_size / 2, h_size / 2))
+        # Generate random offsets (vectorized RNG)
+        h_sizes = h_params[:, 0]
+        offset_x_list = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        offset_y_list = generator.uniform(-h_sizes / 2, h_sizes / 2)
 
         # Convert to GPU and apply translations (vectorized)
         inds_to_do_gpu = cp.array(inds_to_do)
@@ -517,21 +505,12 @@ class Twist(Move):
         # Get h parameters (batch transfer)
         h_params = new_h[inds_to_do].get()  # (N_moves, 3)
 
-        # Generate random parameters (loop to maintain RNG order)
-        center_x_list = []
-        center_y_list = []
-        max_twist_angle_list = []
-        radius_list = []
-
-        for i in range(N_moves):
-            h_size = h_params[i, 0]
-            h_offset_x = h_params[i, 1]
-            h_offset_y = h_params[i, 2]
-
-            center_x_list.append(generator.uniform(-h_size / 2, h_size / 2) + h_offset_x)
-            center_y_list.append(generator.uniform(-h_size / 2, h_size / 2) + h_offset_y)
-            max_twist_angle_list.append(generator.uniform(-np.pi, np.pi))
-            radius_list.append(generator.uniform(self.min_radius, self.max_radius))
+        # Generate all random parameters at once (vectorized RNG)
+        h_sizes = h_params[:, 0]
+        center_x_list = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
+        center_y_list = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
+        max_twist_angle_list = generator.uniform(-np.pi, np.pi, size=N_moves)
+        radius_list = generator.uniform(self.min_radius, self.max_radius, size=N_moves)
 
         # Convert to GPU arrays with shape (N_moves, 1) for broadcasting
         inds_to_do_gpu = cp.array(inds_to_do)
@@ -588,31 +567,43 @@ class Crossover(Move):
         h_params = new_h[inds_to_do].get()  # (N_moves, 3)
         mate_h_params = old_pop.configuration.h[inds_mate].get()  # (N_moves, 3)
 
-        # Process each individual (RNG order and variable crossover sizes)
+        # Generate all random values at once (vectorized RNG)
+        h_sizes = h_params[:, 0]
+        offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        center_x_all = offset_x_all + h_params[:, 1]
+        center_y_all = offset_y_all + h_params[:, 2]
+
+        # Generate mate offsets
+        if self.simple_mate_location:
+            mate_offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            mate_offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        else:
+            mate_h_sizes = mate_h_params[:, 0]
+            sign_x = generator.choice([-1, 1], size=N_moves)
+            sign_y = generator.choice([-1, 1], size=N_moves)
+            mate_offset_x_all = np.abs(offset_x_all) * (mate_h_sizes / h_sizes) * sign_x
+            mate_offset_y_all = np.abs(offset_y_all) * (mate_h_sizes / h_sizes) * sign_y
+
+        mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
+        mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]
+
+        # Generate n_trees_to_replace, rotation, and mirror for all
+        min_trees = min(self.min_N_trees, N_trees)
+        max_trees = min(self.max_N_trees, N_trees)
+        n_trees_to_replace_all = generator.integers(min_trees, max_trees + 1, size=N_moves)
+        rotation_choice_all = generator.integers(0, 4, size=N_moves)
+        do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
+
+        # Process each individual
         for i in range(N_moves):
             ind = inds_to_do[i]
             mate_id = inds_mate[i]
 
-            h_size = h_params[i, 0]
-            h_offset_x = h_params[i, 1]
-            h_offset_y = h_params[i, 2]
-            mate_h_size = mate_h_params[i, 0]
-
-            # Pick random center point in individual's square
-            offset_x = generator.uniform(-h_size / 2, h_size / 2)
-            offset_y = generator.uniform(-h_size / 2, h_size / 2)
-            center_x = offset_x + h_offset_x
-            center_y = offset_y + h_offset_y
-
-            # Pick mate center
-            if self.simple_mate_location:
-                mate_offset_x = generator.uniform(-h_size / 2, h_size / 2)
-                mate_offset_y = generator.uniform(-h_size / 2, h_size / 2)
-            else:
-                mate_offset_x = abs(offset_x) * (mate_h_size / h_size) * generator.choice([-1, 1])
-                mate_offset_y = abs(offset_y) * (mate_h_size / h_size) * generator.choice([-1, 1])
-            mate_center_x = mate_offset_x + mate_h_params[i, 1]
-            mate_center_y = mate_offset_y + mate_h_params[i, 2]
+            center_x = center_x_all[i]
+            center_y = center_y_all[i]
+            mate_center_x = mate_center_x_all[i]
+            mate_center_y = mate_center_y_all[i]
 
             # Find trees closest to centers (L-infinity distance)
             tree_positions = new_xyt[ind, :, :2].get()
@@ -627,11 +618,8 @@ class Crossover(Move):
                 np.abs(mate_positions[:, 1] - mate_center_y)
             )
 
-            # Select n closest trees
-            n_trees_to_replace = generator.integers(
-                min(self.min_N_trees, N_trees),
-                min(self.max_N_trees, N_trees) + 1
-            )
+            # Select n closest trees (using pre-generated value)
+            n_trees_to_replace = n_trees_to_replace_all[i]
             individual_tree_ids = np.argsort(distances_individual)[:n_trees_to_replace]
             mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
 
@@ -641,10 +629,10 @@ class Crossover(Move):
             mate_center_x = mate_positions[mate_tree_ids, 0].mean()
             mate_center_y = mate_positions[mate_tree_ids, 1].mean()
 
-            # Copy mate trees and apply transformation
+            # Copy mate trees and apply transformation (using pre-generated values)
             mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()
-            rotation_choice = generator.integers(0, 4)
-            do_mirror = generator.integers(0, 2) == 1
+            rotation_choice = rotation_choice_all[i]
+            do_mirror = do_mirror_all[i]
 
             self._apply_transformation(
                 mate_trees, mate_center_x, mate_center_y, center_x, center_y,
