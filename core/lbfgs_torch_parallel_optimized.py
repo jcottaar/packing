@@ -21,6 +21,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 import kaggle_support as kgs
+import cupy as cp
 
 # Import base functions and recompile with aggressive settings
 from lbfgs_torch_parallel import _cubic_interpolate, _strong_wolfe_batched
@@ -217,6 +218,8 @@ def lbfgs(
         else:
             x = x + t.unsqueeze(1) * d
             if n_iter != max_iter:
+                if kgs.profiling:
+                    cp.cuda.Device().synchronize()
                 loss, flat_grad = func(x)
             ls_evals = torch.ones(M, dtype=torch.long, device=device)
 

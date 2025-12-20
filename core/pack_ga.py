@@ -138,6 +138,9 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     all_costs_array = all_assignment_costs.reshape(8, N_pop)  # (8, N_pop)
     min_distances = all_costs_array.min(axis=0)
     
+    if kgs.profiling:
+        cp.cuda.Device().synchronize()
+    
     return min_distances
 
 
