@@ -387,6 +387,8 @@ def lbfgs(
     max_eval: Optional[int] = None,
     tolerance_grad: float = 1e-7,
     tolerance_change: float = 1e-9,
+    tolerance_rel_change: float = 0.,
+    stop_on_cost_increase: bool = False, 
     history_size: int = 100,
     line_search_fn: Optional[str] = None,
     max_step: Optional[float] = 0.5,
@@ -668,6 +670,18 @@ def lbfgs(
         loss_change_buffer.abs_()
         converged_loss = (loss_change_buffer < tolerance_change) & active
         active &= ~converged_loss
+
+        #print(loss)
+
+        if tolerance_rel_change > 0 and n_iter>history_size:
+            rel_change = (loss_change_buffer / (prev_loss_iter.abs() + 1e-12))
+            converged_rel = (rel_change < tolerance_rel_change) & active
+            active &= ~converged_rel
+            #print(loss_change_buffer, prev_loss_iter, rel_change, converged_rel, active)
+        
+        if stop_on_cost_increase:            
+            cost_increase = (loss > prev_loss) & active
+            active &= ~cost_increase
 
     # Update x0 with final result
     x0.copy_(x)

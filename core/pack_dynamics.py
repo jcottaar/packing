@@ -28,6 +28,8 @@ class OptimizerBFGS(kgs.BaseClass):
     n_iterations = 100
     history_size = 3
     max_step = 0.01
+    tolerance_rel_change = 0.  # Relative change tolerance for convergence
+    stop_on_cost_increase = False  # Stop optimization if cost increases
     use_line_search = False
 
     def __post_init__(self):
@@ -49,7 +51,7 @@ class OptimizerBFGS(kgs.BaseClass):
 
         if self.track_cost:
             n_steps = self.n_iterations
-            cost_history = np.zeros((n_steps, sol.N_solutions), dtype=kgs.dtype_np)
+            cost_history = np.zeros((n_steps, sol.N_solutions), dtype=kgs.dtype_np)*np.nan
 
         counter = 0
 
@@ -94,8 +96,8 @@ class OptimizerBFGS(kgs.BaseClass):
 
         import lbfgs_torch_parallel
         results = lbfgs_torch_parallel.lbfgs(
-            f_torch,x0,tolerance_grad=0, tolerance_change=0, max_iter=self.n_iterations, history_size=self.history_size, max_step=self.max_step,
-            line_search_fn = 'strong_wolfe' if self.use_line_search else None)
+            f_torch,x0,tolerance_grad=0, tolerance_change=0, tolerance_rel_change=self.tolerance_rel_change, max_iter=self.n_iterations, history_size=self.history_size, max_step=self.max_step,
+            line_search_fn = 'strong_wolfe' if self.use_line_search else None, stop_on_cost_increase=self.stop_on_cost_increase)
         x_result = cp.from_dlpack(to_dlpack(results))
         sol.xyt = cp.ascontiguousarray(x_result[:,:sol.N_trees*3].reshape(sol.N_solutions,-1,3))
         sol.h = cp.ascontiguousarray(x_result[:,sol.N_trees*3:].reshape(sol.N_solutions,-1))

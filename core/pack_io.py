@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_metric
 
-def legalize(sol):
+def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False):
     solx = copy.deepcopy(sol)
     solx.use_fixed_h = False
     solx.snap()
@@ -32,19 +32,25 @@ def legalize(sol):
     optimizer.n_iterations = 20000
     optimizer.max_step = 1e-4
     optimizer.history_size = 10
-    optimizer.track_cost = False
-    optimizer.plot_cost = False
+    optimizer.tolerance_rel_change = tolerance_rel_change
+    optimizer.track_cost = do_plot
+    optimizer.plot_cost = do_plot
     optimizer.use_line_search = False
+    optimizer.stop_on_cost_increase = stop_on_cost_increase
     print("Before optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
     for _ in range(20):
         optimizer.cost.costs[0].scaling*=0.5
         optimizer.max_step*=np.sqrt(0.5)    
         solx = optimizer.run_simulation(solx)
-        optimizer.n_iterations = 200
+        optimizer.n_iterations = np.round(200*move_factor).astype(int)
         print("After optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
         if cost_overlap.compute_cost_allocate(solx)[0].get().item()<1e-10:
                 break   
-    #assert cost_overlap.compute_cost_allocate(solx)[0].get().item()<1e-8
+    if not cost_overlap.compute_cost_allocate(solx)[0].get().item()<1e-10:
+        if tolerance_rel_change==0.:
+            raise Exception('Could not legalize solution')
+        else:
+            return legalize(solx, do_plot=do_plot, move_factor=move_factor, tolerance_rel_change=0., stop_on_cost_increase=stop_on_cost_increase)
     return solx
 
 

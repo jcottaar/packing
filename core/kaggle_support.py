@@ -169,6 +169,60 @@ def profile_each_line(func, *args, **kwargs):
 def profile_print(string):
     if profiling: print(string)
 
+module_profiler = None
+
+def enable_module_profiling(module, include_private=True):
+    """Enable profiling for all functions and methods in a module
+
+    Parameters
+    ----------
+    module : module
+        The module to profile
+    include_private : bool, default=True
+        If True, includes methods starting with single underscore (e.g., _do_move)
+        Always excludes dunder methods except __init__ and __call__
+    """
+    global module_profiler
+
+    module_profiler = LineProfiler()
+
+    for name, obj in inspect.getmembers(module):
+        # Profile module-level functions
+        if inspect.isfunction(obj) and obj.__module__ == module.__name__:
+            print(f'Added function: {name}')
+            module_profiler.add_function(obj)
+
+        # Profile class methods
+        elif inspect.isclass(obj) and obj.__module__ == module.__name__:
+            print(f'Processing class: {name}')
+            for method_name, method in inspect.getmembers(obj):
+                if inspect.isfunction(method) or inspect.ismethod(method):
+                    # Determine if we should include this method
+                    should_include = False
+
+                    if method_name.startswith('__'):
+                        # Only include specific dunder methods
+                        should_include = method_name in ['__init__', '__call__']
+                    elif method_name.startswith('_'):
+                        # Single underscore - include if include_private is True
+                        should_include = include_private
+                    else:
+                        # Public method - always include
+                        should_include = True
+
+                    if should_include:
+                        print(f'  Added method: {name}.{method_name}')
+                        module_profiler.add_function(method)
+
+    module_profiler.enable()
+
+def print_module_profile():
+    """Print accumulated profiling stats"""
+    global module_profiler
+    if module_profiler:
+        module_profiler.disable()
+        module_profiler.print_stats()
+
 
 def add_cursor(sc):
 

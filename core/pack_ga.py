@@ -274,7 +274,29 @@ class InitializerRandomJiggled(Initializer):
 # ============================================================
 @dataclass
 class Move(kgs.BaseClass):
-    
+
+    def do_move(self, population:Population, old_pop:Population, individual_id:int,
+                mate_id:int, generator:cp.random.Generator):
+        """
+        Single-individual move interface (for testing).
+
+        Parameters
+        ----------
+        population : Population
+            Target population where clone is already in place
+        old_pop : Population
+            Source population to read from
+        individual_id : int
+            Index of individual in population to modify
+        mate_id : int
+            Index of mate individual in old_pop to use for crossover
+        generator : cp.random.Generator
+            Random number generator (GPU-based)
+        """
+        # Convert to GPU arrays and call vectorized version
+        inds_to_do = cp.array([individual_id], dtype=cp.int32)
+        inds_mate = cp.array([mate_id], dtype=cp.int32)
+        self.do_move_vec(population, inds_to_do, old_pop, inds_mate, generator)
 
     def do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
                     inds_mate:cp.ndarray, generator:cp.random.Generator):
@@ -299,7 +321,7 @@ class Move(kgs.BaseClass):
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """
-        Default implementation: loop over individuals and call do_move for each.
+        Default implementation: loop over individuals and call _do_move for each.
         Clones are assumed to already be in population at indices inds_to_do.
         Subclasses can override this for better performance.
         """
@@ -806,7 +828,6 @@ class GA(kgs.BaseClass):
             plt.tight_layout()
             plt.pause(0.001)
             
-    @kgs.profile_each_line
     def run(self):
         self.check_constraints()
         generator = cp.random.default_rng(seed=self.seed)
