@@ -565,7 +565,7 @@ class Crossover(Move):
 
     def _do_move_vec(self, population: Population, inds_to_do: cp.ndarray, old_pop: Population,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
-        """Vectorized version: crossover trees from mates into multiple individuals."""
+        """Fully vectorized version: crossover trees from mates into multiple individuals."""
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
@@ -604,56 +604,152 @@ class Crossover(Move):
         rotation_choice_all = generator.integers(0, 4, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
 
-        # Transfer only scalar indices to CPU for loop iteration (control flow)
-        inds_to_do_cpu = inds_to_do.get()
-        inds_mate_cpu = inds_mate.get()
+        # Get all tree positions (N_moves, N_trees, 2) on GPU
+        tree_positions_all = new_xyt[inds_to_do, :, :2]  # (N_moves, N_trees, 2)
+        mate_positions_all = old_pop.configuration.xyt[inds_mate, :, :2]  # (N_moves, N_trees, 2)
 
-        for i in range(N_moves):
-            ind = inds_to_do_cpu[i]
-            mate_id = inds_mate_cpu[i]
+        # Compute L-infinity distances for all individuals at once (vectorized on GPU)
+        # Shape: (N_moves, N_trees)
+        center_x_all_2d = center_x_all[:, cp.newaxis]  # (N_moves, 1)
+        center_y_all_2d = center_y_all[:, cp.newaxis]  # (N_moves, 1)
+        mate_center_x_all_2d = mate_center_x_all[:, cp.newaxis]  # (N_moves, 1)
+        mate_center_y_all_2d = mate_center_y_all[:, cp.newaxis]  # (N_moves, 1)
 
-            # Get scalar centers (keep on GPU as scalars)
-            center_x = center_x_all[i]
-            center_y = center_y_all[i]
-            mate_center_x = mate_center_x_all[i]
-            mate_center_y = mate_center_y_all[i]
+        distances_individual_all = cp.maximum(
+            cp.abs(tree_positions_all[:, :, 0] - center_x_all_2d),
+            cp.abs(tree_positions_all[:, :, 1] - center_y_all_2d)
+        )  # (N_moves, N_trees)
 
-            # Find trees closest to centers (L-infinity distance) - ALL ON GPU
-            tree_positions = new_xyt[ind, :, :2]  # (N_trees, 2) on GPU
-            mate_positions = old_pop.configuration.xyt[mate_id, :, :2]  # (N_trees, 2) on GPU
+        distances_mate_all = cp.maximum(
+            cp.abs(mate_positions_all[:, :, 0] - mate_center_x_all_2d),
+            cp.abs(mate_positions_all[:, :, 1] - mate_center_y_all_2d)
+        )  # (N_moves, N_trees)
 
-            distances_individual = cp.maximum(
-                cp.abs(tree_positions[:, 0] - center_x),
-                cp.abs(tree_positions[:, 1] - center_y)
-            )
-            distances_mate = cp.maximum(
-                cp.abs(mate_positions[:, 0] - mate_center_x),
-                cp.abs(mate_positions[:, 1] - mate_center_y)
-            )
+        # Sort trees by distance for all individuals (vectorized on GPU)
+        sorted_individual_tree_ids = cp.argsort(distances_individual_all, axis=1)  # (N_moves, N_trees)
+        sorted_mate_tree_ids = cp.argsort(distances_mate_all, axis=1)  # (N_moves, N_trees)
 
-            # Select n closest trees (using pre-generated value)
-            n_trees_to_replace = int(n_trees_to_replace_all[i])
-            individual_tree_ids = cp.argsort(distances_individual)[:n_trees_to_replace]
-            mate_tree_ids = cp.argsort(distances_mate)[:n_trees_to_replace]
+        # Work with max_trees to enable vectorization - pad with dummy values for variable sizes
+        max_n_trees = int(cp.max(n_trees_to_replace_all))
 
-            # Replace centers with center of mass (on GPU)
-            center_x = cp.mean(tree_positions[individual_tree_ids, 0])
-            center_y = cp.mean(tree_positions[individual_tree_ids, 1])
-            mate_center_x = cp.mean(mate_positions[mate_tree_ids, 0])
-            mate_center_y = cp.mean(mate_positions[mate_tree_ids, 1])
+        # Create mask for which trees are actually being replaced (N_moves, max_n_trees)
+        tree_idx = cp.arange(max_n_trees)[cp.newaxis, :]  # (1, max_n_trees)
+        valid_mask = tree_idx < n_trees_to_replace_all[:, cp.newaxis]  # (N_moves, max_n_trees)
 
-            # Copy mate trees and apply transformation (using pre-generated values)
-            mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()
-            rotation_choice = int(rotation_choice_all[i])
-            do_mirror = bool(do_mirror_all[i])
+        # Get tree IDs for all moves (take first max_n_trees, will mask invalid ones)
+        individual_tree_ids_all = sorted_individual_tree_ids[:, :max_n_trees]  # (N_moves, max_n_trees)
+        mate_tree_ids_all = sorted_mate_tree_ids[:, :max_n_trees]  # (N_moves, max_n_trees)
 
-            self._apply_transformation(
-                mate_trees, mate_center_x, mate_center_y, center_x, center_y,
-                rotation_choice, do_mirror
-            )
+        # Compute centers of mass for selected trees (vectorized with masking)
+        # Use valid_mask to only include trees that should be replaced
+        # Shape gymnastics: need to gather positions for selected trees
 
-            # Replace trees in individual
-            new_xyt[ind, individual_tree_ids, :] = mate_trees
+        # For individual trees - gather positions using fancy indexing
+        # individual_tree_ids_all has shape (N_moves, max_n_trees)
+        # tree_positions_all has shape (N_moves, N_trees, 2)
+        # We want (N_moves, max_n_trees, 2)
+        move_indices = cp.arange(N_moves)[:, cp.newaxis]  # (N_moves, 1)
+        selected_individual_positions = tree_positions_all[move_indices, individual_tree_ids_all]  # (N_moves, max_n_trees, 2)
+        selected_mate_positions = mate_positions_all[move_indices, mate_tree_ids_all]  # (N_moves, max_n_trees, 2)
+
+        # Compute centers of mass (with masking for valid trees only)
+        # Sum only valid trees and divide by count
+        mask_expanded = valid_mask[:, :, cp.newaxis]  # (N_moves, max_n_trees, 1)
+        individual_centers_x = cp.sum(selected_individual_positions[:, :, 0] * valid_mask, axis=1) / cp.sum(valid_mask, axis=1)  # (N_moves,)
+        individual_centers_y = cp.sum(selected_individual_positions[:, :, 1] * valid_mask, axis=1) / cp.sum(valid_mask, axis=1)  # (N_moves,)
+        mate_centers_x = cp.sum(selected_mate_positions[:, :, 0] * valid_mask, axis=1) / cp.sum(valid_mask, axis=1)  # (N_moves,)
+        mate_centers_y = cp.sum(selected_mate_positions[:, :, 1] * valid_mask, axis=1) / cp.sum(valid_mask, axis=1)  # (N_moves,)
+
+        # Gather all mate trees to transform (N_moves, max_n_trees, 3)
+        # Use fancy indexing: for each move i, get old_pop.configuration.xyt[inds_mate[i], mate_tree_ids_all[i, :], :]
+        inds_mate_expanded = inds_mate[:, cp.newaxis]  # (N_moves, 1)
+        mate_trees_all = old_pop.configuration.xyt[inds_mate_expanded, mate_tree_ids_all].copy()  # (N_moves, max_n_trees, 3)
+
+        # Apply vectorized transformation to all trees at once
+        self._apply_transformation_vectorized(
+            mate_trees_all,
+            mate_centers_x, mate_centers_y,
+            individual_centers_x, individual_centers_y,
+            rotation_choice_all, do_mirror_all,
+            valid_mask
+        )
+
+        # Scatter results back to population (fully vectorized with masking)
+        # Use advanced indexing to write all valid trees at once
+        # Create index arrays for all valid tree writes
+        # Shape: for each (move_i, tree_j) where valid_mask[move_i, tree_j] is True,
+        #        write mate_trees_all[move_i, tree_j, :] to new_xyt[inds_to_do[move_i], individual_tree_ids_all[move_i, tree_j], :]
+
+        # Get indices of all valid (move, tree) pairs
+        move_indices_flat, tree_indices_flat = cp.where(valid_mask)  # Both shape (N_valid_writes,)
+
+        # For each valid write, get the corresponding individual and tree IDs
+        individual_ids_flat = inds_to_do[move_indices_flat]  # (N_valid_writes,)
+        tree_ids_flat = individual_tree_ids_all[move_indices_flat, tree_indices_flat]  # (N_valid_writes,)
+
+        # Gather the transformed trees to write (N_valid_writes, 3)
+        trees_to_write = mate_trees_all[move_indices_flat, tree_indices_flat, :]  # (N_valid_writes, 3)
+
+        # Scatter write all at once (vectorized)
+        new_xyt[individual_ids_flat, tree_ids_flat, :] = trees_to_write
+
+    def _apply_transformation_vectorized(self, trees_all: cp.ndarray,
+                                         src_center_x_all, src_center_y_all,
+                                         dst_center_x_all, dst_center_y_all,
+                                         rotation_choice_all, do_mirror_all,
+                                         valid_mask):
+        """Vectorized transformation for multiple moves at once.
+
+        Parameters
+        ----------
+        trees_all : cp.ndarray
+            Shape (N_moves, max_n_trees, 3) - trees to transform
+        src_center_x_all, src_center_y_all : cp.ndarray
+            Shape (N_moves,) - source centers for each move
+        dst_center_x_all, dst_center_y_all : cp.ndarray
+            Shape (N_moves,) - destination centers for each move
+        rotation_choice_all : cp.ndarray
+            Shape (N_moves,) - rotation choice (0, 1, 2, or 3) for each move
+        do_mirror_all : cp.ndarray
+            Shape (N_moves,) - boolean array for mirroring
+        valid_mask : cp.ndarray
+            Shape (N_moves, max_n_trees) - mask for which trees are actually being replaced
+        """
+        # Get positions relative to source centers (vectorized)
+        # Expand centers to (N_moves, 1) for broadcasting
+        src_x = src_center_x_all[:, cp.newaxis]  # (N_moves, 1)
+        src_y = src_center_y_all[:, cp.newaxis]  # (N_moves, 1)
+        dst_x = dst_center_x_all[:, cp.newaxis]  # (N_moves, 1)
+        dst_y = dst_center_y_all[:, cp.newaxis]  # (N_moves, 1)
+
+        dx = trees_all[:, :, 0] - src_x  # (N_moves, max_n_trees)
+        dy = trees_all[:, :, 1] - src_y  # (N_moves, max_n_trees)
+        theta = trees_all[:, :, 2].copy()  # (N_moves, max_n_trees)
+
+        # Apply mirroring (vectorized with masking)
+        mirror_mask = do_mirror_all[:, cp.newaxis]  # (N_moves, 1)
+        dy = cp.where(mirror_mask, -dy, dy)
+        theta = cp.where(mirror_mask, cp.pi - theta, theta)
+
+        # Apply rotation (vectorized for all 4 rotation choices at once)
+        # Compute rotation for all moves
+        rot_angles = rotation_choice_all[:, cp.newaxis] * (cp.pi / 2)  # (N_moves, 1)
+        cos_angles = cp.cos(rot_angles)  # (N_moves, 1)
+        sin_angles = cp.sin(rot_angles)  # (N_moves, 1)
+
+        # Apply rotation (only where rotation_choice != 0)
+        rotation_mask = rotation_choice_all[:, cp.newaxis] != 0  # (N_moves, 1)
+        dx_rotated = dx * cos_angles - dy * sin_angles
+        dy_rotated = dx * sin_angles + dy * cos_angles
+
+        dx = cp.where(rotation_mask, dx_rotated, dx)
+        dy = cp.where(rotation_mask, dy_rotated, dy)
+        theta = cp.where(rotation_mask, theta + rot_angles, theta)
+
+        # Place at destination centers (vectorized)
+        trees_all[:, :, 0] = dst_x + dx
+        trees_all[:, :, 1] = dst_y + dy
+        trees_all[:, :, 2] = theta
 
     def _apply_transformation(self, trees: cp.ndarray,
                               src_center_x, src_center_y,
