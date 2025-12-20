@@ -604,29 +604,24 @@ class Crossover(Move):
         rotation_choice_all = generator.integers(0, 4, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
 
-        # Transfer to CPU for loop iteration
+        # Transfer only scalar indices to CPU for loop iteration (control flow)
         inds_to_do_cpu = inds_to_do.get()
         inds_mate_cpu = inds_mate.get()
-        center_x_all_cpu = center_x_all.get()
-        center_y_all_cpu = center_y_all.get()
-        mate_center_x_all_cpu = mate_center_x_all.get()
-        mate_center_y_all_cpu = mate_center_y_all.get()
-        n_trees_to_replace_all_cpu = n_trees_to_replace_all.get()
-        rotation_choice_all_cpu = rotation_choice_all.get()
-        do_mirror_all_cpu = do_mirror_all.get()
 
         for i in range(N_moves):
             ind = inds_to_do_cpu[i]
             mate_id = inds_mate_cpu[i]
 
-            center_x = center_x_all_cpu[i]
-            center_y = center_y_all_cpu[i]
-            mate_center_x = mate_center_x_all_cpu[i]
-            mate_center_y = mate_center_y_all_cpu[i]
+            # Get scalar centers (transfer individual values, not whole arrays)
+            center_x = float(center_x_all[i])
+            center_y = float(center_y_all[i])
+            mate_center_x = float(mate_center_x_all[i])
+            mate_center_y = float(mate_center_y_all[i])
 
             # Find trees closest to centers (L-infinity distance)
-            tree_positions = new_xyt[ind, :, :2].get()
-            mate_positions = old_pop.configuration.xyt[mate_id, :, :2].get()
+            # Transfer to CPU for np.maximum and np.argsort (for exact compatibility)
+            tree_positions = new_xyt[ind, :, :2].get()  # (N_trees, 2) on CPU
+            mate_positions = old_pop.configuration.xyt[mate_id, :, :2].get()  # (N_trees, 2) on CPU
 
             distances_individual = np.maximum(
                 np.abs(tree_positions[:, 0] - center_x),
@@ -638,7 +633,7 @@ class Crossover(Move):
             )
 
             # Select n closest trees (using pre-generated value)
-            n_trees_to_replace = n_trees_to_replace_all_cpu[i]
+            n_trees_to_replace = int(n_trees_to_replace_all[i])
             individual_tree_ids = np.argsort(distances_individual)[:n_trees_to_replace]
             mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
 
@@ -650,8 +645,8 @@ class Crossover(Move):
 
             # Copy mate trees and apply transformation (using pre-generated values)
             mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()
-            rotation_choice = rotation_choice_all_cpu[i]
-            do_mirror = do_mirror_all_cpu[i]
+            rotation_choice = int(rotation_choice_all[i])
+            do_mirror = bool(do_mirror_all[i])
 
             self._apply_transformation(
                 mate_trees, mate_center_x, mate_center_y, center_x, center_y,
