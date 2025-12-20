@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import pack_vis_sol
 import copy
 
-CUDA_float32 = True
+CUDA_float32 = False
 kgs.set_float32(CUDA_float32)
 pack_cuda._ensure_initialized()
 
@@ -32,6 +32,7 @@ def test_ga(regenerate_reference):
     runner.base_ga.N_trees_to_do = np.array([10])
     runner.base_ga.initializer.base_solution.use_fixed_h = False
     runner.base_ga.do_legalize = False
+    runner.modifier_dict = dict()
     runner.modifier_dict['scale_population_size'] = pack_runner.pm(1., lambda r:0.25, pack_runner.scale_population_size)
     runner.run()
     if regenerate_reference:
