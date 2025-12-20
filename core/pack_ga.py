@@ -407,7 +407,7 @@ class JiggleCluster(Move):
     max_N_trees: int = field(init=True, default=20)
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
-        """Vectorized version: jiggle clusters of trees in multiple individuals."""
+        """Fully vectorized version: jiggle variable numbers of trees in clusters."""
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
@@ -417,53 +417,49 @@ class JiggleCluster(Move):
         h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
         h_sizes = h_params[:, 0]
 
-        # Generate random centers (GPU-based RNG)
-        center_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
-        center_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
+        # Generate random centers (GPU-based RNG) - shape (N_moves, 1)
+        center_x_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]
+        center_y_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]
 
         # Generate n_trees_to_jiggle for all individuals (GPU-based RNG)
         max_jiggle = min(self.max_N_trees, N_trees)
-        n_trees_to_jiggle_all = generator.integers(max_jiggle, max_jiggle + 1, size=N_moves)
+        min_jiggle = min(self.min_N_trees, N_trees)
+        n_trees_to_jiggle_all = generator.integers(min_jiggle, max_jiggle + 1, size=N_moves)  # (N_moves,)
 
-        # Pre-generate all random offsets (GPU-based RNG)
+        # Pre-generate all random offsets (GPU-based RNG) - reshape to (N_moves, max_jiggle)
         total_offsets_needed = N_moves * max_jiggle
-        all_offset_x = generator.uniform(-self.max_xy_move, self.max_xy_move, size=total_offsets_needed)
-        all_offset_y = generator.uniform(-self.max_xy_move, self.max_xy_move, size=total_offsets_needed)
-        all_offset_theta = generator.uniform(-self.max_theta_move, self.max_theta_move, size=total_offsets_needed)
+        all_offset_x = generator.uniform(-self.max_xy_move, self.max_xy_move, size=total_offsets_needed).reshape(N_moves, max_jiggle)
+        all_offset_y = generator.uniform(-self.max_xy_move, self.max_xy_move, size=total_offsets_needed).reshape(N_moves, max_jiggle)
+        all_offset_theta = generator.uniform(-self.max_theta_move, self.max_theta_move, size=total_offsets_needed).reshape(N_moves, max_jiggle)
 
-        # Transfer to CPU for iteration
-        offset_idx = 0
-        inds_to_do_cpu = inds_to_do.get()
-        center_x_all_cpu = center_x_all.get()
-        center_y_all_cpu = center_y_all.get()
-        n_trees_to_jiggle_all_cpu = n_trees_to_jiggle_all.get()
-        all_offset_x_cpu = all_offset_x.get()
-        all_offset_y_cpu = all_offset_y.get()
-        all_offset_theta_cpu = all_offset_theta.get()
+        # Get tree positions for all individuals (N_moves, N_trees, 2)
+        tree_positions = new_xyt[inds_to_do, :, :2]
 
-        # Process each individual
-        for i, ind in enumerate(inds_to_do_cpu):
-            center_x = center_x_all_cpu[i]
-            center_y = center_y_all_cpu[i]
-            n_trees_to_jiggle = n_trees_to_jiggle_all_cpu[i]
+        # Compute distances to centers for all individuals at once (N_moves, N_trees)
+        dx = tree_positions[:, :, 0] - center_x_all  # (N_moves, N_trees)
+        dy = tree_positions[:, :, 1] - center_y_all  # (N_moves, N_trees)
+        distances = dx**2 + dy**2  # (N_moves, N_trees)
 
-            # Get tree positions and compute distances
-            tree_positions = new_xyt[ind, :, :2].get()  # (N_trees, 2)
-            distances = (tree_positions[:, 0] - center_x)**2 + (tree_positions[:, 1] - center_y)**2
+        # Sort trees by distance for each individual and take the closest max_jiggle trees
+        sorted_tree_indices = cp.argsort(distances, axis=1)[:, :max_jiggle]  # (N_moves, max_jiggle)
 
-            # Find closest trees
-            closest_tree_ids = np.argsort(distances)[:n_trees_to_jiggle]
+        # Create mask for which trees to actually jiggle based on n_trees_to_jiggle_all
+        # Shape: (N_moves, max_jiggle) - True where tree_idx < n_trees_to_jiggle_all[move_idx]
+        tree_indices = cp.arange(max_jiggle)[cp.newaxis, :]  # (1, max_jiggle)
+        mask = tree_indices < n_trees_to_jiggle_all[:, cp.newaxis]  # (N_moves, max_jiggle)
 
-            # Get pre-generated offsets for this individual's trees
-            offsets_x = all_offset_x[offset_idx:offset_idx + n_trees_to_jiggle]
-            offsets_y = all_offset_y[offset_idx:offset_idx + n_trees_to_jiggle]
-            offsets_theta = all_offset_theta[offset_idx:offset_idx + n_trees_to_jiggle]
-            offset_idx += n_trees_to_jiggle
+        # Apply mask to offsets (zero out offsets for trees we don't want to jiggle)
+        all_offset_x = all_offset_x * mask
+        all_offset_y = all_offset_y * mask
+        all_offset_theta = all_offset_theta * mask
 
-            # Apply offsets (vectorized on GPU)
-            new_xyt[ind, closest_tree_ids, 0] += cp.array(offsets_x)
-            new_xyt[ind, closest_tree_ids, 1] += cp.array(offsets_y)
-            new_xyt[ind, closest_tree_ids, 2] += cp.array(offsets_theta)
+        # Create index arrays for fancy indexing
+        individual_indices = inds_to_do[:, cp.newaxis]  # (N_moves, 1)
+
+        # Apply offsets to the closest trees (fully vectorized on GPU)
+        new_xyt[individual_indices, sorted_tree_indices, 0] += all_offset_x
+        new_xyt[individual_indices, sorted_tree_indices, 1] += all_offset_y
+        new_xyt[individual_indices, sorted_tree_indices, 2] += all_offset_theta
 
 @dataclass
 class Translate(Move):
