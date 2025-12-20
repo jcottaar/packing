@@ -379,13 +379,13 @@ class MoveRandomTree(Move):
         new_x_gpu = cp.array(new_x_values)
         new_y_gpu = cp.array(new_y_values)
         new_theta_gpu = cp.array(new_theta_values)
+        trees_to_mutate_gpu = cp.array(trees_to_mutate)
+        inds_to_do_gpu = cp.array(inds_to_do)
 
-        # Apply updates (loop needed for indexing individual trees)
-        for i, ind in enumerate(inds_to_do):
-            tree_id = trees_to_mutate[i]
-            new_xyt[ind, tree_id, 0] = new_x_gpu[i]
-            new_xyt[ind, tree_id, 1] = new_y_gpu[i]
-            new_xyt[ind, tree_id, 2] = new_theta_gpu[i]  
+        # Apply updates using fancy indexing (vectorized on GPU)
+        new_xyt[inds_to_do_gpu, trees_to_mutate_gpu, 0] = new_x_gpu
+        new_xyt[inds_to_do_gpu, trees_to_mutate_gpu, 1] = new_y_gpu
+        new_xyt[inds_to_do_gpu, trees_to_mutate_gpu, 2] = new_theta_gpu  
 
 @dataclass
 class JiggleRandomTree(Move):
@@ -419,13 +419,13 @@ class JiggleRandomTree(Move):
         offset_x_gpu = cp.array(offset_x)
         offset_y_gpu = cp.array(offset_y)
         offset_theta_gpu = cp.array(offset_theta)
+        trees_to_mutate_gpu = cp.array(trees_to_mutate)
+        inds_to_do_gpu = cp.array(inds_to_do)
 
-        # Apply updates
-        for i, ind in enumerate(inds_to_do):
-            tree_id = trees_to_mutate[i]
-            new_xyt[ind, tree_id, 0] += offset_x_gpu[i]
-            new_xyt[ind, tree_id, 1] += offset_y_gpu[i]
-            new_xyt[ind, tree_id, 2] += offset_theta_gpu[i]   
+        # Apply updates using fancy indexing (vectorized on GPU)
+        new_xyt[inds_to_do_gpu, trees_to_mutate_gpu, 0] += offset_x_gpu
+        new_xyt[inds_to_do_gpu, trees_to_mutate_gpu, 1] += offset_y_gpu
+        new_xyt[inds_to_do_gpu, trees_to_mutate_gpu, 2] += offset_theta_gpu   
 
 @dataclass
 class JiggleCluster(Move):
@@ -485,14 +485,22 @@ class Translate(Move):
         h_params = new_h[inds_to_do].get()  # (N_moves, 3)
 
         # Generate random offsets (loop to maintain RNG order)
-        for i, ind in enumerate(inds_to_do):
+        offset_x_list = []
+        offset_y_list = []
+        for i in range(N_moves):
             h_size = h_params[i, 0]
-            offset_x = generator.uniform(-h_size / 2, h_size / 2)
-            offset_y = generator.uniform(-h_size / 2, h_size / 2)
+            offset_x_list.append(generator.uniform(-h_size / 2, h_size / 2))
+            offset_y_list.append(generator.uniform(-h_size / 2, h_size / 2))
 
-            # Apply translation with modulo (periodic boundary)
-            new_xyt[ind, :, 0] = cp.mod(new_xyt[ind, :, 0] + offset_x, h_size) - h_size / 2
-            new_xyt[ind, :, 1] = cp.mod(new_xyt[ind, :, 1] + offset_y, h_size) - h_size / 2
+        # Convert to GPU and apply translations (vectorized)
+        inds_to_do_gpu = cp.array(inds_to_do)
+        offset_x_gpu = cp.array(offset_x_list)[:, cp.newaxis]  # (N_moves, 1)
+        offset_y_gpu = cp.array(offset_y_list)[:, cp.newaxis]  # (N_moves, 1)
+        h_sizes_gpu = cp.array(h_params[:, 0])[:, cp.newaxis]  # (N_moves, 1)
+
+        # Apply translation with modulo (fully vectorized on GPU)
+        new_xyt[inds_to_do_gpu, :, 0] = cp.mod(new_xyt[inds_to_do_gpu, :, 0] + offset_x_gpu, h_sizes_gpu) - h_sizes_gpu / 2
+        new_xyt[inds_to_do_gpu, :, 1] = cp.mod(new_xyt[inds_to_do_gpu, :, 1] + offset_y_gpu, h_sizes_gpu) - h_sizes_gpu / 2
     
 @dataclass
 class Twist(Move):
@@ -509,41 +517,51 @@ class Twist(Move):
         # Get h parameters (batch transfer)
         h_params = new_h[inds_to_do].get()  # (N_moves, 3)
 
-        # Process each individual (RNG order matters)
-        for i, ind in enumerate(inds_to_do):
+        # Generate random parameters (loop to maintain RNG order)
+        center_x_list = []
+        center_y_list = []
+        max_twist_angle_list = []
+        radius_list = []
+
+        for i in range(N_moves):
             h_size = h_params[i, 0]
             h_offset_x = h_params[i, 1]
             h_offset_y = h_params[i, 2]
 
-            # Pick random center point
-            center_x = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x
-            center_y = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y
+            center_x_list.append(generator.uniform(-h_size / 2, h_size / 2) + h_offset_x)
+            center_y_list.append(generator.uniform(-h_size / 2, h_size / 2) + h_offset_y)
+            max_twist_angle_list.append(generator.uniform(-np.pi, np.pi))
+            radius_list.append(generator.uniform(self.min_radius, self.max_radius))
 
-            # Random twist angle and radius
-            max_twist_angle = generator.uniform(-np.pi, np.pi)
-            radius = generator.uniform(self.min_radius, self.max_radius)
+        # Convert to GPU arrays with shape (N_moves, 1) for broadcasting
+        inds_to_do_gpu = cp.array(inds_to_do)
+        center_x_gpu = cp.array(center_x_list)[:, cp.newaxis]  # (N_moves, 1)
+        center_y_gpu = cp.array(center_y_list)[:, cp.newaxis]  # (N_moves, 1)
+        max_twist_angle_gpu = cp.array(max_twist_angle_list)[:, cp.newaxis]  # (N_moves, 1)
+        radius_gpu = cp.array(radius_list)[:, cp.newaxis]  # (N_moves, 1)
 
-            # Get tree positions (on GPU)
-            tree_x = new_xyt[ind, :, 0]
-            tree_y = new_xyt[ind, :, 1]
+        # Get tree positions (N_moves, N_trees)
+        tree_x = new_xyt[inds_to_do_gpu, :, 0]
+        tree_y = new_xyt[inds_to_do_gpu, :, 1]
 
-            # Compute distances from center
-            dx = tree_x - center_x
-            dy = tree_y - center_y
-            distances = cp.sqrt(dx**2 + dy**2)
+        # Compute distances from center (fully vectorized on GPU)
+        dx = tree_x - center_x_gpu
+        dy = tree_y - center_y_gpu
+        distances = cp.sqrt(dx**2 + dy**2)
 
-            # Twist angle decreases linearly with distance
-            twist_angles = max_twist_angle * cp.maximum(0, 1 - distances / radius)
+        # Twist angle decreases linearly with distance
+        twist_angles = max_twist_angle_gpu * cp.maximum(0, 1 - distances / radius_gpu)
 
-            # Apply rotation around center point
-            cos_angles = cp.cos(twist_angles)
-            sin_angles = cp.sin(twist_angles)
-            new_x = center_x + dx * cos_angles - dy * sin_angles
-            new_y = center_y + dx * sin_angles + dy * cos_angles
+        # Apply rotation around center point
+        cos_angles = cp.cos(twist_angles)
+        sin_angles = cp.sin(twist_angles)
+        new_x = center_x_gpu + dx * cos_angles - dy * sin_angles
+        new_y = center_y_gpu + dx * sin_angles + dy * cos_angles
 
-            new_xyt[ind, :, 0] = new_x
-            new_xyt[ind, :, 1] = new_y
-            new_xyt[ind, :, 2] += twist_angles
+        # Update all individuals at once (vectorized)
+        new_xyt[inds_to_do_gpu, :, 0] = new_x
+        new_xyt[inds_to_do_gpu, :, 1] = new_y
+        new_xyt[inds_to_do_gpu, :, 2] += twist_angles
 
 
 @dataclass
