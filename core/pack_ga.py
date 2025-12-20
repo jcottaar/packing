@@ -194,11 +194,14 @@ class Population(kgs.BaseClass):
         self.parent_fitness[idx] = other.fitness[parent_id]
         # self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
 
-    def create_clone_batch(self, inds: np.ndarray, other: 'Population', parent_ids: np.ndarray):
+    def create_clone_batch(self, inds: cp.ndarray, other: 'Population', parent_ids: cp.ndarray):
         """Vectorized batch clone operation."""
         self.configuration.create_clone_batch(inds, other.configuration, parent_ids)
-        self.fitness[inds] = other.fitness[parent_ids]
-        self.parent_fitness[inds] = other.fitness[parent_ids]
+        # Convert indices to CPU for NumPy array indexing
+        inds_cpu = inds.get() if isinstance(inds, cp.ndarray) else inds
+        parent_ids_cpu = parent_ids.get() if isinstance(parent_ids, cp.ndarray) else parent_ids
+        self.fitness[inds_cpu] = other.fitness[parent_ids_cpu]
+        self.parent_fitness[inds_cpu] = other.fitness[parent_ids_cpu]
 
     def merge(self, other:'Population'):
         self.configuration.merge(other.configuration)
@@ -274,7 +277,7 @@ class Move(kgs.BaseClass):
     
 
     def do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
-                    inds_mate:cp.ndarray, generator:np.random.Generator):
+                    inds_mate:cp.ndarray, generator:cp.random.Generator):
         """
         Vectorized move interface.
 
@@ -288,13 +291,13 @@ class Move(kgs.BaseClass):
             Source population to read from
         inds_mate : cp.ndarray
             Indices of mate individuals in old_pop to use for crossover (shape: N_moves,) - GPU array
-        generator : np.random.Generator
-            Random number generator
+        generator : cp.random.Generator
+            Random number generator (GPU-based)
         """
         self._do_move_vec(population, inds_to_do, old_pop, inds_mate, generator)
 
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
-                     inds_mate:cp.ndarray, generator:np.random.Generator):
+                     inds_mate:cp.ndarray, generator:cp.random.Generator):
         """
         Default implementation: loop over individuals and call do_move for each.
         Clones are assumed to already be in population at indices inds_to_do.
@@ -315,7 +318,7 @@ class MoveSelector(Move):
     _probabilities: np.ndarray = field(init=False, default=None)
 
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
-                     inds_mate:cp.ndarray, generator:np.random.Generator):
+                     inds_mate:cp.ndarray, generator:cp.random.Generator):
         """
         Vectorized move interface for MoveSelector.
 
@@ -324,12 +327,14 @@ class MoveSelector(Move):
         """
         if self._probabilities is None:
             total_weight = sum([m[2] for m in self.moves])
-            self._probabilities = np.array([m[2]/total_weight for m in self.moves], dtype=kgs.dtype_np)
+            self._probabilities = cp.array([m[2]/total_weight for m in self.moves], dtype=kgs.dtype_cp)
 
-        # First, select which move to use for each individual
+        # First, select which move to use for each individual (GPU-based RNG)
         N_moves = int(inds_mate.shape[0])
-        chosen_move_ids = np.array([generator.choice(len(self.moves), p=self._probabilities) for _ in range(N_moves)])
-        chosen_move_ids_gpu = cp.array(chosen_move_ids)
+        # CuPy's generator doesn't have choice, so use cumulative probabilities
+        cumulative_probs = cp.cumsum(self._probabilities)
+        random_vals = generator.uniform(0, 1, size=N_moves)
+        chosen_move_ids_gpu = cp.searchsorted(cumulative_probs, random_vals)
 
         # Group individuals by chosen move type and execute moves
         for move_id in range(len(self.moves)):
@@ -350,30 +355,24 @@ class MoveSelector(Move):
 @dataclass
 class MoveRandomTree(Move):
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
-                     inds_mate:cp.ndarray, generator:np.random.Generator):
+                     inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: randomly reposition selected trees in multiple individuals."""
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
-        # Get h parameters (transfer to CPU once)
-        h_params = new_h[inds_to_do].get()  # (N_moves, 3) on CPU
-
-        # Generate all random values at once (vectorized RNG)
-        trees_to_mutate = generator.integers(0, N_trees, size=N_moves)
+        # Get h parameters (on GPU)
+        h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
         h_sizes = h_params[:, 0]
-        new_x_values = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
-        new_y_values = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
-        new_theta_values = generator.uniform(-np.pi, np.pi, size=N_moves)
 
-        # Convert to GPU arrays
-        new_x_gpu = cp.array(new_x_values)
-        new_y_gpu = cp.array(new_y_values)
-        new_theta_gpu = cp.array(new_theta_values)
-        trees_to_mutate_gpu = cp.array(trees_to_mutate)
+        # Generate all random values at once (GPU-based RNG)
+        trees_to_mutate_gpu = generator.integers(0, N_trees, size=N_moves)
+        new_x_gpu = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
+        new_y_gpu = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
+        new_theta_gpu = generator.uniform(-cp.pi, cp.pi, size=N_moves)
 
-        # Apply updates using fancy indexing (vectorized on GPU) - inds_to_do already on GPU
+        # Apply updates using fancy indexing (fully vectorized on GPU)
         new_xyt[inds_to_do, trees_to_mutate_gpu, 0] = new_x_gpu
         new_xyt[inds_to_do, trees_to_mutate_gpu, 1] = new_y_gpu
         new_xyt[inds_to_do, trees_to_mutate_gpu, 2] = new_theta_gpu  
@@ -383,25 +382,19 @@ class JiggleRandomTree(Move):
     max_xy_move: float = field(init=True, default=0.1)
     max_theta_move: float = field(init=True, default=np.pi)
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
-                     inds_mate:cp.ndarray, generator:np.random.Generator):
+                     inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: jiggle random trees in multiple individuals."""
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
-        # Generate all random values at once (vectorized RNG)
-        trees_to_mutate = generator.integers(0, N_trees, size=N_moves)
-        offset_x = generator.uniform(-self.max_xy_move, self.max_xy_move, size=N_moves)
-        offset_y = generator.uniform(-self.max_xy_move, self.max_xy_move, size=N_moves)
-        offset_theta = generator.uniform(-self.max_theta_move, self.max_theta_move, size=N_moves)
+        # Generate all random values at once (GPU-based RNG)
+        trees_to_mutate_gpu = generator.integers(0, N_trees, size=N_moves)
+        offset_x_gpu = generator.uniform(-self.max_xy_move, self.max_xy_move, size=N_moves)
+        offset_y_gpu = generator.uniform(-self.max_xy_move, self.max_xy_move, size=N_moves)
+        offset_theta_gpu = generator.uniform(-self.max_theta_move, self.max_theta_move, size=N_moves)
 
-        # Convert to GPU arrays
-        offset_x_gpu = cp.array(offset_x)
-        offset_y_gpu = cp.array(offset_y)
-        offset_theta_gpu = cp.array(offset_theta)
-        trees_to_mutate_gpu = cp.array(trees_to_mutate)
-
-        # Apply updates using fancy indexing (vectorized on GPU) - inds_to_do already on GPU
+        # Apply updates using fancy indexing (fully vectorized on GPU)
         new_xyt[inds_to_do, trees_to_mutate_gpu, 0] += offset_x_gpu
         new_xyt[inds_to_do, trees_to_mutate_gpu, 1] += offset_y_gpu
         new_xyt[inds_to_do, trees_to_mutate_gpu, 2] += offset_theta_gpu   
@@ -413,39 +406,46 @@ class JiggleCluster(Move):
     min_N_trees: int = field(init=True, default=2)
     max_N_trees: int = field(init=True, default=20)
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
-                     inds_mate:cp.ndarray, generator:np.random.Generator):
+                     inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: jiggle clusters of trees in multiple individuals."""
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
-        # Get h parameters (batch transfer)
-        h_params = new_h[inds_to_do].get()  # (N_moves, 3)
-
-        # Generate random centers (vectorized)
+        # Get h parameters (on GPU)
+        h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
         h_sizes = h_params[:, 0]
+
+        # Generate random centers (GPU-based RNG)
         center_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
         center_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
 
-        # Generate n_trees_to_jiggle for all individuals (vectorized)
+        # Generate n_trees_to_jiggle for all individuals (GPU-based RNG)
         max_jiggle = min(self.max_N_trees, N_trees)
         n_trees_to_jiggle_all = generator.integers(max_jiggle, max_jiggle + 1, size=N_moves)
 
-        # Pre-generate all random offsets (max possible needed per individual)
+        # Pre-generate all random offsets (GPU-based RNG)
         total_offsets_needed = N_moves * max_jiggle
         all_offset_x = generator.uniform(-self.max_xy_move, self.max_xy_move, size=total_offsets_needed)
         all_offset_y = generator.uniform(-self.max_xy_move, self.max_xy_move, size=total_offsets_needed)
         all_offset_theta = generator.uniform(-self.max_theta_move, self.max_theta_move, size=total_offsets_needed)
 
+        # Transfer to CPU for iteration
         offset_idx = 0
-        inds_to_do_cpu = inds_to_do.get()  # Transfer once to CPU for loop
+        inds_to_do_cpu = inds_to_do.get()
+        center_x_all_cpu = center_x_all.get()
+        center_y_all_cpu = center_y_all.get()
+        n_trees_to_jiggle_all_cpu = n_trees_to_jiggle_all.get()
+        all_offset_x_cpu = all_offset_x.get()
+        all_offset_y_cpu = all_offset_y.get()
+        all_offset_theta_cpu = all_offset_theta.get()
 
         # Process each individual
         for i, ind in enumerate(inds_to_do_cpu):
-            center_x = center_x_all[i]
-            center_y = center_y_all[i]
-            n_trees_to_jiggle = n_trees_to_jiggle_all[i]
+            center_x = center_x_all_cpu[i]
+            center_y = center_y_all_cpu[i]
+            n_trees_to_jiggle = n_trees_to_jiggle_all_cpu[i]
 
             # Get tree positions and compute distances
             tree_positions = new_xyt[ind, :, :2].get()  # (N_trees, 2)
@@ -468,24 +468,20 @@ class JiggleCluster(Move):
 @dataclass
 class Translate(Move):
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
-                     inds_mate:cp.ndarray, generator:np.random.Generator):
+                     inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: translate all trees in multiple individuals."""
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_moves = int(inds_to_do.shape[0])
 
-        # Get h parameters (batch transfer)
-        h_params = new_h[inds_to_do].get()  # (N_moves, 3)
+        # Get h parameters (on GPU)
+        h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
 
-        # Generate random offsets (vectorized RNG)
+        # Generate random offsets (vectorized RNG on GPU)
         h_sizes = h_params[:, 0]
-        offset_x_list = generator.uniform(-h_sizes / 2, h_sizes / 2)
-        offset_y_list = generator.uniform(-h_sizes / 2, h_sizes / 2)
-
-        # Convert to GPU and apply translations (vectorized) - inds_to_do already on GPU
-        offset_x_gpu = cp.array(offset_x_list)[:, cp.newaxis]  # (N_moves, 1)
-        offset_y_gpu = cp.array(offset_y_list)[:, cp.newaxis]  # (N_moves, 1)
-        h_sizes_gpu = cp.array(h_params[:, 0])[:, cp.newaxis]  # (N_moves, 1)
+        offset_x_gpu = generator.uniform(-h_sizes / 2, h_sizes / 2)[:, cp.newaxis]  # (N_moves, 1)
+        offset_y_gpu = generator.uniform(-h_sizes / 2, h_sizes / 2)[:, cp.newaxis]  # (N_moves, 1)
+        h_sizes_gpu = h_params[:, 0:1]  # (N_moves, 1)
 
         # Apply translation with modulo (fully vectorized on GPU)
         new_xyt[inds_to_do, :, 0] = cp.mod(new_xyt[inds_to_do, :, 0] + offset_x_gpu, h_sizes_gpu) - h_sizes_gpu / 2
@@ -497,27 +493,21 @@ class Twist(Move):
     min_radius: float = field(init=True, default=0.5)
     max_radius: float = field(init=True, default=2.)
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
-                     inds_mate:cp.ndarray, generator:np.random.Generator):
+                     inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: twist trees around centers in multiple individuals."""
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_moves = int(inds_to_do.shape[0])
 
-        # Get h parameters (batch transfer)
-        h_params = new_h[inds_to_do].get()  # (N_moves, 3)
+        # Get h parameters (on GPU)
+        h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
 
-        # Generate all random parameters at once (vectorized RNG)
+        # Generate all random parameters at once (vectorized RNG on GPU)
         h_sizes = h_params[:, 0]
-        center_x_list = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
-        center_y_list = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
-        max_twist_angle_list = generator.uniform(-np.pi, np.pi, size=N_moves)
-        radius_list = generator.uniform(self.min_radius, self.max_radius, size=N_moves)
-
-        # Convert to GPU arrays with shape (N_moves, 1) for broadcasting - inds_to_do already on GPU
-        center_x_gpu = cp.array(center_x_list)[:, cp.newaxis]  # (N_moves, 1)
-        center_y_gpu = cp.array(center_y_list)[:, cp.newaxis]  # (N_moves, 1)
-        max_twist_angle_gpu = cp.array(max_twist_angle_list)[:, cp.newaxis]  # (N_moves, 1)
-        radius_gpu = cp.array(radius_list)[:, cp.newaxis]  # (N_moves, 1)
+        center_x_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]  # (N_moves, 1)
+        center_y_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]  # (N_moves, 1)
+        max_twist_angle_gpu = generator.uniform(-cp.pi, cp.pi, size=N_moves)[:, cp.newaxis]  # (N_moves, 1)
+        radius_gpu = generator.uniform(self.min_radius, self.max_radius, size=N_moves)[:, cp.newaxis]  # (N_moves, 1)
 
         # Get tree positions (N_moves, N_trees)
         tree_x = new_xyt[inds_to_do, :, 0]
@@ -556,18 +546,18 @@ class Crossover(Move):
     simple_mate_location: bool = field(init=True, default=False)
 
     def _do_move_vec(self, population: Population, inds_to_do: cp.ndarray, old_pop: Population,
-                     inds_mate: cp.ndarray, generator: np.random.Generator):
+                     inds_mate: cp.ndarray, generator: cp.random.Generator):
         """Vectorized version: crossover trees from mates into multiple individuals."""
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
-        # Get h parameters (batch transfer)
-        h_params = new_h[inds_to_do].get()  # (N_moves, 3)
-        mate_h_params = old_pop.configuration.h[inds_mate].get()  # (N_moves, 3)
+        # Get h parameters (on GPU)
+        h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
+        mate_h_params = old_pop.configuration.h[inds_mate]  # (N_moves, 3) on GPU
 
-        # Generate all random values at once (vectorized RNG)
+        # Generate all random values at once (vectorized RNG on GPU)
         h_sizes = h_params[:, 0]
         offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
         offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
@@ -580,10 +570,11 @@ class Crossover(Move):
             mate_offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
         else:
             mate_h_sizes = mate_h_params[:, 0]
-            sign_x = generator.choice([-1, 1], size=N_moves)
-            sign_y = generator.choice([-1, 1], size=N_moves)
-            mate_offset_x_all = np.abs(offset_x_all) * (mate_h_sizes / h_sizes) * sign_x
-            mate_offset_y_all = np.abs(offset_y_all) * (mate_h_sizes / h_sizes) * sign_y
+            # CuPy's generator doesn't have choice, use random binary values
+            sign_x = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
+            sign_y = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
+            mate_offset_x_all = cp.abs(offset_x_all) * (mate_h_sizes / h_sizes) * sign_x
+            mate_offset_y_all = cp.abs(offset_y_all) * (mate_h_sizes / h_sizes) * sign_y
 
         mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
         mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]
@@ -595,18 +586,25 @@ class Crossover(Move):
         rotation_choice_all = generator.integers(0, 4, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
 
-        # Process each individual
-        inds_to_do_cpu = inds_to_do.get()  # Transfer once to CPU for loop
+        # Transfer to CPU for loop iteration
+        inds_to_do_cpu = inds_to_do.get()
         inds_mate_cpu = inds_mate.get()
+        center_x_all_cpu = center_x_all.get()
+        center_y_all_cpu = center_y_all.get()
+        mate_center_x_all_cpu = mate_center_x_all.get()
+        mate_center_y_all_cpu = mate_center_y_all.get()
+        n_trees_to_replace_all_cpu = n_trees_to_replace_all.get()
+        rotation_choice_all_cpu = rotation_choice_all.get()
+        do_mirror_all_cpu = do_mirror_all.get()
 
         for i in range(N_moves):
             ind = inds_to_do_cpu[i]
             mate_id = inds_mate_cpu[i]
 
-            center_x = center_x_all[i]
-            center_y = center_y_all[i]
-            mate_center_x = mate_center_x_all[i]
-            mate_center_y = mate_center_y_all[i]
+            center_x = center_x_all_cpu[i]
+            center_y = center_y_all_cpu[i]
+            mate_center_x = mate_center_x_all_cpu[i]
+            mate_center_y = mate_center_y_all_cpu[i]
 
             # Find trees closest to centers (L-infinity distance)
             tree_positions = new_xyt[ind, :, :2].get()
@@ -622,7 +620,7 @@ class Crossover(Move):
             )
 
             # Select n closest trees (using pre-generated value)
-            n_trees_to_replace = n_trees_to_replace_all[i]
+            n_trees_to_replace = n_trees_to_replace_all_cpu[i]
             individual_tree_ids = np.argsort(distances_individual)[:n_trees_to_replace]
             mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
 
@@ -634,8 +632,8 @@ class Crossover(Move):
 
             # Copy mate trees and apply transformation (using pre-generated values)
             mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()
-            rotation_choice = rotation_choice_all[i]
-            do_mirror = do_mirror_all[i]
+            rotation_choice = rotation_choice_all_cpu[i]
+            do_mirror = do_mirror_all_cpu[i]
 
             self._apply_transformation(
                 mate_trees, mate_center_x, mate_center_y, center_x, center_y,
@@ -815,7 +813,7 @@ class GA(kgs.BaseClass):
     @kgs.profile_each_line
     def run(self):
         self.check_constraints()
-        generator = np.random.default_rng(seed=self.seed)
+        generator = cp.random.default_rng(seed=self.seed)
 
         # Initialize populations
         for N_trees in self.N_trees_to_do:    
