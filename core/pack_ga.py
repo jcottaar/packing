@@ -346,20 +346,46 @@ class MoveSelector(Move):
 
 @dataclass
 class MoveRandomTree(Move):
-    def _do_move(self, population:Population, old_pop:Population, individual_id:int, mate_id:int, generator:np.random.Generator):                   
+    def _do_move_vec(self, population:Population, inds_to_do:np.ndarray, old_pop:Population,
+                     inds_mate:np.ndarray, generator:np.random.Generator):
+        """Vectorized version: randomly reposition selected trees in multiple individuals."""
         new_h = population.configuration.h
         new_xyt = population.configuration.xyt
-        move_descriptor = []
-        tree_to_mutate = generator.integers(0, new_xyt.shape[1])
-        h_size = new_h[individual_id, 0].get()  # Square size
-        h_offset_x = new_h[individual_id, 1].get()  # x offset
-        h_offset_y = new_h[individual_id, 2].get()  # y offset
-        move_descriptor.append(new_xyt[individual_id, tree_to_mutate].get())
-        new_xyt[individual_id, tree_to_mutate, 0] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_x  # x
-        new_xyt[individual_id, tree_to_mutate, 1] = generator.uniform(-h_size / 2, h_size / 2) + h_offset_y  # y
-        new_xyt[individual_id, tree_to_mutate, 2] = generator.uniform(-np.pi, np.pi)  # theta  
-        move_descriptor.append(new_xyt[individual_id, tree_to_mutate].get()) 
-        return move_descriptor  
+        N_trees = new_xyt.shape[1]
+        N_moves = len(inds_to_do)
+
+        # Get h parameters (transfer to CPU once)
+        h_params = new_h[inds_to_do].get()  # (N_moves, 3) on CPU
+
+        # Generate random values and apply (loop to maintain exact RNG call order per individual)
+        trees_to_mutate = []
+        new_x_values = []
+        new_y_values = []
+        new_theta_values = []
+
+        for i in range(N_moves):
+            h_size = h_params[i, 0]
+            tree_id = generator.integers(0, N_trees)
+            x = generator.uniform(-h_size / 2, h_size / 2) + h_params[i, 1]
+            y = generator.uniform(-h_size / 2, h_size / 2) + h_params[i, 2]
+            theta = generator.uniform(-np.pi, np.pi)
+
+            trees_to_mutate.append(tree_id)
+            new_x_values.append(x)
+            new_y_values.append(y)
+            new_theta_values.append(theta)
+
+        # Convert to GPU arrays
+        new_x_gpu = cp.array(new_x_values)
+        new_y_gpu = cp.array(new_y_values)
+        new_theta_gpu = cp.array(new_theta_values)
+
+        # Apply updates (loop needed for indexing individual trees)
+        for i, ind in enumerate(inds_to_do):
+            tree_id = trees_to_mutate[i]
+            new_xyt[ind, tree_id, 0] = new_x_gpu[i]
+            new_xyt[ind, tree_id, 1] = new_y_gpu[i]
+            new_xyt[ind, tree_id, 2] = new_theta_gpu[i]  
 
 @dataclass
 class JiggleRandomTree(Move):
