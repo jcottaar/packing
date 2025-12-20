@@ -287,13 +287,43 @@ class Move(kgs.BaseClass):
         #     plt.colorbar()
         #     plt.pause(0.001)
         #     raise AssertionError(f"Two trees in individual {individual_id} are closer than 1e-6 (min_dist={min_dist})")
-        return move_descriptor    
+        return move_descriptor
+
+    def do_move_vec(self, population:Population, inds_to_do:np.ndarray, old_pop:Population,
+                    inds_mate:np.ndarray, generator:np.random.Generator):
+        """
+        Vectorized move interface.
+
+        Parameters
+        ----------
+        population : Population
+            Target population where clones are already in place
+        inds_to_do : np.ndarray
+            Indices of individuals in population to modify (shape: N_moves,)
+        old_pop : Population
+            Source population to read from
+        inds_mate : np.ndarray
+            Indices of mate individuals in old_pop to use for crossover (shape: N_moves,)
+        generator : np.random.Generator
+            Random number generator
+        """
+        self._do_move_vec(population, inds_to_do, old_pop, inds_mate, generator)
+
+    def _do_move_vec(self, population:Population, inds_to_do:np.ndarray, old_pop:Population,
+                     inds_mate:np.ndarray, generator:np.random.Generator):
+        """
+        Default implementation: loop over individuals and call do_move for each.
+        Clones are assumed to already be in population at indices inds_to_do.
+        Subclasses can override this for better performance.
+        """
+        for ind_to_do, ind_mate in zip(inds_to_do, inds_mate):
+            self.do_move(population, old_pop, ind_to_do, ind_mate, generator)    
     
 class NoOp(Move):
     def _do_move(self, population, old_pop, individual_id, mate_id, generator):
         return None
 
-@dataclass  
+@dataclass
 class MoveSelector(Move):
     moves: list = field(init=True, default_factory=list) # each move is [Move, name, weight]
     _probabilities: np.ndarray = field(init=False, default=None)
@@ -305,6 +335,38 @@ class MoveSelector(Move):
         chosen_id = generator.choice(len(self.moves), p=self._probabilities)
         move_descriptor = self.moves[chosen_id][0].do_move(population, old_pop, individual_id, mate_id, generator)
         return [self.moves[chosen_id][1], move_descriptor]
+
+    def _do_move_vec(self, population:Population, inds_to_do:np.ndarray, old_pop:Population,
+                     inds_mate:np.ndarray, generator:np.random.Generator):
+        """
+        Vectorized move interface for MoveSelector.
+
+        Loops over individuals, selecting which move type to use for each,
+        then groups individuals by move type and calls do_move_vec on each group.
+        """
+        if self._probabilities is None:
+            total_weight = sum([m[2] for m in self.moves])
+            self._probabilities = np.array([m[2]/total_weight for m in self.moves], dtype=kgs.dtype_np)
+
+        # First, select which move to use for each individual
+        N_moves = len(inds_mate)
+        chosen_move_ids = np.array([generator.choice(len(self.moves), p=self._probabilities) for _ in range(N_moves)])
+
+        # Group individuals by chosen move type and execute moves
+        for move_id in range(len(self.moves)):
+            # Find all individuals that chose this move
+            mask = chosen_move_ids == move_id
+            if not np.any(mask):
+                continue
+
+            # Get indices for this move type
+            batch_inds_to_do = inds_to_do[mask]
+            batch_inds_mate = inds_mate[mask]
+
+            # Call do_move_vec for this move type on the batch
+            self.moves[move_id][0].do_move_vec(
+                population, batch_inds_to_do, old_pop, batch_inds_mate, generator
+            )
 
 @dataclass
 class MoveRandomTree(Move):
@@ -732,20 +794,29 @@ class GA(kgs.BaseClass):
                     parent_size = old_pop.configuration.N_solutions
                     new_pop = old_pop.create_empty(self.population_size-parent_size, N_trees)
 
-                    for i_ind in range(new_pop.configuration.N_solutions):
-                        # Pick a random parent
-                        parent_id = generator.integers(0, parent_size)
-                        # Pick a random mate, but preferring champions
-                        # pick a mate, where the worst (last) individual gets weight 1, the next best weight 2, etc. (DISABLED FOR NOW)
-                        weights = 0*np.arange(parent_size, 0, -1, dtype=float)+1  # best has largest weight
-                        weights[parent_id] = 0.0
-                        probs = weights / weights.sum()
-                        mate_id = generator.choice(parent_size, p=probs)
+                    # Generate all parent and mate selections at once (vectorized)
+                    N_offspring = new_pop.configuration.N_solutions
 
-                        new_pop.create_clone(i_ind, old_pop, parent_id)
-                        new_pop.parent_fitness[i_ind] = old_pop.fitness[parent_id]
-                        move_descriptor = self.move.do_move(new_pop, old_pop, i_ind, mate_id, generator)
-                        # new_pop.lineages[i_ind].append([move_descriptor, [old_pop.fitness[parent_id],old_pop.fitness[mate_id],diversity_matrix[parent_id, mate_id],0.,0.,0.]])  # Placeholder for move description
+                    # Pick random parents
+                    parent_ids = generator.integers(0, parent_size, size=N_offspring)
+
+                    # Pick random mates (excluding parent) - fully vectorized
+                    # Note: mate selection currently has weight=1 for all (0*np.arange(...)+1)
+                    # This means uniform selection excluding the parent
+
+                    # Strategy: pick random from [0, parent_size-1), then adjust if >= parent_id
+                    mate_ids = generator.integers(0, parent_size - 1, size=N_offspring)
+                    # If mate_id >= parent_id, increment by 1 to skip the parent
+                    mate_ids = np.where(mate_ids >= parent_ids, mate_ids + 1, mate_ids)
+
+                    # Clone parents into new_pop and set parent fitness
+                    for i_ind in range(N_offspring):
+                        new_pop.create_clone(i_ind, old_pop, parent_ids[i_ind])
+                        new_pop.parent_fitness[i_ind] = old_pop.fitness[parent_ids[i_ind]]
+
+                    # Apply moves using vectorized interface (clones already in place)
+                    inds_to_do = np.arange(N_offspring)
+                    self.move.do_move_vec(new_pop, inds_to_do, old_pop, mate_ids, generator)
 
 
 
