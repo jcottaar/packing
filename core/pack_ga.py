@@ -612,36 +612,35 @@ class Crossover(Move):
             ind = inds_to_do_cpu[i]
             mate_id = inds_mate_cpu[i]
 
-            # Get scalar centers (transfer individual values, not whole arrays)
-            center_x = float(center_x_all[i])
-            center_y = float(center_y_all[i])
-            mate_center_x = float(mate_center_x_all[i])
-            mate_center_y = float(mate_center_y_all[i])
+            # Get scalar centers (keep on GPU as scalars)
+            center_x = center_x_all[i]
+            center_y = center_y_all[i]
+            mate_center_x = mate_center_x_all[i]
+            mate_center_y = mate_center_y_all[i]
 
-            # Find trees closest to centers (L-infinity distance)
-            # Transfer to CPU for np.maximum and np.argsort (for exact compatibility)
-            tree_positions = new_xyt[ind, :, :2].get()  # (N_trees, 2) on CPU
-            mate_positions = old_pop.configuration.xyt[mate_id, :, :2].get()  # (N_trees, 2) on CPU
+            # Find trees closest to centers (L-infinity distance) - ALL ON GPU
+            tree_positions = new_xyt[ind, :, :2]  # (N_trees, 2) on GPU
+            mate_positions = old_pop.configuration.xyt[mate_id, :, :2]  # (N_trees, 2) on GPU
 
-            distances_individual = np.maximum(
-                np.abs(tree_positions[:, 0] - center_x),
-                np.abs(tree_positions[:, 1] - center_y)
+            distances_individual = cp.maximum(
+                cp.abs(tree_positions[:, 0] - center_x),
+                cp.abs(tree_positions[:, 1] - center_y)
             )
-            distances_mate = np.maximum(
-                np.abs(mate_positions[:, 0] - mate_center_x),
-                np.abs(mate_positions[:, 1] - mate_center_y)
+            distances_mate = cp.maximum(
+                cp.abs(mate_positions[:, 0] - mate_center_x),
+                cp.abs(mate_positions[:, 1] - mate_center_y)
             )
 
             # Select n closest trees (using pre-generated value)
             n_trees_to_replace = int(n_trees_to_replace_all[i])
-            individual_tree_ids = np.argsort(distances_individual)[:n_trees_to_replace]
-            mate_tree_ids = np.argsort(distances_mate)[:n_trees_to_replace]
+            individual_tree_ids = cp.argsort(distances_individual)[:n_trees_to_replace]
+            mate_tree_ids = cp.argsort(distances_mate)[:n_trees_to_replace]
 
-            # Replace centers with center of mass
-            center_x = tree_positions[individual_tree_ids, 0].mean()
-            center_y = tree_positions[individual_tree_ids, 1].mean()
-            mate_center_x = mate_positions[mate_tree_ids, 0].mean()
-            mate_center_y = mate_positions[mate_tree_ids, 1].mean()
+            # Replace centers with center of mass (on GPU)
+            center_x = cp.mean(tree_positions[individual_tree_ids, 0])
+            center_y = cp.mean(tree_positions[individual_tree_ids, 1])
+            mate_center_x = cp.mean(mate_positions[mate_tree_ids, 0])
+            mate_center_y = cp.mean(mate_positions[mate_tree_ids, 1])
 
             # Copy mate trees and apply transformation (using pre-generated values)
             mate_trees = old_pop.configuration.xyt[mate_id, mate_tree_ids, :].copy()
@@ -656,28 +655,29 @@ class Crossover(Move):
             # Replace trees in individual
             new_xyt[ind, individual_tree_ids, :] = mate_trees
 
-    def _apply_transformation(self, trees: cp.ndarray, 
-                              src_center_x: float, src_center_y: float,
-                              dst_center_x: float, dst_center_y: float,
+    def _apply_transformation(self, trees: cp.ndarray,
+                              src_center_x, src_center_y,
+                              dst_center_x, dst_center_y,
                               rotation_choice: int, do_mirror: bool):
-        """Apply rotation and mirroring, moving trees from src_center to dst_center."""
+        """Apply rotation and mirroring, moving trees from src_center to dst_center.
+        All operations on GPU with CuPy."""
         # Get positions relative to source center (mate's center)
         dx = trees[:, 0] - src_center_x
         dy = trees[:, 1] - src_center_y
         theta = trees[:, 2]
-        
+
         # Apply mirroring (across x-axis through center): y -> -y, theta -> pi - theta
         if do_mirror:
             dy = -dy
             theta = cp.pi - theta
-        
+
         # Apply rotation (0°, 90°, 180°, or 270°)
         if rotation_choice != 0:
-            rot_angle = rotation_choice * (np.pi / 2)
-            cos_a, sin_a = np.cos(rot_angle), np.sin(rot_angle)
+            rot_angle = rotation_choice * (cp.pi / 2)
+            cos_a, sin_a = cp.cos(rot_angle), cp.sin(rot_angle)
             dx, dy = dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a
             theta = theta + rot_angle
-        
+
         # Place at destination center (individual's center)
         trees[:, 0] = dst_center_x + dx
         trees[:, 1] = dst_center_y + dy
