@@ -2,7 +2,7 @@ import numpy as np
 import copy
 import time
 from dataclasses import dataclass, field
-import pack_ga
+import pack_ga2
 import pack_cost
 import pack_dynamics
 import kaggle_support as kgs
@@ -14,14 +14,14 @@ class Runner(kgs.BaseClass):
     # Inputs
     label: str = field(init=False, default='')
     seed: int = 0
-    base_ga: pack_ga.GA = field(default_factory=pack_ga.GA)
+    base_ga: pack_ga2.Orchestrator = field(default_factory=pack_ga2.Orchestrator)
     modifier_dict: dict = field(default_factory=dict)
     use_missing_value: bool = False
 
     # Outputs
     modifier_values: dict = field(default_factory=dict)
-    configured_ga: pack_ga.GA = None
-    result_ga: pack_ga.GA = None
+    configured_ga: pack_ga2.Orchestrator = None
+    result_ga: pack_ga2.Orchestrator = None
     best_costs: np.ndarray = None
     runtime_seconds: float = None
     exception: str = None
@@ -50,7 +50,13 @@ class Runner(kgs.BaseClass):
             ga.run()
 
             self.result_ga = copy.deepcopy(ga)
-            self.best_costs = ga.best_cost_per_generation
+            # Extract costs from best_costs_per_generation (list of lists of fitness tuples)
+            # Structure: best_costs_per_generation[i_config][i_generation] = fitness_tuple
+            # We want output shape: (n_generations, n_configs)
+            n_generations = len(ga.ga.best_costs_per_generation[0]) if ga.ga.best_costs_per_generation else 0
+            self.best_costs = np.array([[float(ga.ga.best_costs_per_generation[i_config][i_gen][0]) 
+                                        for i_config in range(len(ga.ga.best_costs_per_generation))]
+                                       for i_gen in range(n_generations)])
 
             # Record runtime
             self.runtime_seconds = time.time() - start_time
@@ -104,14 +110,16 @@ def baseline_runner(fast_mode=False):
     res.label = 'Baseline'
 
     res.modifier_dict['n_generations'] = pm(5, lambda r:r.integers(5,11).item(), set_ga_prop)
+
+    res.base_ga.ga = pack_ga2.GASinglePopulationOld()
     
     runner = res.base_ga
 
     if fast_mode:         
         runner.n_generations = 5
-        runner.population_size = 100
-        runner.selection_size = [1,2,5,10]
-        runner.do_legalize = False
+        runner.ga.population_size = 100
+        runner.ga.selection_size = [1,2,5,10]
+        runner.ga.do_legalize = False
 
     return res
 

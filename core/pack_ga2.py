@@ -903,7 +903,7 @@ class GA(kgs.BaseClass):
         self._apply_selection()
 
     def finalize(self):
-        if do_legalize:
+        if self.do_legalize:
             for champion in self.champions:
                 champion.configuration = pack_io.legalize(champion.configuration)
 
@@ -988,6 +988,10 @@ class GASinglePopulation(GA):
 
     def _get_list_for_simulation(self):
         return [self.population.configuration]
+    
+    def finalize(self):
+        self._generator = None
+        super().finalize()
     
     
     
@@ -1152,3 +1156,5 @@ class Orchestrator(kgs.BaseClass):
 
             if kgs.debugging_mode>=2:
                 self.check_constraints()
+        
+        self.ga.finalize()
