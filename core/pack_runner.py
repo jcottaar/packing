@@ -109,7 +109,7 @@ def baseline_runner(fast_mode=False):
     res = Runner()
     res.label = 'Baseline'
 
-    res.modifier_dict['n_generations'] = pm(5, lambda r:r.integers(5,11).item(), set_ga_prop)
+    res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,301).item(), set_ga_prop)
 
     res.base_ga.ga = pack_ga2.GASinglePopulationOld()
     
@@ -120,6 +120,7 @@ def baseline_runner(fast_mode=False):
         runner.ga.population_size = 100
         runner.ga.selection_size = [1,2,5,10]
         runner.ga.do_legalize = False
+        res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(5,6).item(), set_ga_prop)
 
     return res
 

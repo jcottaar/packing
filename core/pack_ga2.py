@@ -917,7 +917,7 @@ class GASinglePopulation(GA):
     population_size:int = field(init=True, default=4000) 
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     move: Move = field(init=True, default=None)
-    fixed_h: float = field(init=True, default=None)
+    fixed_h: float = field(init=True, default=0.605576)
     reduce_h_threshold: float = field(init=True, default=1e-4)
     reduce_h_amount: float = field(init=True, default=2e-3)
 
@@ -954,13 +954,13 @@ class GASinglePopulation(GA):
         self._generator = cp.random.default_rng(seed=self.seed)
         self.initializer.seed = 200*self.seed + self.N_trees_to_do # backwards compatibility        
         if self.fixed_h is not None:
-            self.initializer.fixed_h = cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp)
+            self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
             self.initializer.base_solution.use_fixed_h = True
         self.population = self.initializer.initialize_population(self.population_size, self.N_trees_to_do)
-        if self.fixed_h is not None:
-            self.population.configuration.use_fixed_h = True
-            self.population.configuration.h = cp.tile(cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp), (self.population.configuration.N_solutions, 1))  
-            self.population.configuration.snap()
+        #if self.fixed_h is not None:
+            #self.population.configuration.use_fixed_h = True
+            #self.population.configuration.h = cp.tile(cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp), (self.population.configuration.N_solutions, 1))  
+            #self.population.configuration.snap()
             #self.fitness_cost.costs.pop(0) # remove area cost if fixed h        
         self.population.check_constraints()
         self.best_costs_per_generation = [[]]
