@@ -244,7 +244,7 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['no_jiggle'] = pm(False, lambda  r:r.choice([True]), set_no_jiggle)
     #res.modifier_dict['bfgs_for_rough'] = pm(False, lambda r:r.choice([True]), set_rough_bfgs)
     #res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:0.3, scale_rough_iterations)
-    res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:np.uniform(1.,1.5), scale_fine_iterations)
+    res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(1.,1.5), scale_fine_iterations)
     #res.modifier_dict['rough_steps'] = pm(1, lambda r:r.choice([1]), set_number_of_rough_steps)
     res.modifier_dict['fine_steps'] = pm(4, lambda r:r.choice([3,4]), set_number_of_fine_steps)
     #res.modifier_dict['JiggleClusterSmallMaxN'] = pm(5, lambda r:20, set_JiggleClusterSmallMaxN)
@@ -258,10 +258,72 @@ def baseline_runner(fast_mode=False):
 
     res.modifier_dict['set_used_fixed_h'] = pm(False, lambda r:r.choice([False]), set_used_fixed_h)
     res.modifier_dict['set_cost0_scaling'] = pm(0.01, lambda r:10**r.uniform(-3.,-2.), set_cost0_scaling)
-    res.modifier_dict['n_generations'] = pm(300, lambda r:r.integers(200,301), set_ga_prop)
+    res.modifier_dict['n_generations'] = pm(300, lambda r:r.integers(200,301).item(), set_ga_prop)
     # res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.77,3.84), set_fixed_h)
     # res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:10**r.uniform(-5,-4), set_ga_prop)
     # res.modifier_dict['reduce_h_amount'] = pm(1e-3, lambda r:r.uniform(1e-3, 2e-3), set_ga_prop)
+    
+    #res.modifier_dict['set_h_schedule'] = pm(0., lambda r:r.uniform(0,0.15), set_h_schedule)
+    # # Add modifiers to disable each move with 20% probability
+    # # Get move names from base_ga
+    # for move_item in res.base_ga.move.moves:
+    #     move_name = move_item[1]  # Extract move name
+    #     res.modifier_dict[f'disable_{move_name}'] = pm(
+    #         False,
+    #         lambda r: r.uniform() < 0.2,  # 20% chance to disable
+    #         disable_move
+    #     )
+
+    # del res.modifier_dict['disable_JiggleTreeSmall']
+
+    runner = res.base_ga
+    runner.n_generations = 300
+
+    # runner.fine_relaxers[0] = pack_dynamics.OptimizerBFGS()
+    # runner.fine_relaxers[0].cost = pack_ga.GA().fine_relaxers[0].cost
+    # runner.fine_relaxers[0].track_cost = False
+    # runner.fine_relaxers[0].plot_cost = False  
+    # runner.fine_relaxers.append(copy.deepcopy(runner.fine_relaxers[0]))
+    # runner.fine_relaxers[1].max_step = 1e-3
+    # runner.fine_relaxers.append(copy.deepcopy(runner.fine_relaxers[0]))
+    # runner.fine_relaxers[2].max_step = 1e-4
+    # runner.fine_relaxers[0].use_line_search = False
+    if fast_mode:         
+        runner.n_generations = 5
+        runner.population_size = 100
+        runner.selection_size = [1,2,5,10]
+
+    return res
+
+
+def baseline_runner_fixed_h(fast_mode=False):
+    """Baseline configuration with no modifications"""
+    res = Runner()
+    res.label = 'Baseline fixed h'
+    
+    #res.modifier_dict['scale_population'] = pm(1., lambda r:4., scale_population_size)
+    #res.modifier_dict['genetic_diversity'] = pm(True, lambda r:r.choice([True]), set_genetic_diversity)
+    #res.modifier_dict['alt_diversity'] = pm(False, lambda r:r.choice([False]), set_alt_diversity)
+    #res.modifier_dict['no_jiggle'] = pm(False, lambda  r:r.choice([True]), set_no_jiggle)
+    #res.modifier_dict['bfgs_for_rough'] = pm(False, lambda r:r.choice([True]), set_rough_bfgs)
+    #res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:0.3, scale_rough_iterations)
+    res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(1.,1.5), scale_fine_iterations)
+    #res.modifier_dict['rough_steps'] = pm(1, lambda r:r.choice([1]), set_number_of_rough_steps)
+    res.modifier_dict['fine_steps'] = pm(4, lambda r:r.integers(2,4), set_number_of_fine_steps)
+    #res.modifier_dict['JiggleClusterSmallMaxN'] = pm(5, lambda r:20, set_JiggleClusterSmallMaxN)
+    #res.modifier_dict['JiggleClusterBigMaxN'] = pm(5, lambda r:20, set_JiggleClusterBigMaxN)
+    #res.modifier_dict['TwistMinRadius'] = pm(0., lambda r:0.5, set_TwistMinRadius)
+    #res.modifier_dict['TwistMaxRadius'] = pm(0., lambda r:2., set_TwistMaxRadius)
+    #res.modifier_dict['CrossoverMaxNtrees'] = pm(20, lambda r:20, set_CrossoverMaxNtrees)
+    #res.modifier_dict['CrossoverSimpleMate'] = pm(False, lambda r:False, set_CrossoverSimpleMate)
+    #res.modifier_dict['CrossoverP'] = pm(0.4, lambda r:3., set_CrossoverP)
+    #res.modifier_dict['disable_init'] = pm(False, lambda r:r.choice([False,True]), disable_init)
+
+    res.modifier_dict['set_used_fixed_h'] = pm(False, lambda r:r.choice([True]), set_used_fixed_h)
+    res.modifier_dict['n_generations'] = pm(300, lambda r:r.integers(200,301).item(), set_ga_prop)
+    res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.8,3.86), set_fixed_h)
+    res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:max(0.,r.uniform(-5e-6,1e-5)), set_ga_prop)
+    res.modifier_dict['reduce_h_amount'] = pm(1e-3, lambda r:r.uniform(2e-3, 4e-3), set_ga_prop)
     
     #res.modifier_dict['set_h_schedule'] = pm(0., lambda r:r.uniform(0,0.15), set_h_schedule)
     # # Add modifiers to disable each move with 20% probability
