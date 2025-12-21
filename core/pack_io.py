@@ -45,13 +45,15 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
         optimizer.n_iterations = np.round(200*move_factor).astype(int)
         print("After optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
         if cost_overlap.compute_cost_allocate(solx)[0].get().item()<1e-10:
-                break   
-    if not cost_overlap.compute_cost_allocate(solx)[0].get().item()<1e-10:
+            break   
+    try:
+        solution_list_to_dataframe([solx], compact=False)
+        return solx
+    except:
         if tolerance_rel_change==0.:
             raise Exception('Could not legalize solution')
         else:
             return legalize(solx, do_plot=do_plot, move_factor=move_factor, tolerance_rel_change=0., stop_on_cost_increase=stop_on_cost_increase)
-    return solx
 
 
 def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1.):
