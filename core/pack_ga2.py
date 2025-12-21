@@ -337,7 +337,7 @@ class NoOp(Move):
 @dataclass
 class MoveSelector(Move):
     moves: list = field(init=True, default_factory=list) # each move is [Move, name, weight]
-    _probabilities: np.ndarray = field(init=False, default=None)
+    _probabilities: cp.ndarray = field(init=False, default=None)
 
     def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
@@ -790,13 +790,19 @@ class Crossover(Move):
 class GA(kgs.BaseClass):
     # Abstract superclass for GA algorithms
     seed: int = field(init=True, default=42)    
-    fitness_cost: pack_cost.Cost = field(init=True, default=None)       
+    fitness_cost: pack_cost.Cost = field(init=True, default=None)     
+
+    champions: list = field(init=True, default=None)
+    best_costs_per_generation: list = field(init=True, default_factory=list)  
 
     def _check_constraints(self):
-        super()._check_constraints
-        self.fitness_cost.check_constraints()
-        if self.champion is not None:
-            self.champion.check_constraints()
+        super()._check_constraints()
+        if self.fitness_cost is not None:
+            self.fitness_cost.check_constraints()
+        if self.champions is not None:
+            for champion in self.champions:
+                champion.check_constraints()
+            assert(len(self.champions) == len(self.best_costs_per_generation))            
 
     def initialize(self):
         self.check_constraints(debugging_mode_offset=2)        
@@ -804,7 +810,9 @@ class GA(kgs.BaseClass):
         self._initialize()
 
     def score(self, register_best=False):
-        return self._score(register_best)
+        self._score(register_best)
+        if register_best:
+            assert(len(self.champions) == len(self.best_costs_per_generation))            
 
     def generate_offspring(self):
         return self._generate_offspring()
@@ -827,9 +835,7 @@ class GASinglePopulation(GA):
     move: Move = field(init=True, default=None)
 
     # Results
-    population: Population = field(init=True, default=None)
-    champion: Population = field(init=True, default=None)
-    best_cost_per_generation: list = field(init=True, default_factory=list)
+    population: Population = field(init=True, default=None)    
 
     # Internal
     _generator: cp.random.Generator = field(init=False, default=None)
@@ -853,6 +859,8 @@ class GASinglePopulation(GA):
     def _check_constraints(self):
         self.initializer.check_constraints()
         self.move.check_constraints()
+        if self.population is not None:
+            self.population.check_constraints()
         super()._check_constraints()
 
     def _initialize(self):
@@ -860,17 +868,17 @@ class GASinglePopulation(GA):
         self.initializer.seed = 200*self.seed + self.N_trees_to_do # backwards compatibility
         self.population = self.initializer.initialize_population(self.population_size, self.N_trees_to_do)
         self.population.check_constraints()
-        self.best_cost_per_generation = []       
+        self.best_costs_per_generation = [[]]
 
     def _score(self, register_best):
         self.population.fitness = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
         if register_best:
             best_idx = np.argmin(self.population.fitness)
             best_cost = self.population.fitness[best_idx]
-            self.best_cost_per_generation.append(best_cost)
-            if self.champion is None or best_cost < self.champion.fitness[0]:
-                self.champion = copy.deepcopy(self.population)
-                self.champion.select_ids([best_idx])
+            self.best_costs_per_generation[0].append(best_cost)
+            if self.champions is None or best_cost < self.champions[0].fitness[0]:
+                self.champions = [copy.deepcopy(self.population)]
+                self.champions[0].select_ids([best_idx])
 
     def _get_list_for_simulation(self):
         return [self.population.configuration]
@@ -1008,6 +1016,7 @@ class Orchestrator(kgs.BaseClass):
 
     def _check_constraints(self):        
         self.fitness_cost.check_constraints()
+        self.ga.check_constraints()
         return super()._check_constraints()
     
     def run(self):
@@ -1026,4 +1035,9 @@ class Orchestrator(kgs.BaseClass):
                 self.ga.merge_offspring(offspring_list)
             
             self.ga.score(register_best=True)
+            for s in self.ga.best_costs_per_generation:
+                assert len(s) == self._current_generation + 1
             self.ga.apply_selection()
+
+            if kgs.debugging_mode>=2:
+                self.check_constraints()
