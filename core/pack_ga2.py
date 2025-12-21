@@ -903,9 +903,12 @@ class GA(kgs.BaseClass):
         self._apply_selection()
 
     def finalize(self):
-        if do_legalize:
+        if self.do_legalize:
             for champion in self.champions:
                 champion.configuration = pack_io.legalize(champion.configuration)
+    
+    def abbreviate(self):
+        pass
 
 @dataclass
 class GASinglePopulation(GA):
@@ -914,9 +917,9 @@ class GASinglePopulation(GA):
     population_size:int = field(init=True, default=4000) 
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     move: Move = field(init=True, default=None)
-    fixed_h: float = field(init=True, default=None)
-    reduce_h_threshold: float = field(init=True, default=-1.)
-    reduce_h_amount: float = field(init=True, default=0.001)
+    fixed_h: float = field(init=True, default=0.605576)
+    reduce_h_threshold: float = field(init=True, default=1e-4)
+    reduce_h_amount: float = field(init=True, default=2e-3)
 
     # Results
     population: Population = field(init=True, default=None)    
@@ -951,13 +954,13 @@ class GASinglePopulation(GA):
         self._generator = cp.random.default_rng(seed=self.seed)
         self.initializer.seed = 200*self.seed + self.N_trees_to_do # backwards compatibility        
         if self.fixed_h is not None:
-            self.initializer.fixed_h = cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp)
+            self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
             self.initializer.base_solution.use_fixed_h = True
         self.population = self.initializer.initialize_population(self.population_size, self.N_trees_to_do)
-        if self.fixed_h is not None:
-            self.population.configuration.use_fixed_h = True
-            self.population.configuration.h = cp.tile(cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp), (self.population.configuration.N_solutions, 1))  
-            self.population.configuration.snap()
+        #if self.fixed_h is not None:
+            #self.population.configuration.use_fixed_h = True
+            #self.population.configuration.h = cp.tile(cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp), (self.population.configuration.N_solutions, 1))  
+            #self.population.configuration.snap()
             #self.fitness_cost.costs.pop(0) # remove area cost if fixed h        
         self.population.check_constraints()
         self.best_costs_per_generation = [[]]
@@ -988,6 +991,14 @@ class GASinglePopulation(GA):
 
     def _get_list_for_simulation(self):
         return [self.population.configuration]
+    
+    def finalize(self):
+        self._generator = None
+        super().finalize()
+
+    def abbreviate(self):
+        super().abbreviate()
+        self.population = None
     
     
     
@@ -1105,12 +1116,12 @@ class Orchestrator(kgs.BaseClass):
         relaxer.n_iterations = 30
         relaxer.max_step = 1e-3
         self.fine_relaxers.append(relaxer)
-        relaxer = pack_dynamics.OptimizerBFGS()
-        relaxer.cost = copy.deepcopy(self.fitness_cost)
-        relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
-        relaxer.n_iterations = 30
-        relaxer.max_step = 1e-4 * np.sqrt(10)
-        self.fine_relaxers.append(relaxer)
+        # relaxer = pack_dynamics.OptimizerBFGS()
+        # relaxer.cost = copy.deepcopy(self.fitness_cost)
+        # relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        # relaxer.n_iterations = 30
+        # relaxer.max_step = 1e-4 * np.sqrt(10)
+        # self.fine_relaxers.append(relaxer)
 
         super().__post_init__()
 
@@ -1152,3 +1163,5 @@ class Orchestrator(kgs.BaseClass):
 
             if kgs.debugging_mode>=2:
                 self.check_constraints()
+        
+        self.ga.finalize()
