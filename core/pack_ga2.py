@@ -918,7 +918,7 @@ class GASinglePopulation(GA):
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     move: Move = field(init=True, default=None)
     fixed_h: float = field(init=True, default=0.605576)
-    reduce_h_threshold: float = field(init=True, default=1e-4)
+    reduce_h_threshold: float = field(init=True, default=1e-5)
     reduce_h_amount: float = field(init=True, default=2e-3)
 
     # Results
