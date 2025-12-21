@@ -232,6 +232,7 @@ class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
+    fixed_h = None
 
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
@@ -241,7 +242,7 @@ class InitializerRandomJiggled(Initializer):
         xyt = cp.array(xyt, dtype=kgs.dtype_np)    
         sol = copy.deepcopy(self.base_solution)
         sol.xyt = xyt   
-        if not sol.use_fixed_h: 
+        if self.fixed_h is None:
             if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
                 sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
             elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
@@ -253,7 +254,7 @@ class InitializerRandomJiggled(Initializer):
                 assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
                 sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)     
         else:
-            sol.h = cp.tile(sol.fixed_h[cp.newaxis, :], (N_individuals, 1))          
+            sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))          
         # NN=10
         # global ax
         # _,ax =  plt.subplots(NN,3,figsize=(24,8*NN))
@@ -957,12 +958,10 @@ class GA(kgs.BaseClass):
                     # Update h according to schedule
                     h_val = self.h_schedule[i_gen]
                     self.populations[i_N_trees].configuration.h[:, 0] = cp.array([h_val]*self.populations[i_N_trees].configuration.N_solutions, dtype=kgs.dtype_np)
-                    self.populations[i_N_trees].configuration.fixed_h[0] = h_val
                     self.populations[i_N_trees].fitness = self._score(self.populations[i_N_trees].configuration)
                 if np.min(self.populations[i_N_trees].fitness)<self.reduce_h_threshold:
                     # Reduce h if below threshold
                     self.populations[i_N_trees].configuration.h[:, 0] -= self.reduce_h_amount
-                    self.populations[i_N_trees].configuration.fixed_h[0] -= self.reduce_h_amount
                     self.populations[i_N_trees].fitness = self._score(self.populations[i_N_trees].configuration)
 
 

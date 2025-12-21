@@ -413,7 +413,6 @@ class SolutionCollection(BaseClass):
     xyt: cp.ndarray = field(default=None)  # (N,3) array of tree positions and angles
     h: cp.ndarray = field(default=None)      # (N,_N_h_DOF) array
     use_fixed_h: bool = field(default=False)
-    fixed_h: cp.ndarray = field(default=None)
     periodic: bool = field(default=False)  # whether to use periodic boundaries
 
     _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
@@ -421,9 +420,6 @@ class SolutionCollection(BaseClass):
     def _check_constraints(self):
         if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
             raise ValueError("Solution: xyt must be an array with shape (N_solutions, N_trees, 3)")
-        if self.use_fixed_h:
-            assert(self.fixed_h.shape == (self._N_h_DOF,))
-            assert(cp.all(self.h == self.fixed_h))
         assert self.h.shape == (self.xyt.shape[0],self._N_h_DOF)
 
     # add N_solutions and N_trees properties
@@ -494,7 +490,7 @@ class SolutionCollection(BaseClass):
     def create_empty(self, N_solutions: int, N_trees: int):
         xyt = cp.zeros((N_solutions, N_trees, 3), dtype=dtype_cp)
         h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
-        return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, fixed_h=self.fixed_h, periodic=self.periodic)
+        return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, periodic=self.periodic)
     # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
     
 

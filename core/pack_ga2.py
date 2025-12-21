@@ -18,8 +18,6 @@ from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 
 
-print('stop final relax at some point')
-
 
 
 def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
@@ -232,6 +230,7 @@ class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
+    fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array
 
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
@@ -241,7 +240,7 @@ class InitializerRandomJiggled(Initializer):
         xyt = cp.array(xyt, dtype=kgs.dtype_np)    
         sol = copy.deepcopy(self.base_solution)
         sol.xyt = xyt   
-        if not sol.use_fixed_h: 
+        if self.fixed_h is None:
             if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
                 sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
             elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
@@ -253,7 +252,7 @@ class InitializerRandomJiggled(Initializer):
                 assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
                 sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)     
         else:
-            sol.h = cp.tile(sol.fixed_h[cp.newaxis, :], (N_individuals, 1))          
+            sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
         # NN=10
         # global ax
         # _,ax =  plt.subplots(NN,3,figsize=(24,8*NN))
@@ -833,6 +832,9 @@ class GASinglePopulation(GA):
     population_size:int = field(init=True, default=4000) 
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     move: Move = field(init=True, default=None)
+    fixed_h: float = field(init=True, default=None)
+    reduce_h_threshold: float = field(init=True, default=-1.)
+    reduce_h_amount: float = field(init=True, default=0.001)
 
     # Results
     population: Population = field(init=True, default=None)    
@@ -865,13 +867,25 @@ class GASinglePopulation(GA):
 
     def _initialize(self):
         self._generator = cp.random.default_rng(seed=self.seed)
-        self.initializer.seed = 200*self.seed + self.N_trees_to_do # backwards compatibility
+        self.initializer.seed = 200*self.seed + self.N_trees_to_do # backwards compatibility        
+        if self.fixed_h is not None:
+            self.initializer.fixed_h = cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp)
+            self.initializer.base_solution.use_fixed_h = True
         self.population = self.initializer.initialize_population(self.population_size, self.N_trees_to_do)
+        if self.fixed_h is not None:
+            self.population.configuration.use_fixed_h = True
+            self.population.configuration.h = cp.tile(cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp), (self.population.configuration.N_solutions, 1))  
+            self.population.configuration.snap()
+            #self.fitness_cost.costs.pop(0) # remove area cost if fixed h        
         self.population.check_constraints()
         self.best_costs_per_generation = [[]]
 
     def _score(self, register_best):
         self.population.fitness = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
+        if np.min(self.population.fitness)<self.reduce_h_threshold:
+            # Reduce h if below threshold
+            self.population.configuration.h[:, 0] -= self.reduce_h_amount
+            self.population.fitness = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
         if register_best:
             best_idx = np.argmin(self.population.fitness)
             best_cost = self.population.fitness[best_idx]
@@ -961,6 +975,7 @@ class Orchestrator(kgs.BaseClass):
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
     n_generations: int = field(init=True, default=200)
+    seed: int = field(init=True, default=42)
 
     # Intermediate
     _current_generation: int = field(init=False, default=0)
@@ -1022,6 +1037,7 @@ class Orchestrator(kgs.BaseClass):
     def run(self):
         self.check_constraints(debugging_mode_offset=2)
         self.ga.fitness_cost = self.fitness_cost
+        self.ga.seed = self.seed
 
         # Initialize
         self.ga.initialize()
@@ -1035,6 +1051,7 @@ class Orchestrator(kgs.BaseClass):
                 self.ga.merge_offspring(offspring_list)
             
             self.ga.score(register_best=True)
+            print(f'Generation {i_gen}: Best costs = {[s[-1].item() for s in self.ga.best_costs_per_generation]}')
             for s in self.ga.best_costs_per_generation:
                 assert len(s) == self._current_generation + 1
             self.ga.apply_selection()
