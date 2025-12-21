@@ -568,3 +568,85 @@ class OptimizerGraph(Optimizer):
         self.last_graph_exec_time = (t1 - t0)
 
         return sol
+    
+
+    # ...existing code...
+
+def run_simulation_list(simulator, solution_list):
+    """
+    Run simulations on a list of SolutionCollection objects efficiently by grouping
+    solutions with the same number of trees.
+    
+    Args:
+        simulator: Any class with a run_simulation(sol: kgs.SolutionCollection) method
+        solution_list: List of kgs.SolutionCollection objects (all same subclass)
+    
+    The function:
+    1. Groups solutions by N_trees
+    2. Merges each group into a single SolutionCollection (verifying compatibility)
+    3. Runs simulation once per merged group
+    4. Scatters results back to original solutions (modifies in-place)
+    """
+    if len(solution_list) == 0:
+        return
+    
+    # Group solutions by N_trees
+    from collections import defaultdict
+    groups = defaultdict(list)
+    
+    for sol in solution_list:
+        N_trees = sol.xyt.shape[1]
+        groups[N_trees].append(sol)
+    
+    # Process each group
+    for N_trees, group_sols in groups.items():
+        if len(group_sols) == 1:
+            # Single solution - just run directly and continue
+            result = simulator.run_simulation(group_sols[0])
+            group_sols[0].xyt[:] = result.xyt
+            group_sols[0].h[:] = result.h
+            continue
+        
+        # Verify compatibility if debugging
+        if kgs.debugging_mode >= 2:
+            # Check all solutions are same subclass
+            first_type = type(group_sols[0])
+            for sol in group_sols[1:]:
+                if type(sol) != first_type:
+                    raise ValueError(f"Solution type mismatch in group: {first_type} vs {type(sol)}")
+            
+            # Check all properties except xyt and h match
+            first_sol = group_sols[0]
+            for i, sol in enumerate(group_sols[1:], 1):
+                # Make copies and exclude xyt and h for comparison
+                first_sol_copy = copy.deepcopy(first_sol)
+                sol_copy = copy.deepcopy(sol)
+                
+                first_sol_copy.xyt = None
+                first_sol_copy.h = None
+                sol_copy.xyt = None
+                sol_copy.h = None
+                
+                # Compare the copies
+                if first_sol_copy != sol_copy:
+                    raise ValueError(f"Solution {i} properties mismatch with first solution (excluding xyt and h)")
+        
+        # Merge: stack xyt and h along N_solutions dimension
+        merged_xyt = cp.concatenate([sol.xyt for sol in group_sols], axis=0)
+        merged_h = cp.concatenate([sol.h for sol in group_sols], axis=0)
+        
+        # Create merged solution using first solution as template
+        merged_sol = copy.deepcopy(group_sols[0])
+        merged_sol.xyt = merged_xyt
+        merged_sol.h = merged_h
+        
+        # Run simulation on merged solution
+        result = simulator.run_simulation(merged_sol)
+        
+        # Scatter results back to original solutions
+        start_idx = 0
+        for sol in group_sols:
+            N_sol = sol.xyt.shape[0]
+            sol.xyt[:] = result.xyt[start_idx:start_idx + N_sol]
+            sol.h[:] = result.h[start_idx:start_idx + N_sol]
+            start_idx += N_sol

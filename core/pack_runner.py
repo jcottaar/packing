@@ -322,7 +322,7 @@ def baseline_runner_fixed_h(fast_mode=False):
     res.modifier_dict['set_used_fixed_h'] = pm(False, lambda r:r.choice([True]), set_used_fixed_h)
     res.modifier_dict['n_generations'] = pm(300, lambda r:r.integers(200,301).item(), set_ga_prop)
     res.modifier_dict['set_fixed_h'] = pm(3.7, lambda r:r.uniform(3.8,3.86), set_fixed_h)
-    res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:max(0.,r.uniform(-5e-6,1e-5)), set_ga_prop)
+    res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:max(1e-9,r.uniform(-5e-6,1e-5)), set_ga_prop)
     res.modifier_dict['reduce_h_amount'] = pm(1e-3, lambda r:r.uniform(2e-3, 4e-3), set_ga_prop)
     
     #res.modifier_dict['set_h_schedule'] = pm(0., lambda r:r.uniform(0,0.15), set_h_schedule)
