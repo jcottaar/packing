@@ -27,13 +27,14 @@ def run_all_tests(regenerate_reference=False):
 
 def test_ga(regenerate_reference):
     runner = pack_runner.baseline_runner(fast_mode=False)
-    runner.use_missing_value = False
+    runner.use_missing_value = True
     runner.base_ga.n_generations = 2
     runner.base_ga.N_trees_to_do = np.array([10])
     runner.base_ga.initializer.base_solution.use_fixed_h = False
     runner.base_ga.do_legalize = False
-    runner.modifier_dict = dict()
-    runner.modifier_dict['scale_population_size'] = pack_runner.pm(1., lambda r:0.25, pack_runner.scale_population_size)
+    #runner.modifier_dict = dict()
+    runner.modifier_dict['scale_population_size'] = pack_runner.pm(0.25, lambda r:0.25, pack_runner.scale_population_size)
+    runner.modifier_dict['n_generations'] = pack_runner.pm(3, lambda r:3, pack_runner.set_ga_prop)
     runner.run()
     if regenerate_reference:
         kgs.dill_save(kgs.code_dir + 'ref_ga.pickle', runner.result_ga.populations[-1].fitness)
