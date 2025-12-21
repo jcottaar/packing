@@ -906,6 +906,9 @@ class GA(kgs.BaseClass):
         if self.do_legalize:
             for champion in self.champions:
                 champion.configuration = pack_io.legalize(champion.configuration)
+    
+    def abbreviate(self):
+        pass
 
 @dataclass
 class GASinglePopulation(GA):
@@ -915,8 +918,8 @@ class GASinglePopulation(GA):
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     move: Move = field(init=True, default=None)
     fixed_h: float = field(init=True, default=None)
-    reduce_h_threshold: float = field(init=True, default=-1.)
-    reduce_h_amount: float = field(init=True, default=0.001)
+    reduce_h_threshold: float = field(init=True, default=1e-4)
+    reduce_h_amount: float = field(init=True, default=2e-3)
 
     # Results
     population: Population = field(init=True, default=None)    
@@ -992,6 +995,10 @@ class GASinglePopulation(GA):
     def finalize(self):
         self._generator = None
         super().finalize()
+
+    def abbreviate(self):
+        super().abbreviate()
+        self.population = None
     
     
     
@@ -1109,12 +1116,12 @@ class Orchestrator(kgs.BaseClass):
         relaxer.n_iterations = 30
         relaxer.max_step = 1e-3
         self.fine_relaxers.append(relaxer)
-        relaxer = pack_dynamics.OptimizerBFGS()
-        relaxer.cost = copy.deepcopy(self.fitness_cost)
-        relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
-        relaxer.n_iterations = 30
-        relaxer.max_step = 1e-4 * np.sqrt(10)
-        self.fine_relaxers.append(relaxer)
+        # relaxer = pack_dynamics.OptimizerBFGS()
+        # relaxer.cost = copy.deepcopy(self.fitness_cost)
+        # relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        # relaxer.n_iterations = 30
+        # relaxer.max_step = 1e-4 * np.sqrt(10)
+        # self.fine_relaxers.append(relaxer)
 
         super().__post_init__()
 
