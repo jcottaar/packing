@@ -93,10 +93,15 @@ class PropertyModifier:
 # ============================================================
 
 
-def set_ga_prop(ga, name, value):
+def set_orchestrator_prop(ga, name, value):
     """Generic setter for GA properties - sets ga.{name} = value"""
     # Handle special case where modifier name differs from property name
     setattr(ga, name, value)
+
+def set_ga_prop(ga, name, value):
+    """Generic setter for GA properties - sets ga.{name} = value"""
+    # Handle special case where modifier name differs from property name
+    setattr(ga.ga, name, value)
 
 
 
@@ -109,7 +114,8 @@ def baseline_runner(fast_mode=False):
     res = Runner()
     res.label = 'Baseline'
 
-    res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,301).item(), set_ga_prop)
+    res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,301).item(), set_orchestrator_prop)
+    res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
 
     res.base_ga.ga = pack_ga2.GASinglePopulationOld()
     
@@ -120,7 +126,7 @@ def baseline_runner(fast_mode=False):
         runner.ga.population_size = 100
         runner.ga.selection_size = [1,2,5,10]
         runner.ga.do_legalize = False
-        res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(5,6).item(), set_ga_prop)
+        res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(5,6).item(), set_orchestrator_prop)
 
     return res
 

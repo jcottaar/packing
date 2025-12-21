@@ -920,6 +920,7 @@ class GASinglePopulation(GA):
     fixed_h: float = field(init=True, default=0.605576)
     reduce_h_threshold: float = field(init=True, default=1e-5)
     reduce_h_amount: float = field(init=True, default=2e-3)
+    reduce_h_per_individual: bool = field(init=True, default=False)
 
     # Results
     population: Population = field(init=True, default=None)    
@@ -971,10 +972,17 @@ class GASinglePopulation(GA):
 
         
         if self.population.configuration.use_fixed_h:
-            if np.min(cost_values) < self.reduce_h_threshold:
-                # Reduce h if below threshold
-                self.population.configuration.h[:, 0] -= self.reduce_h_amount
-                cost_values = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()            
+            if not self.reduce_h_per_individual:
+                if np.min(cost_values) < self.reduce_h_threshold:
+                    # Reduce h if below threshold
+                    self.population.configuration.h[:, 0] -= self.reduce_h_amount
+                    cost_values = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()            
+            else:
+                # Reduce h per individual if below threshold
+                for i in range(self.population.configuration.N_solutions):
+                    if cost_values[i] < self.reduce_h_threshold:
+                        self.population.configuration.h[i, 0] -= self.reduce_h_amount
+                cost_values = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
             self.population.fitness = np.stack( (self.population.configuration.h[:,0].get(), cost_values)).T # Shape: (N_solutions, 2)
         else:
             self.population.fitness = cost_values.reshape((-1, 1))  # Shape: (N_solutions, 1)
@@ -1157,6 +1165,7 @@ class Orchestrator(kgs.BaseClass):
             # Format best costs as lists for display (max 6 decimals)
             best_costs_str = [[round(float(x), 6) for x in s[-1].flatten()] for s in self.ga.best_costs_per_generation]
             print(f'Generation {i_gen}: Best costs = {best_costs_str}')
+            print(self.ga.population.configuration.h)
             for s in self.ga.best_costs_per_generation:
                 assert len(s) == self._current_generation + 1
             self.ga.apply_selection()
