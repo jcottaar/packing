@@ -1123,7 +1123,7 @@ class Orchestrator(kgs.BaseClass):
         relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
         relaxer.n_iterations = 30
         relaxer.max_step = 1e-3
-        self.fine_relaxers.append(relaxer)
+        # self.fine_relaxers.append(relaxer)
         # relaxer = pack_dynamics.OptimizerBFGS()
         # relaxer.cost = copy.deepcopy(self.fitness_cost)
         # relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
@@ -1165,7 +1165,6 @@ class Orchestrator(kgs.BaseClass):
             # Format best costs as lists for display (max 6 decimals)
             best_costs_str = [[round(float(x), 6) for x in s[-1].flatten()] for s in self.ga.best_costs_per_generation]
             print(f'Generation {i_gen}: Best costs = {best_costs_str}')
-            print(self.ga.population.configuration.h)
             for s in self.ga.best_costs_per_generation:
                 assert len(s) == self._current_generation + 1
             self.ga.apply_selection()

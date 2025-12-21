@@ -114,8 +114,9 @@ def baseline_runner(fast_mode=False):
     res = Runner()
     res.label = 'Baseline'
 
-    res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,301).item(), set_orchestrator_prop)
+    res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,601).item(), set_orchestrator_prop)
     res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
+    res.modifier_dict['fixed_h'] = pm(0.605576, lambda r:r.uniform(0.6,0.618), set_ga_prop)
 
     res.base_ga.ga = pack_ga2.GASinglePopulationOld()
     
