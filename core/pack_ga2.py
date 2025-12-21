@@ -18,6 +18,80 @@ from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 
 
+# ============================================================
+# Fitness comparison utilities for tuple-based fitness
+# ============================================================
+
+def lexicographic_argmin(fitness_array: np.ndarray) -> int:
+    """Find index of minimum fitness value using lexicographic ordering.
+    
+    Parameters
+    ----------
+    fitness_array : np.ndarray
+        Shape (N_solutions, N_components) - fitness tuples for each solution
+        
+    Returns
+    -------
+    int
+        Index of the lexicographically smallest fitness tuple
+    """
+    # Use lexsort which sorts by last column first, so reverse the columns
+    if fitness_array.ndim == 1:
+        # Handle 1D case (single component)
+        return int(np.argmin(fitness_array))
+    
+    # Sort by all components in order (last column has highest priority in lexsort)
+    # We want first column to have highest priority, so reverse
+    sort_keys = [fitness_array[:, i] for i in range(fitness_array.shape[1] - 1, -1, -1)]
+    sorted_indices = np.lexsort(sort_keys)
+    return int(sorted_indices[0])
+
+
+def lexicographic_argsort(fitness_array: np.ndarray) -> np.ndarray:
+    """Sort fitness values using lexicographic ordering.
+    
+    Parameters
+    ----------
+    fitness_array : np.ndarray
+        Shape (N_solutions, N_components) - fitness tuples for each solution
+        
+    Returns
+    -------
+    np.ndarray
+        Indices that would sort the array lexicographically
+    """
+    if fitness_array.ndim == 1:
+        # Handle 1D case (single component)
+        return np.argsort(fitness_array)
+    
+    # Sort by all components in order (last column has highest priority in lexsort)
+    # We want first column to have highest priority, so reverse
+    sort_keys = [fitness_array[:, i] for i in range(fitness_array.shape[1] - 1, -1, -1)]
+    return np.lexsort(sort_keys)
+
+
+def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
+    """Compare two fitness tuples lexicographically.
+    
+    Parameters
+    ----------
+    fitness1, fitness2 : np.ndarray
+        Shape (N_components,) - fitness tuples to compare
+        
+    Returns
+    -------
+    bool
+        True if fitness1 < fitness2 lexicographically
+    """
+    fitness1 = np.atleast_1d(fitness1)
+    fitness2 = np.atleast_1d(fitness2)
+    
+    for f1, f2 in zip(fitness1, fitness2):
+        if f1 < f2:
+            return True
+        elif f1 > f2:
+            return False
+    return False  # Equal
 
 
 def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
@@ -149,8 +223,8 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
 @dataclass
 class Population(kgs.BaseClass):
     configuration: kgs.SolutionCollection = field(init=True, default=None)
-    fitness: np.ndarray = field(init=True, default=None)
-    parent_fitness: np.ndarray = field(init=True, default=None)
+    fitness: np.ndarray = field(init=True, default=None)  # Shape: (N_solutions, N_components)
+    parent_fitness: np.ndarray = field(init=True, default=None)  # Shape: (N_solutions, N_components)
     # lineages: list = field(init=True, default=None)
 
     # Lineages is a list of lists, each list gives the history for an individual. Each element is a move, itself a list:
@@ -163,13 +237,22 @@ class Population(kgs.BaseClass):
 
     def _check_constraints(self):
         self.configuration.check_constraints()
-        assert self.fitness.shape == (self.configuration.N_solutions,)
-        assert self.parent_fitness.shape == (self.configuration.N_solutions,)
+        assert self.fitness.shape[0] == self.configuration.N_solutions
+        assert self.fitness.ndim == 2  # Shape: (N_solutions, N_components)
+        assert self.parent_fitness.shape[0] == self.configuration.N_solutions
+        assert self.parent_fitness.ndim == 2  # Shape: (N_solutions, N_components)
         # assert len(self.lineages) == self.configuration.N_solutions
 
-    def set_dummy_fitness(self):
-        self.fitness = np.zeros(self.configuration.N_solutions)
-        self.parent_fitness = np.zeros(self.configuration.N_solutions)
+    def set_dummy_fitness(self, n_components=1):
+        """Initialize fitness arrays with zeros.
+        
+        Parameters
+        ----------
+        n_components : int, optional
+            Number of fitness components (default: 1)
+        """
+        self.fitness = np.zeros((self.configuration.N_solutions, n_components), dtype=kgs.dtype_np)
+        self.parent_fitness = np.zeros((self.configuration.N_solutions, n_components), dtype=kgs.dtype_np)
 
     def select_ids(self, inds):
         self.configuration.select_ids(inds)
@@ -180,8 +263,10 @@ class Population(kgs.BaseClass):
     def create_empty(self, N_individuals, N_trees):
         configuration = self.configuration.create_empty(N_individuals, N_trees)
         population = type(self)(configuration=configuration)
-        population.fitness = np.zeros(N_individuals, dtype=kgs.dtype_np)
-        population.parent_fitness = np.zeros(N_individuals, dtype=kgs.dtype_np)
+        # Initialize with same number of components as self
+        n_components = self.fitness.shape[1]
+        population.fitness = np.zeros((N_individuals, n_components), dtype=kgs.dtype_np)
+        population.parent_fitness = np.zeros((N_individuals, n_components), dtype=kgs.dtype_np)
         # population.lineages = [ None for _ in range(N_individuals) ]
         return population
 
@@ -253,18 +338,9 @@ class InitializerRandomJiggled(Initializer):
                 sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)     
         else:
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
-        # NN=10
-        # global ax
-        # _,ax =  plt.subplots(NN,3,figsize=(24,8*NN))
-        # for i in range(NN):
-        #     pack_vis_sol.pack_vis_sol(sol, solution_idx=i, ax=ax[i,0])
-        # sol.snap()
-        # for i in range(NN):
-        #     pack_vis_sol.pack_vis_sol(sol, solution_idx=i, ax=ax[i,1])
         sol = self.jiggler.run_simulation(sol)
         sol.snap()
         population = Population(configuration=sol)
-        # population.lineages = [ [['InitializerRandomJiggled', [np.inf, np.inf, np.inf, 0., 0., 0.]]] for i in range(N_individuals) ]
         return population
     
 
@@ -793,6 +869,7 @@ class GA(kgs.BaseClass):
 
     champions: list = field(init=True, default=None)
     best_costs_per_generation: list = field(init=True, default_factory=list)  
+    do_legalize: bool = field(init=True, default=True)
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -824,6 +901,11 @@ class GA(kgs.BaseClass):
            
     def apply_selection(self):
         self._apply_selection()
+
+    def finalize(self):
+        if do_legalize:
+            for champion in self.champions:
+                champion.configuration = pack_io.legalize(champion.configuration)
 
 @dataclass
 class GASinglePopulation(GA):
@@ -881,18 +963,28 @@ class GASinglePopulation(GA):
         self.best_costs_per_generation = [[]]
 
     def _score(self, register_best):
-        self.population.fitness = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
-        if np.min(self.population.fitness)<self.reduce_h_threshold:
-            # Reduce h if below threshold
-            self.population.configuration.h[:, 0] -= self.reduce_h_amount
-            self.population.fitness = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
+        # Compute cost and reshape to (N_solutions, 1) for tuple-based fitness
+        cost_values = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
+
+        
+        if self.population.configuration.use_fixed_h:
+            if np.min(cost_values) < self.reduce_h_threshold:
+                # Reduce h if below threshold
+                self.population.configuration.h[:, 0] -= self.reduce_h_amount
+                cost_values = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()            
+            self.population.fitness = np.stack( (self.population.configuration.h[:,0].get(), cost_values)).T # Shape: (N_solutions, 2)
+        else:
+            self.population.fitness = cost_values.reshape((-1, 1))  # Shape: (N_solutions, 1)
+        
         if register_best:
-            best_idx = np.argmin(self.population.fitness)
-            best_cost = self.population.fitness[best_idx]
+            best_idx = lexicographic_argmin(self.population.fitness)
+            best_cost = self.population.fitness[best_idx]  # Shape: (N_components,)
             self.best_costs_per_generation[0].append(best_cost)
-            if self.champions is None or best_cost < self.champions[0].fitness[0]:
+            if self.champions is None or lexicographic_less_than(best_cost, self.champions[0].fitness[0]):
                 self.champions = [copy.deepcopy(self.population)]
                 self.champions[0].select_ids([best_idx])
+
+        self.check_constraints()
 
     def _get_list_for_simulation(self):
         return [self.population.configuration]
@@ -908,7 +1000,7 @@ class GASinglePopulationOld(GASinglePopulation):
 
     def _apply_selection(self):
         current_pop = self.population
-        current_pop.select_ids(np.argsort(current_pop.fitness))  # Sort by fitness
+        current_pop.select_ids(lexicographic_argsort(current_pop.fitness))  # Sort by fitness lexicographically
         current_xyt = current_pop.configuration.xyt  # (N_individuals, N_trees, 3)
 
         max_sel = np.max(self.selection_size)
@@ -1051,7 +1143,9 @@ class Orchestrator(kgs.BaseClass):
                 self.ga.merge_offspring(offspring_list)
             
             self.ga.score(register_best=True)
-            print(f'Generation {i_gen}: Best costs = {[s[-1].item() for s in self.ga.best_costs_per_generation]}')
+            # Format best costs as lists for display (max 6 decimals)
+            best_costs_str = [[round(float(x), 6) for x in s[-1].flatten()] for s in self.ga.best_costs_per_generation]
+            print(f'Generation {i_gen}: Best costs = {best_costs_str}')
             for s in self.ga.best_costs_per_generation:
                 assert len(s) == self._current_generation + 1
             self.ga.apply_selection()
