@@ -920,7 +920,7 @@ class GASinglePopulation(GA):
     fixed_h: float = field(init=True, default=0.61)
     reduce_h_threshold: float = field(init=True, default=1e-5)
     reduce_h_amount: float = field(init=True, default=2e-3)
-    reduce_h_per_individual: bool = field(init=True, default=False)
+    reduce_h_per_individual: bool = field(init=True, default=True)
 
     # Results
     population: Population = field(init=True, default=None)    

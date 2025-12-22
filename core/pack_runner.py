@@ -103,6 +103,21 @@ def set_ga_prop(ga, name, value):
     # Handle special case where modifier name differs from property name
     setattr(ga.ga, name, value)
 
+def scale_population_size(ga, name, value):
+    """Scale population size by given factor"""
+    ga.ga.population_size = int(ga.ga.population_size * value)
+    ga.ga.selection_size = [int( (s-1) * value)+1 for s in ga.ga.selection_size]
+    # now make sure selection_size is unique, i.e. 1,2,2,3,3,4,4,5,20 must become 1,2,3,4,5,6,7,8,40
+    seen = set()
+    unique_selection = []
+    for s in ga.ga.selection_size:
+        while s in seen:
+            s += 1
+        seen.add(s)
+        unique_selection.append(s)
+    ga.ga.selection_size = unique_selection
+    print(ga.ga.selection_size)
+
 
 
 # ============================================================
@@ -114,9 +129,10 @@ def baseline_runner(fast_mode=False):
     res = Runner()
     res.label = 'Baseline'
 
-    res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,601).item(), set_orchestrator_prop)
-    res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
-    res.modifier_dict['fixed_h'] = pm(0.605576, lambda r:r.uniform(0.6,0.618), set_ga_prop)
+    #res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,601).item(), set_orchestrator_prop)
+    #res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
+    #res.modifier_dict['fixed_h'] = pm(0.605576, lambda r:r.uniform(0.6,0.618), set_ga_prop)
+    res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(0.125,1.), scale_population_size)
 
     res.base_ga.ga = pack_ga2.GASinglePopulationOld()
     
