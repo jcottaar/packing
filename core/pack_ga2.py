@@ -871,14 +871,19 @@ class GA(kgs.BaseClass):
     best_costs_per_generation: list = field(init=True, default_factory=list)  
     do_legalize: bool = field(init=True, default=True)
 
+    _cached_offspring = None
+
     def _check_constraints(self):
         super()._check_constraints()
         if self.fitness_cost is not None:
             self.fitness_cost.check_constraints()
         if self.champions is not None:
             for champion in self.champions:
+                assert(champion.configuration.N_solutions==1)
                 champion.check_constraints()
-            assert(len(self.champions) == len(self.best_costs_per_generation))            
+            assert(len(self.champions) == len(self.best_costs_per_generation))     
+            for champion, cost in zip(self.champions, self.best_costs_per_generation):
+                assert(np.all(cost[-1] == champion.fitness[0]))
 
     def initialize(self):
         self.check_constraints(debugging_mode_offset=2)        
@@ -891,24 +896,91 @@ class GA(kgs.BaseClass):
             assert(len(self.champions) == len(self.best_costs_per_generation))            
 
     def generate_offspring(self):
-        return self._generate_offspring()
+        res = self._generate_offspring()
+        self._cached_offspring = res
+        return res
     
-    def merge_offspring(self, offspring_list):
-        self._merge_offspring(offspring_list)
+    def merge_offspring(self):
+        self._merge_offspring()
 
-    def get_list_for_relaxation(self):
+    def get_list_for_simulation(self):
         return self._get_list_for_simulation()
            
     def apply_selection(self):
         self._apply_selection()
 
     def finalize(self):
+        self._finalize()
         if self.do_legalize:
             for champion in self.champions:
                 champion.configuration = pack_io.legalize(champion.configuration)
     
     def abbreviate(self):
-        pass
+        self._abbreviate()
+
+@dataclass
+class GAMulti(GA):
+    # Configuration    
+    ga_list: list = field(init=True, default=None)
+    single_champion: bool = field(init=True, default=True)
+
+    def _check_constraints(self):
+        super()._check_constraints()
+        if self.ga_list is not None:
+            self.ga_list[0].check_constraints()
+            if kgs.debugging_mode>=2:
+                for ga in self.ga_list:
+                    ga.check_constraints()
+    def _initialize(self):
+        for ga in self.ga_list:
+            ga.initialize()
+        assert self.single_champion
+        self.best_costs_per_generation = [[]]
+    def _score(self, register_best):
+        for ga in self.ga_list:
+            ga.score(register_best=register_best)
+        if register_best:
+            assert self.single_champion
+            if kgs.debugging_mode>=2:
+                for ga in self.ga_list:
+                    assert(len(ga.champions) == 1)
+            costs_per_ga = [ga.best_costs_per_generation[0][-1] for ga in self.ga_list]
+            best_ga_idx = np.argmin(costs_per_ga)
+            best_ga = self.ga_list[best_ga_idx]
+            self.champions = [best_ga.champions[0]]
+            self.best_costs_per_generation[0].append(best_ga.best_costs_per_generation[0][-1])
+    def _generate_offspring(self):
+        return sum([ga.generate_offspring() for ga in self.ga_list], [])
+    def _merge_offspring(self):
+        for ga in self.ga_list:
+            ga.merge_offspring()
+    def _get_list_for_simulation(self):
+        return sum([ga.get_list_for_simulation() for ga in self.ga_list], [])
+    def _apply_selection(self):
+        for ga in self.ga_list:
+            ga.apply_selection()
+    def _finalize(self):
+        for ga in self.ga_list:
+            ga.finalize()
+    def _abbreviate(self):
+        for ga in self.ga_list:
+            ga.abbreviate()
+
+@dataclass
+class GAMultiSimilar(GAMulti):
+    # Configuration
+    ga_base: GA = field(init=True, default=None)
+    N: int = field(init=True, default=4)
+
+    def _initialize(self):
+        self.ga_list = []
+        for i in range(self.N):
+            ga_copy = copy.deepcopy(self.ga_base)
+            ga_copy.seed = self.seed+i
+            ga_copy.fitness_cost = self.fitness_cost
+            ga_copy.initialize()
+            self.ga_list.append(ga_copy)     
+        super()._initialize()         
 
 @dataclass
 class GASinglePopulation(GA):
@@ -1000,12 +1072,10 @@ class GASinglePopulation(GA):
     def _get_list_for_simulation(self):
         return [self.population.configuration]
     
-    def finalize(self):
+    def _finalize(self):
         self._generator = None
-        super().finalize()
 
-    def abbreviate(self):
-        super().abbreviate()
+    def _abbreviate(self):
         self.population = None
     
     
@@ -1068,9 +1138,9 @@ class GASinglePopulationOld(GASinglePopulation):
 
         return [new_pop]
     
-    def _merge_offspring(self, offspring_list):
+    def _merge_offspring(self):
         old_pop = self.population
-        new_pop = offspring_list[0]
+        new_pop = self._cached_offspring[0]
 
         old_pop.merge(new_pop)
         self.population = old_pop
@@ -1152,14 +1222,14 @@ class Orchestrator(kgs.BaseClass):
 
         # Initialize
         self.ga.initialize()
-        self._relax(self.ga.get_list_for_relaxation())        
+        self._relax(self.ga.get_list_for_simulation())        
 
         for i_gen in range(self.n_generations):
             self._current_generation = i_gen
             if i_gen>0:
                 offspring_list = self.ga.generate_offspring()
                 self._relax([s.configuration for s in offspring_list])
-                self.ga.merge_offspring(offspring_list)
+                self.ga.merge_offspring()
             
             self.ga.score(register_best=True)
             # Format best costs as lists for display (max 6 decimals)
