@@ -107,6 +107,7 @@ def scale_population_size(ga, name, value):
     """Scale population size by given factor"""
     ga.ga.population_size = int(ga.ga.population_size * value)
     ga.ga.selection_size = [int( (s-1) * value)+1 for s in ga.ga.selection_size]
+    ga.n_generations = int(ga.n_generations / value)
     # now make sure selection_size is unique, i.e. 1,2,2,3,3,4,4,5,20 must become 1,2,3,4,5,6,7,8,40
     seen = set()
     unique_selection = []
