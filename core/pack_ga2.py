@@ -163,6 +163,9 @@ class GA(kgs.BaseClass):
     best_costs_per_generation: list = field(init=True, default_factory=list)  
     do_legalize: bool = field(init=True, default=True)
 
+    best_costs_per_generation_ax = None
+    champion_ax = None
+
     _cached_offspring = None
 
     def _check_constraints(self):
@@ -212,11 +215,39 @@ class GA(kgs.BaseClass):
     def abbreviate(self):
         self._abbreviate()
 
+    def diagnostic_plots(self, plot_ax):
+        if not self.best_costs_per_generation_ax is None:
+            for xx in self.best_costs_per_generation_ax:
+                ax = plot_ax[xx[2]]
+                ax.clear()
+                plt.sca(ax)
+                to_plot = np.array([ [y[xx[0]] for y in x] for x in self.best_costs_per_generation])
+                if xx[1]:
+                    to_plot=np.log(to_plot)/np.log(10)
+                plt.plot(to_plot.T)
+                plt.grid(True)
+                plt.xlabel('Generation')
+                plt.ylabel('Best Cost')
+        if not self.champion_ax is None:
+            ax = plot_ax[ self.champion_ax ]
+            plt.sca(ax)
+            if len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
+                ax.clear()
+                pack_vis_sol.pack_vis_sol(self.champions[0].configuration, ax=ax)
+        self._diagnostic_plots(plot_ax)
+    
+
+    def _diagnostic_plots(self, plot_ax):
+        pass
+    
+
 @dataclass
 class GAMulti(GA):
     # Configuration    
     ga_list: list = field(init=True, default=None)
     single_champion: bool = field(init=True, default=True)
+    plot_diversity_ax = None
+    plot_subpopulation_costs_per_generation_ax = None
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -238,11 +269,11 @@ class GAMulti(GA):
             if kgs.debugging_mode>=2:
                 for ga in self.ga_list:
                     assert(len(ga.champions) == 1)
-            costs_per_ga = [ga.best_costs_per_generation[0][-1] for ga in self.ga_list]
-            best_ga_idx = np.argmin(costs_per_ga)
+            costs_per_ga = np.array([ga.best_costs_per_generation[0][-1] for ga in self.ga_list])
+            best_ga_idx = kgs.lexicographic_argmin(costs_per_ga)
             best_ga = self.ga_list[best_ga_idx]
             self.champions = [best_ga.champions[0]]
-            self.best_costs_per_generation[0].append(best_ga.best_costs_per_generation[0][-1])
+            self.best_costs_per_generation[0].append(best_ga.champions[0].fitness[0])
     def _generate_offspring(self, mate_sol, mate_weights):
         return sum([ga.generate_offspring(mate_sol, mate_weights) for ga in self.ga_list], [])
     def _merge_offspring(self):
@@ -259,6 +290,42 @@ class GAMulti(GA):
     def _abbreviate(self):
         for ga in self.ga_list:
             ga.abbreviate()
+    def _diagnostic_plots(self, plot_ax):
+        if not self.plot_subpopulation_costs_per_generation_ax is None:
+            for xx in self.plot_subpopulation_costs_per_generation_ax:
+                ax = plot_ax[xx[2]]
+                ax.clear()
+                plt.sca(ax)
+                to_plot = np.array([ [y[xx[0]] for y in x.best_costs_per_generation[0]] for x in self.ga_list])
+                if xx[1]:
+                    to_plot=np.log(to_plot)/np.log(10)
+                im = plt.imshow(to_plot.T, aspect='auto', cmap='viridis', interpolation='none')
+                if not hasattr(ax, '_colorbar') or ax._colorbar is None:
+                    ax._colorbar = plt.colorbar(im, ax=ax, label='Best cost')
+                else:
+                    ax._colorbar.update_normal(im)
+                plt.xlabel('Subpopulation')
+                plt.ylabel('Generation')
+        if self.plot_diversity_ax is not None:
+            ax = plot_ax[self.plot_diversity_ax]
+            ax.clear()
+            plt.sca(ax)
+            champions_pop = copy.deepcopy(self.ga_list[0].champions[0].configuration)
+            for ga in self.ga_list[1:]:
+                champions_pop.merge(ga.champions[0].configuration)
+            # Compute diversity matrix
+            N_sols = champions_pop.N_solutions
+            diversity_matrix = np.zeros((N_sols, N_sols), dtype=kgs.dtype_np)
+            for i in range(N_sols):
+                diversity_matrix[:,i] = kgs.compute_genetic_diversity(cp.array(champions_pop.xyt), cp.array(champions_pop.xyt[i])).get()
+            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
+            if not hasattr(ax, '_colorbar') or ax._colorbar is None:
+                ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
+            else:
+                ax._colorbar.update_normal(im)
+            plt.title('Diversity Matrix Across GA Subpopulations')
+            plt.xlabel('Individual')
+            plt.ylabel('Individual')
 
 @dataclass
 class GAMultiSimilar(GAMulti):
@@ -276,7 +343,8 @@ class GAMultiSimilar(GAMulti):
             self.ga_list.append(ga_copy)     
         super()._initialize()    
 
-class GAMultiRing(GAMulti):
+@dataclass
+class GAMultiRing(GAMultiSimilar):
     # Configuration
     mate_distance: int = field(init=True, default=2)     
     def _generate_offspring(self, mate_sol, mate_weights):
@@ -295,7 +363,7 @@ class GAMultiRing(GAMulti):
                 populations_to_merge.append(self.ga_list[right_idx].population)
             
             # Merge all collected populations into a single solution collection
-            merged_sol = populations_to_merge[0].configuration
+            merged_sol = copy.deepcopy(populations_to_merge[0].configuration)
             for pop in populations_to_merge[1:]:
                 merged_sol.merge(pop.configuration)
             mate_weights = np.ones(merged_sol.N_solutions) / merged_sol.N_solutions
@@ -315,6 +383,8 @@ class GASinglePopulation(GA):
     reduce_h_threshold: float = field(init=True, default=1e-5)
     reduce_h_amount: float = field(init=True, default=2e-3)
     reduce_h_per_individual: bool = field(init=True, default=True)
+
+    plot_diversity_ax = None
 
     # Results
     population: Population = field(init=True, default=None)    
@@ -384,10 +454,12 @@ class GASinglePopulation(GA):
         if register_best:
             best_idx = kgs.lexicographic_argmin(self.population.fitness)
             best_cost = self.population.fitness[best_idx]  # Shape: (N_components,)
-            self.best_costs_per_generation[0].append(best_cost)
-            if self.champions is None or kgs.lexicographic_less_than(best_cost, self.champions[0].fitness[0]):
+            update_champion = self.champions is None or kgs.lexicographic_less_than(best_cost, self.champions[0].fitness[0])
+            if update_champion:
                 self.champions = [copy.deepcopy(self.population)]
-                self.champions[0].select_ids([best_idx])
+                self.champions[0].select_ids([best_idx])                
+            self.best_costs_per_generation[0].append(self.champions[0].fitness[0])
+            assert(np.all(self.champions[0].fitness[0]==self.best_costs_per_generation[0][-1]))
 
         self.check_constraints()
 
@@ -399,6 +471,26 @@ class GASinglePopulation(GA):
 
     def _abbreviate(self):
         self.population = None
+
+    def _diagnostic_plots(self, plot_ax):
+        if self.plot_diversity_ax is not None:
+            ax = plot_ax[self.plot_diversity_ax]
+            ax.clear()
+            plt.sca(ax)
+            pop = self.population.configuration
+            # Compute diversity matrix
+            N_sols = pop.N_solutions
+            diversity_matrix = np.zeros((N_sols, N_sols), dtype=kgs.dtype_np)
+            for i in range(N_sols):
+                diversity_matrix[:,i] = kgs.compute_genetic_diversity(cp.array(pop.xyt), cp.array(pop.xyt[i])).get()
+            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
+            if not hasattr(ax, '_colorbar') or ax._colorbar is None:
+                ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
+            else:
+                ax._colorbar.update_normal(im)
+            plt.title('Diversity Matrix Across single population')
+            plt.xlabel('Individual')
+            plt.ylabel('Individual')
     
     
     
@@ -431,6 +523,7 @@ class GASinglePopulationOld(GASinglePopulation):
     def _generate_offspring(self, mate_sol, mate_weight):
         
         old_pop = self.population
+        old_pop.check_constraints()
         old_pop.parent_fitness = old_pop.fitness.copy()
         parent_size = old_pop.configuration.N_solutions
         new_pop = old_pop.create_empty(self.population_size-parent_size, self.N_trees_to_do)
@@ -438,30 +531,51 @@ class GASinglePopulationOld(GASinglePopulation):
         # Generate all parent and mate selections at once (vectorized)
         N_offspring = new_pop.configuration.N_solutions
 
-        # Pick random parents
+        # Pick random parents (all from old_pop)
         parent_ids = self._generator.integers(0, parent_size, size=N_offspring)
 
-        # Pick random mates (excluding parent) - fully vectorized
-        # Note: mate selection currently has weight=1 for all (0*np.arange(...)+1)
-        # This means uniform selection excluding the parent
+        # Decide which offspring use own population vs external mate population
+        if mate_sol is None or mate_sol.N_solutions == 0:
+            use_own = np.ones(N_offspring, dtype=bool)
+        else:
+            use_own = self._generator.random(N_offspring) < self.prob_mate_own
 
-        # ADD: pick a mate as below with probability self.prob_mate_own, else pick from mate_sol with the specified mate_weight. Vectorized!
-        # Except if mate_sol is None
+        # Split offspring into two groups
+        inds_use_own = np.where(use_own)[0]
+        inds_use_external = np.where(~use_own)[0]
 
-        # Strategy: pick random from [0, parent_size-1), then adjust if >= parent_id
-        mate_ids = self._generator.integers(0, parent_size - 1, size=N_offspring)
-        # If mate_id >= parent_id, increment by 1 to skip the parent
-        mate_ids = np.where(mate_ids >= parent_ids, mate_ids + 1, mate_ids)
+        # Process offspring using own population as mate source
+        if len(inds_use_own) > 0:
+            parent_ids_own = parent_ids[inds_use_own]
+            # Pick random mates (excluding parent) - fully vectorized
+            mate_ids_own = self._generator.integers(0, parent_size - 1, size=len(inds_use_own))
+            # If mate_id >= parent_id, increment by 1 to skip the parent
+            mate_ids_own = np.where(mate_ids_own >= parent_ids_own, mate_ids_own + 1, mate_ids_own)
+            
+            # Clone parents into new_pop
+            new_pop.create_clone_batch(inds_use_own, old_pop, parent_ids_own)
+            
+            # Apply moves with mates from own population
+            self.move.do_move_vec(new_pop, cp.array(inds_use_own), old_pop.configuration, cp.array(mate_ids_own), self._generator)
 
-        # Clone parents into new_pop and set parent fitness (vectorized)
-        inds_to_do = np.arange(N_offspring)
-        new_pop.create_clone_batch(inds_to_do, old_pop, parent_ids)
-
-        # Apply moves using vectorized interface (clones already in place)
-        # Convert indices to GPU arrays
-        inds_to_do_gpu = cp.array(inds_to_do)
-        mate_ids_gpu = cp.array(mate_ids)
-        self.move.do_move_vec(new_pop, inds_to_do_gpu, old_pop.configuration, mate_ids_gpu, self._generator)
+        # Process offspring using external population as mate source
+        if len(inds_use_external) > 0:
+            parent_ids_external = parent_ids[inds_use_external]
+            mate_size = mate_sol.N_solutions
+            
+            # Normalize mate_weight to get probability distribution
+            mate_prob = cp.asarray(mate_weight) / cp.sum(mate_weight)
+            
+            # Sample mates using weighted selection (CuPy doesn't have choice, use cumsum + searchsorted)
+            cum_prob = cp.cumsum(mate_prob)
+            random_vals = self._generator.random(len(inds_use_external))
+            mate_ids_external = cp.searchsorted(cum_prob, random_vals)
+            
+            # Clone parents into new_pop
+            new_pop.create_clone_batch(inds_use_external, old_pop, parent_ids_external)
+            
+            # Apply moves with mates from external population
+            self.move.do_move_vec(new_pop, cp.array(inds_use_external), mate_sol, mate_ids_external, self._generator)
 
         return [new_pop]
     
@@ -484,6 +598,9 @@ class Orchestrator(kgs.BaseClass):
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
     n_generations: int = field(init=True, default=200)
     seed: int = field(init=True, default=42)
+
+    # Diagnostics
+    diagnostic_plot: bool = field(init=True, default=False)
 
     # Intermediate
     _current_generation: int = field(init=False, default=0)
@@ -543,7 +660,11 @@ class Orchestrator(kgs.BaseClass):
 
         # Initialize
         self.ga.initialize()
-        self._relax(self.ga.get_list_for_simulation())        
+        self._relax(self.ga.get_list_for_simulation())    
+
+        if self.diagnostic_plot:
+            #plt.ion() 
+            plot_fig, plot_ax = plt.subplots(2,3, figsize=(18,12))
 
         for i_gen in range(self.n_generations):
             self._current_generation = i_gen
@@ -558,7 +679,14 @@ class Orchestrator(kgs.BaseClass):
             self.ga.apply_selection()
             # Format best costs as lists for display (max 6 decimals)
             best_costs_str = [[round(float(x), 6) for x in s[-1].flatten()] for s in self.ga.best_costs_per_generation]
-            print(f'Generation {i_gen}: Best costs = {best_costs_str}')
+            if self.diagnostic_plot:
+                self.ga.diagnostic_plots(plot_ax)                
+                from IPython.display import clear_output, display
+                clear_output(wait=True)  # Clear previous output                
+                plt.suptitle(f'Generation {i_gen}: Best costs = {best_costs_str}')
+                display(plot_fig)
+            else:
+                print(f'Generation {i_gen}: Best costs = {best_costs_str}')
 
             if kgs.debugging_mode>=2:
                 self.check_constraints()
