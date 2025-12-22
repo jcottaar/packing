@@ -185,6 +185,10 @@ class GA(kgs.BaseClass):
         self.fitness_cost.check_constraints()
         self._initialize()
 
+    def reset(self):
+        self.champions = None
+        self._reset()
+
     def score(self, register_best=False):
         self._score(register_best)
         if register_best:
@@ -261,6 +265,9 @@ class GAMulti(GA):
             ga.initialize()
         assert self.single_champion
         self.best_costs_per_generation = [[]]
+    def _reset(self):
+        for ga in self.ga_list:
+            ga.reset()
     def _score(self, register_best):
         for ga in self.ga_list:
             ga.score(register_best=register_best)
@@ -419,20 +426,16 @@ class GASinglePopulation(GA):
         super()._check_constraints()
 
     def _initialize(self):
-        if self._generator is None:
-            self._generator = cp.random.default_rng(seed=self.seed)
-        self.initializer.seed = 200*self.seed + self.N_trees_to_do # backwards compatibility        
+        self._generator = cp.random.default_rng(seed=self.seed)
+        self.best_costs_per_generation = [[]]
+
+    def _reset(self):
+        self.initializer.seed = self._generator.integers(0, 2**30).get().item()
         if self.fixed_h is not None:
             self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
             self.initializer.base_solution.use_fixed_h = True
-        self.population = self.initializer.initialize_population(self.population_size, self.N_trees_to_do)
-        #if self.fixed_h is not None:
-            #self.population.configuration.use_fixed_h = True
-            #self.population.configuration.h = cp.tile(cp.array([self.fixed_h,0,0],dtype=kgs.dtype_cp), (self.population.configuration.N_solutions, 1))  
-            #self.population.configuration.snap()
-            #self.fitness_cost.costs.pop(0) # remove area cost if fixed h        
-        self.population.check_constraints()
-        self.best_costs_per_generation = [[]]
+        self.population = self.initializer.initialize_population(len(self.selection_size), self.N_trees_to_do)    
+        self.population.check_constraints()        
 
     def _score(self, register_best):
         # Compute cost and reshape to (N_solutions, 1) for tuple-based fitness
@@ -664,6 +667,7 @@ class Orchestrator(kgs.BaseClass):
 
         # Initialize
         self.ga.initialize()
+        self.ga.reset()
         self._relax(self.ga.get_list_for_simulation())    
 
         if self.diagnostic_plot:
@@ -672,10 +676,10 @@ class Orchestrator(kgs.BaseClass):
 
         for i_gen in range(self.n_generations):
             self._current_generation = i_gen
-            if i_gen>0:
-                offspring_list = self.ga.generate_offspring(None, None)
-                self._relax([s.configuration for s in offspring_list])
-                self.ga.merge_offspring()
+
+            offspring_list = self.ga.generate_offspring(None, None)
+            self._relax([s.configuration for s in offspring_list])
+            self.ga.merge_offspring()
             
             self.ga.score(register_best=True)            
             for s in self.ga.best_costs_per_generation:

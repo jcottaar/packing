@@ -2,7 +2,7 @@ import numpy as np
 import copy
 import time
 from dataclasses import dataclass, field
-import pack_ga2
+import pack_ga3
 import pack_cost
 import pack_dynamics
 import kaggle_support as kgs
@@ -14,14 +14,14 @@ class Runner(kgs.BaseClass):
     # Inputs
     label: str = field(init=False, default='')
     seed: int = 0
-    base_ga: pack_ga2.Orchestrator = field(default_factory=pack_ga2.Orchestrator)
+    base_ga: pack_ga3.Orchestrator = field(default_factory=pack_ga3.Orchestrator)
     modifier_dict: dict = field(default_factory=dict)
     use_missing_value: bool = False
 
     # Outputs
     modifier_values: dict = field(default_factory=dict)
-    configured_ga: pack_ga2.Orchestrator = None
-    result_ga: pack_ga2.Orchestrator = None
+    configured_ga: pack_ga3.Orchestrator = None
+    result_ga: pack_ga3.Orchestrator = None
     best_costs: np.ndarray = None
     runtime_seconds: float = None
     exception: str = None
@@ -133,9 +133,9 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,601).item(), set_orchestrator_prop)
     #res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
     #res.modifier_dict['fixed_h'] = pm(0.605576, lambda r:r.uniform(0.6,0.618), set_ga_prop)
-    res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(0.125,1.), scale_population_size)
+    res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(1.,1.), scale_population_size)
 
-    res.base_ga.ga = pack_ga2.GASinglePopulationOld()
+    res.base_ga.ga = pack_ga3.GASinglePopulationOld()
     
     runner = res.base_ga
 
