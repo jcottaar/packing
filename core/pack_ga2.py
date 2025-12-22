@@ -363,14 +363,17 @@ class GAMultiRing(GAMultiSimilar):
                 populations_to_merge.append(self.ga_list[right_idx].population)
             
             # Merge all collected populations into a single solution collection
-            merged_sol = copy.deepcopy(populations_to_merge[0].configuration)
-            for pop in populations_to_merge[1:]:
-                merged_sol.merge(pop.configuration)
-            mate_weights = np.ones(merged_sol.N_solutions) / merged_sol.N_solutions
+            if len(populations_to_merge)>0:
+                merged_sol = copy.deepcopy(populations_to_merge[0].configuration)
+                for pop in populations_to_merge[1:]:
+                    merged_sol.merge(pop.configuration)
+                mate_weights = np.ones(merged_sol.N_solutions) / merged_sol.N_solutions
+            else:
+                merged_sol, mate_weights = None, None
             
             # Generate offspring for this GA using the merged mate population
             offspring_list.extend(ga.generate_offspring(merged_sol, mate_weights))
-        return sum([ga.generate_offspring(mate_sol, mate_weights) for ga in self.ga_list], [])
+        return offspring_list#sum([ga.generate_offspring(mate_sol, mate_weights) for ga in self.ga_list], [])
 
 @dataclass
 class GASinglePopulation(GA):
