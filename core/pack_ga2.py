@@ -350,7 +350,7 @@ class InitializerRandomJiggled(Initializer):
 @dataclass
 class Move(kgs.BaseClass):
 
-    def do_move(self, population:Population, old_pop:Population, individual_id:int,
+    def do_move(self, population:Population, mate_sol:kgs.SolutionCollection, individual_id:int,
                 mate_id:int, generator:cp.random.Generator):
         """
         Single-individual move interface (for testing).
@@ -359,21 +359,21 @@ class Move(kgs.BaseClass):
         ----------
         population : Population
             Target population where clone is already in place
-        old_pop : Population
-            Source population to read from
+        mate_sol : kgs.SolutionCollection
+            Source solution collection to read from
         individual_id : int
             Index of individual in population to modify
         mate_id : int
-            Index of mate individual in old_pop to use for crossover
+            Index of mate individual in mate_sol to use for crossover
         generator : cp.random.Generator
             Random number generator (GPU-based)
         """
         # Convert to GPU arrays and call vectorized version
         inds_to_do = cp.array([individual_id], dtype=cp.int32)
         inds_mate = cp.array([mate_id], dtype=cp.int32)
-        self.do_move_vec(population, inds_to_do, old_pop, inds_mate, generator)
+        self.do_move_vec(population, inds_to_do, mate_sol, inds_mate, generator)
 
-    def do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
+    def do_move_vec(self, population:Population, inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                     inds_mate:cp.ndarray, generator:cp.random.Generator):
         """
         Vectorized move interface.
@@ -384,16 +384,16 @@ class Move(kgs.BaseClass):
             Target population where clones are already in place
         inds_to_do : cp.ndarray
             Indices of individuals in population to modify (shape: N_moves,) - GPU array
-        old_pop : Population
-            Source population to read from
+        mate_sol : kgs.SolutionCollection
+            Source solution collection to read from
         inds_mate : cp.ndarray
-            Indices of mate individuals in old_pop to use for crossover (shape: N_moves,) - GPU array
+            Indices of mate individuals in mate_sol to use for crossover (shape: N_moves,) - GPU array
         generator : cp.random.Generator
             Random number generator (GPU-based)
         """
-        self._do_move_vec(population, inds_to_do, old_pop, inds_mate, generator)
+        self._do_move_vec(population, inds_to_do, mate_sol, inds_mate, generator)
 
-    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
+    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """
         Default implementation: loop over individuals and call _do_move for each.
@@ -403,10 +403,10 @@ class Move(kgs.BaseClass):
         inds_to_do_cpu = inds_to_do.get()
         inds_mate_cpu = inds_mate.get()
         for ind_to_do, ind_mate in zip(inds_to_do_cpu, inds_mate_cpu):
-            self._do_move(population, old_pop, ind_to_do, ind_mate, generator)    
+            self._do_move(population, mate_sol, ind_to_do, ind_mate, generator)    
     
 class NoOp(Move):
-    def _do_move(self, population, old_pop, individual_id, mate_id, generator):
+    def _do_move(self, population, mate_sol, individual_id, mate_id, generator):
         return None
 
 @dataclass
@@ -414,7 +414,7 @@ class MoveSelector(Move):
     moves: list = field(init=True, default_factory=list) # each move is [Move, name, weight]
     _probabilities: cp.ndarray = field(init=False, default=None)
 
-    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
+    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """
         Vectorized move interface for MoveSelector.
@@ -446,12 +446,12 @@ class MoveSelector(Move):
 
             # Call do_move_vec for this move type on the batch
             self.moves[move_id][0].do_move_vec(
-                population, batch_inds_to_do, old_pop, batch_inds_mate, generator
+                population, batch_inds_to_do, mate_sol, batch_inds_mate, generator
             )
 
 @dataclass
 class MoveRandomTree(Move):
-    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
+    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: randomly reposition selected trees in multiple individuals."""
         new_h = population.configuration.h
@@ -478,7 +478,7 @@ class MoveRandomTree(Move):
 class JiggleRandomTree(Move):
     max_xy_move: float = field(init=True, default=0.1)
     max_theta_move: float = field(init=True, default=np.pi)
-    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
+    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: jiggle random trees in multiple individuals."""
         new_xyt = population.configuration.xyt
@@ -502,7 +502,7 @@ class JiggleCluster(Move):
     max_theta_move: float = field(init=True, default=np.pi)
     min_N_trees: int = field(init=True, default=2)
     max_N_trees: int = field(init=True, default=20)
-    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
+    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Fully vectorized version: jiggle variable numbers of trees in clusters."""
         new_h = population.configuration.h
@@ -560,7 +560,7 @@ class JiggleCluster(Move):
 
 @dataclass
 class Translate(Move):
-    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
+    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: translate all trees in multiple individuals."""
         new_h = population.configuration.h
@@ -585,7 +585,7 @@ class Twist(Move):
     # Twist trees around a center. Angle of twist decreases linearly with distance from center
     min_radius: float = field(init=True, default=0.5)
     max_radius: float = field(init=True, default=2.)
-    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, old_pop:Population,
+    def _do_move_vec(self, population:Population, inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: twist trees around centers in multiple individuals."""
         new_h = population.configuration.h
@@ -638,7 +638,7 @@ class Crossover(Move):
     max_N_trees: int = field(init=True, default=20)
     simple_mate_location: bool = field(init=True, default=False)
 
-    def _do_move_vec(self, population: Population, inds_to_do: cp.ndarray, old_pop: Population,
+    def _do_move_vec(self, population: Population, inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
         """Fully vectorized version: crossover trees from mates into multiple individuals."""
         new_h = population.configuration.h
@@ -648,7 +648,7 @@ class Crossover(Move):
 
         # Get h parameters (on GPU)
         h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
-        mate_h_params = old_pop.configuration.h[inds_mate]  # (N_moves, 3) on GPU
+        mate_h_params = mate_sol.h[inds_mate]  # (N_moves, 3) on GPU
 
         # Generate all random values at once (vectorized RNG on GPU)
         h_sizes = h_params[:, 0]
@@ -681,7 +681,7 @@ class Crossover(Move):
 
         # Get all tree positions (N_moves, N_trees, 2) on GPU
         tree_positions_all = new_xyt[inds_to_do, :, :2]  # (N_moves, N_trees, 2)
-        mate_positions_all = old_pop.configuration.xyt[inds_mate, :, :2]  # (N_moves, N_trees, 2)
+        mate_positions_all = mate_sol.xyt[inds_mate, :, :2]  # (N_moves, N_trees, 2)
 
         # Compute L-infinity distances for all individuals at once (vectorized on GPU)
         # Shape: (N_moves, N_trees)
@@ -736,9 +736,9 @@ class Crossover(Move):
         mate_centers_y = cp.sum(selected_mate_positions[:, :, 1] * valid_mask, axis=1) / cp.sum(valid_mask, axis=1)  # (N_moves,)
 
         # Gather all mate trees to transform (N_moves, max_n_trees, 3)
-        # Use fancy indexing: for each move i, get old_pop.configuration.xyt[inds_mate[i], mate_tree_ids_all[i, :], :]
+        # Use fancy indexing: for each move i, get mate_sol.xyt[inds_mate[i], mate_tree_ids_all[i, :], :]
         inds_mate_expanded = inds_mate[:, cp.newaxis]  # (N_moves, 1)
-        mate_trees_all = old_pop.configuration.xyt[inds_mate_expanded, mate_tree_ids_all].copy()  # (N_moves, max_n_trees, 3)
+        mate_trees_all = mate_sol.xyt[inds_mate_expanded, mate_tree_ids_all].copy()  # (N_moves, max_n_trees, 3)
 
         # Apply vectorized transformation to all trees at once
         self._apply_transformation_vectorized(
@@ -1134,7 +1134,7 @@ class GASinglePopulationOld(GASinglePopulation):
         # Convert indices to GPU arrays
         inds_to_do_gpu = cp.array(inds_to_do)
         mate_ids_gpu = cp.array(mate_ids)
-        self.move.do_move_vec(new_pop, inds_to_do_gpu, old_pop, mate_ids_gpu, self._generator)
+        self.move.do_move_vec(new_pop, inds_to_do_gpu, old_pop.configuration, mate_ids_gpu, self._generator)
 
         return [new_pop]
     
