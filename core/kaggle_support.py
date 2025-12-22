@@ -862,4 +862,205 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
         res.aspect_ratios = cp.array([self.aspect_ratios[0]]*N_solutions, dtype=dtype_cp)
         return res
 
+
+# ============================================================
+# Fitness comparison utilities for tuple-based fitness
+# ============================================================
+
+def lexicographic_argmin(fitness_array: np.ndarray) -> int:
+    """Find index of minimum fitness value using lexicographic ordering.
+    
+    Parameters
+    ----------
+    fitness_array : np.ndarray
+        Shape (N_solutions, N_components) - fitness tuples for each solution
+        
+    Returns
+    -------
+    int
+        Index of the lexicographically smallest fitness tuple
+    """
+    # Use lexsort which sorts by last column first, so reverse the columns
+    if fitness_array.ndim == 1:
+        # Handle 1D case (single component)
+        return int(np.argmin(fitness_array))
+    
+    # Sort by all components in order (last column has highest priority in lexsort)
+    # We want first column to have highest priority, so reverse
+    sort_keys = [fitness_array[:, i] for i in range(fitness_array.shape[1] - 1, -1, -1)]
+    sorted_indices = np.lexsort(sort_keys)
+    return int(sorted_indices[0])
+
+
+def lexicographic_argsort(fitness_array: np.ndarray) -> np.ndarray:
+    """Sort fitness values using lexicographic ordering.
+    
+    Parameters
+    ----------
+    fitness_array : np.ndarray
+        Shape (N_solutions, N_components) - fitness tuples for each solution
+        
+    Returns
+    -------
+    np.ndarray
+        Indices that would sort the array lexicographically
+    """
+    if fitness_array.ndim == 1:
+        # Handle 1D case (single component)
+        return np.argsort(fitness_array)
+    
+    # Sort by all components in order (last column has highest priority in lexsort)
+    # We want first column to have highest priority, so reverse
+    sort_keys = [fitness_array[:, i] for i in range(fitness_array.shape[1] - 1, -1, -1)]
+    return np.lexsort(sort_keys)
+
+
+def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
+    """Compare two fitness tuples lexicographically.
+    
+    Parameters
+    ----------
+    fitness1, fitness2 : np.ndarray
+        Shape (N_components,) - fitness tuples to compare
+        
+    Returns
+    -------
+    bool
+        True if fitness1 < fitness2 lexicographically
+    """
+    fitness1 = np.atleast_1d(fitness1)
+    fitness2 = np.atleast_1d(fitness2)
+    
+    for f1, f2 in zip(fitness1, fitness2):
+        if f1 < f2:
+            return True
+        elif f1 > f2:
+            return False
+    return False  # Equal
+
+
+def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
+    """
+    Compute the minimum-cost assignment distance between each individual in a population
+    and a single reference configuration, considering all 8 symmetry transformations
+    (4 rotations × 2 mirror states).
+    
+    Uses the Hungarian algorithm (via scipy) to find the optimal tree-to-tree mapping
+    that minimizes total distance. The distance metric includes (x, y, theta) with equal weights.
+    
+    Parameters
+    ----------
+    population_xyt : cp.ndarray
+        Shape (N_pop, N_trees, 3). Population of individuals, where each individual
+        has N_trees trees with (x, y, theta) coordinates.
+    reference_xyt : cp.ndarray
+        Shape (N_trees, 3). Single reference configuration to compare against.
+        
+    Returns
+    -------
+    cp.ndarray
+        Shape (N_pop,). Minimum assignment distance for each individual, taken over
+        all 8 symmetry transformations.
+        
+    Notes
+    -----
+    The 8 transformations applied to each population individual are:
+    - 0°, 90°, 180°, 270° rotations (about origin)
+    - Each rotation with and without x-axis mirroring
+    
+    For each transformation, we compute the cost matrix between transformed trees
+    and reference trees, then solve the linear assignment problem. The minimum
+    cost across all 8 transformations is returned.
+    
+    Distance for each tree pair: sqrt((x1-x2)^2 + (y1-y2)^2 + angular_dist(theta1, theta2)^2)
+    where angular_dist wraps to [-pi, pi].
+    """
+    import lap_batch
+    
+    N_pop, N_trees, _ = population_xyt.shape
+    
+    # Validate shapes
+    assert reference_xyt.shape == (N_trees, 3), \
+        f"Reference shape {reference_xyt.shape} doesn't match expected ({N_trees}, 3)"
+    
+    # Pre-compute the 8 transformation parameters
+    # Each transformation is (rotation_angle, mirror_x)
+    # rotation_angle: angle to rotate coordinates (0, pi/2, pi, 3pi/2)
+    # mirror_x: whether to mirror across x-axis before rotation
+    transformations = [
+        (0.0,        False),  # Identity
+        (np.pi/2,    False),  # 90° rotation
+        (np.pi,      False),  # 180° rotation
+        (3*np.pi/2,  False),  # 270° rotation
+        (0.0,        True),   # Mirror only
+        (np.pi/2,    True),   # Mirror + 90° rotation
+        (np.pi,      True),   # Mirror + 180° rotation
+        (3*np.pi/2,  True),   # Mirror + 270° rotation
+    ]
+    
+    # Initialize result: will store minimum distance across all transformations
+    min_distances = cp.full(N_pop, cp.inf, dtype=dtype_cp)
+    
+    # Reference coordinates (fixed, not transformed)
+    ref_x = reference_xyt[:, 0]      # (N_trees,)
+    ref_y = reference_xyt[:, 1]      # (N_trees,)
+    ref_theta = reference_xyt[:, 2]  # (N_trees,)
+    
+    # Compute cost matrices for all 8 transformations on GPU
+    all_cost_matrices = []
+    for rot_angle, do_mirror in transformations:
+        # ---------------------------------------------------------
+        # Step 1: Apply transformation to population individuals (GPU)
+        # ---------------------------------------------------------
+        pop_x = population_xyt[:, :, 0].copy()
+        pop_y = population_xyt[:, :, 1].copy()
+        pop_theta = population_xyt[:, :, 2].copy()
+        
+        if do_mirror:
+            pop_y = -pop_y
+            pop_theta = -pop_theta
+        
+        if rot_angle != 0.0:
+            cos_a = np.cos(rot_angle)
+            sin_a = np.sin(rot_angle)
+            new_x = pop_x * cos_a - pop_y * sin_a
+            new_y = pop_x * sin_a + pop_y * cos_a
+            pop_x = new_x
+            pop_y = new_y
+            pop_theta = pop_theta + rot_angle
+        
+        pop_theta = cp.remainder(pop_theta + np.pi, 2*np.pi) - np.pi
+        
+        # ---------------------------------------------------------
+        # Step 2: Compute pairwise cost matrix (GPU)
+        # ---------------------------------------------------------
+        dx = pop_x[:, :, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :]
+        dy = pop_y[:, :, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :]
+        dtheta = pop_theta[:, :, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :]
+        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
+        cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)
+        
+        all_cost_matrices.append(cost_matrices)
+    
+    # ---------------------------------------------------------
+    # Step 3: Solve assignment problems on GPU using RAFT
+    # ---------------------------------------------------------
+    # Stack all cost matrices on GPU: shape (8, N_pop, N_trees, N_trees)
+    # Then reshape to (8*N_pop, N_trees, N_trees) for batched solving
+    stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_trees)
+    batched = stacked.reshape(-1, N_trees, N_trees)    # (8*N_pop, N_trees, N_trees)
+    
+    # Solve all LAPs on GPU
+    _, all_assignment_costs = lap_batch.solve_lap_batch(batched)  # (8*N_pop,)
+    
+    # Reshape back and take minimum across transformations
+    all_costs_array = all_assignment_costs.reshape(8, N_pop)  # (8, N_pop)
+    min_distances = all_costs_array.min(axis=0)
+    
+    if profiling:
+        cp.cuda.Device().synchronize()
+    
+    return min_distances
+
+
 set_float32(True)
