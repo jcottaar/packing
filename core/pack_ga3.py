@@ -164,16 +164,19 @@ class GA(kgs.BaseClass):
     do_legalize: bool = field(init=True, default=True)
 
     allow_reset: bool = field(init=True, default=True)
+    allow_freeze: bool = field(init=True, default=True)
     reset_check_generations: int = field(init=True, default=None)
-    reset_check_threshold: float = field(init=True, default=0.9)
+    reset_check_threshold: float = field(init=True, default=0.1)
+    freeze_duration: int = field(init=True, default=100)
     
 
     best_costs_per_generation_ax = None
     champion_ax = None
 
-    _cached_offspring = None
-    _last_reset_generation = 0
-    _skip_next_selection = False
+    _cached_offspring: list = field(init=False, default=None)
+    _last_reset_generation: int = field(init=False, default=0)
+    _skip_next_selection: bool = field(init=False, default=False)
+    _is_frozen2: bool = field(init=False, default=False)
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -197,23 +200,36 @@ class GA(kgs.BaseClass):
         self._reset()
 
     def score(self, register_best=False):
+        if self._is_frozen2:
+            if register_best:
+                for c in self.best_costs_per_generation:
+                    c.append(c[-1])
+                if len(self.best_costs_per_generation[0]) - self._last_reset_generation >= self.freeze_duration:
+                    self._is_frozen2 = False
+                    self._last_reset_generation = len(self.best_costs_per_generation[0])-1
+            return
         self._score(register_best)
         if register_best:
             assert(len(self.champions) == len(self.best_costs_per_generation))            
-            if self.allow_reset and not self.reset_check_generations is None:
+            if not self.reset_check_generations is None:
                 assert len(self.best_costs_per_generation)==1
                 costs = self.best_costs_per_generation[0]
                 if len(costs)>self._last_reset_generation+self.reset_check_generations and \
                         costs[-1][0]==costs[-self.reset_check_generations][0] and \
                         costs[-1][1]>=self.reset_check_threshold*costs[-self.reset_check_generations][1]:                    
-                    self.reset()
-                    self._last_reset_generation = len(self.best_costs_per_generation)-1
-                    self.best_costs_per_generation[0].pop(-1)
-                    self._score(register_best)
-                    self._skip_next_selection = True
+                    if self.allow_reset:
+                        self.reset()
+                        self._last_reset_generation = len(self.best_costs_per_generation[0])-1
+                        self.best_costs_per_generation[0].pop(-1)
+                        self._score(register_best)
+                        self._skip_next_selection = True
+                    elif self.allow_freeze:
+                        self._is_frozen2 = True                        
 
 
     def generate_offspring(self, mate_sol, mate_weights):
+        if self._is_frozen2:
+            return []
         if mate_sol is not None:
             assert(mate_sol.N_solutions == len(mate_weights))
         res = self._generate_offspring(mate_sol, mate_weights)
@@ -221,18 +237,24 @@ class GA(kgs.BaseClass):
         return res
     
     def merge_offspring(self):
+        if self._is_frozen2:
+            return
         self._merge_offspring()
 
     def get_list_for_simulation(self):
+        if self._is_frozen2:
+            return []
         return self._get_list_for_simulation()
            
     def apply_selection(self):
+        if self._is_frozen2:
+            return
         if self._skip_next_selection:
             self._skip_next_selection = False
             return
         self._apply_selection()
 
-    def finalize(self):
+    def finalize(self):        
         self._finalize()
         if self.do_legalize:
             for champion in self.champions:
@@ -274,7 +296,7 @@ class GAMulti(GA):
     single_champion: bool = field(init=True, default=True)
     plot_diversity_ax = None
     plot_subpopulation_costs_per_generation_ax = None
-    allow_reset_ratio: float = field(init=True, default=0.5) # allow only the worst X% of subpopulations to reset
+    allow_reset_ratio: float = field(init=True, default=1.) # allow only the worst X% of subpopulations to reset
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -346,6 +368,10 @@ class GAMulti(GA):
                     ax._colorbar = plt.colorbar(im, ax=ax, label='Best cost')
                 else:
                     ax._colorbar.update_normal(im)
+                # Mark frozen subpopulations with red X at the top
+                for i, ga in enumerate(self.ga_list):
+                    if ga._is_frozen2:
+                        plt.plot(i, -0.5, 'rx', markersize=10, markeredgewidth=2)
                 plt.xlabel('Subpopulation')
                 plt.ylabel('Generation')
         if self.plot_diversity_ax is not None:
