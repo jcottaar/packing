@@ -353,21 +353,34 @@ class GAMultiSimilar(GAMulti):
 @dataclass
 class GAMultiRing(GAMultiSimilar):
     # Configuration
-    mate_distance: int = field(init=True, default=2)     
+    mate_distance: int = field(init=True, default=4)     
     def _generate_offspring(self, mate_sol, mate_weights):
         assert mate_sol is None
-        # To each child GA, pass mate_sol as the merged champions of all GAs within mate_distance on the ring
-        # Create mate_sol for each GA by merging populations from GAs within mate_distance
+        if self.champions is None:
+            return super()._generate_offspring(mate_sol, mate_weights)
+        # Sort ga_list by cost value using lexicographic sort
+        # Get the best cost for each GA
+        costs_per_ga = np.array([ga.champions[0].fitness[0] for ga in self.ga_list])
+        sorted_indices = kgs.lexicographic_argsort(costs_per_ga)
+        sorted_ga_list = [self.ga_list[i] for i in sorted_indices]
+        
+        # To each child GA, pass mate_sol as the merged champions of all GAs within mate_distance
+        # Each GA gets the mate_distance nearest neighbors in the sorted list
         offspring_list = []
-        for i, ga in enumerate(self.ga_list):
-            # Collect populations from GAs within mate_distance on the ring
+        for i, ga in enumerate(sorted_ga_list):
+            # Collect the mate_distance nearest populations
             populations_to_merge = []
-            for offset in range(1, self.mate_distance + 1):
-                # Get indices on both sides of the ring
-                left_idx = (i - offset) % len(self.ga_list)
-                right_idx = (i + offset) % len(self.ga_list)
-                populations_to_merge.append(self.ga_list[left_idx].population)
-                populations_to_merge.append(self.ga_list[right_idx].population)
+            
+            # Collect neighbors, expanding outward from current position
+            offset = 1
+            while len(populations_to_merge) < self.mate_distance and offset < len(sorted_ga_list):
+                # Add left neighbor if available
+                if i - offset >= 0 and len(populations_to_merge) < self.mate_distance:
+                    populations_to_merge.append(sorted_ga_list[i - offset].population)
+                # Add right neighbor if available
+                if i + offset < len(sorted_ga_list) and len(populations_to_merge) < self.mate_distance:
+                    populations_to_merge.append(sorted_ga_list[i + offset].population)
+                offset += 1
             
             # Merge all collected populations into a single solution collection
             if len(populations_to_merge)>0:
@@ -380,7 +393,8 @@ class GAMultiRing(GAMultiSimilar):
             
             # Generate offspring for this GA using the merged mate population
             offspring_list.extend(ga.generate_offspring(merged_sol, mate_weights))
-        return offspring_list#sum([ga.generate_offspring(mate_sol, mate_weights) for ga in self.ga_list], [])
+        # offspring_list is out of order - this is OK (child GAs cache their own offspring)
+        return offspring_list
 
 @dataclass
 class GASinglePopulation(GA):
