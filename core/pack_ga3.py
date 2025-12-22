@@ -112,8 +112,6 @@ class Initializer(kgs.BaseClass):
         population.check_constraints()
         return population        
 
-ax=None
-
 @dataclass
 class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
@@ -166,6 +164,7 @@ class GA(kgs.BaseClass):
     allow_reset: bool = field(init=True, default=True)
     allow_freeze: bool = field(init=True, default=True)
     reset_check_generations: int = field(init=True, default=None)
+    reset_check_generations_ratio: float = field(init=True, default=0.1)
     reset_check_threshold: float = field(init=True, default=0.1)
     freeze_duration: int = field(init=True, default=100)
     
@@ -204,7 +203,9 @@ class GA(kgs.BaseClass):
             if register_best:
                 for c in self.best_costs_per_generation:
                     c.append(c[-1])
-                if len(self.best_costs_per_generation[0]) - self._last_reset_generation >= self.freeze_duration:
+                effective_frozen_generations = self.freeze_duration + \
+                    int(self.reset_check_generations_ratio * (len(self.best_costs_per_generation[0])))
+                if len(self.best_costs_per_generation[0]) - self._last_reset_generation >= effective_frozen_generations:
                     self._is_frozen2 = False
                     self._last_reset_generation = len(self.best_costs_per_generation[0])-1
             return
@@ -213,10 +214,12 @@ class GA(kgs.BaseClass):
             assert(len(self.champions) == len(self.best_costs_per_generation))            
             if not self.reset_check_generations is None:
                 assert len(self.best_costs_per_generation)==1
+                effective_reset_check_generations = self.reset_check_generations + \
+                    int(self.reset_check_generations_ratio * (len(self.best_costs_per_generation[0])))
                 costs = self.best_costs_per_generation[0]
-                if len(costs)>self._last_reset_generation+self.reset_check_generations and \
-                        costs[-1][0]==costs[-self.reset_check_generations][0] and \
-                        costs[-1][1]>=self.reset_check_threshold*costs[-self.reset_check_generations][1]:                    
+                if len(costs)>self._last_reset_generation+effective_reset_check_generations and \
+                        costs[-1][0]==costs[-effective_reset_check_generations][0] and \
+                        costs[-1][1]>=self.reset_check_threshold*costs[-effective_reset_check_generations][1]:                    
                     if self.allow_reset:
                         self.reset()
                         self._last_reset_generation = len(self.best_costs_per_generation[0])-1
@@ -602,7 +605,7 @@ class GASinglePopulationOld(GASinglePopulation):
         self.population = current_pop
         self.population.check_constraints()
 
-    def _generate_offspring(self, mate_sol, mate_weight):
+    def _generate_offspring(self, mate_sol, mate_weights):
         
         old_pop = self.population
         old_pop.check_constraints()
@@ -646,7 +649,7 @@ class GASinglePopulationOld(GASinglePopulation):
             mate_size = mate_sol.N_solutions
             
             # Normalize mate_weight to get probability distribution
-            mate_prob = cp.asarray(mate_weight) / cp.sum(mate_weight)
+            mate_prob = cp.asarray(mate_weights) / cp.sum(mate_weights)
             
             # Sample mates using weighted selection (CuPy doesn't have choice, use cumsum + searchsorted)
             cum_prob = cp.cumsum(mate_prob)
