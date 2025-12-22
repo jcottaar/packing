@@ -163,10 +163,17 @@ class GA(kgs.BaseClass):
     best_costs_per_generation: list = field(init=True, default_factory=list)  
     do_legalize: bool = field(init=True, default=True)
 
+    allow_reset: bool = field(init=True, default=True)
+    reset_check_generations: int = field(init=True, default=None)
+    reset_check_threshold: float = field(init=True, default=0.9)
+    
+
     best_costs_per_generation_ax = None
     champion_ax = None
 
     _cached_offspring = None
+    _last_reset_generation = 0
+    _skip_next_selection = False
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -193,6 +200,18 @@ class GA(kgs.BaseClass):
         self._score(register_best)
         if register_best:
             assert(len(self.champions) == len(self.best_costs_per_generation))            
+            if self.allow_reset and not self.reset_check_generations is None:
+                assert len(self.best_costs_per_generation)==1
+                costs = self.best_costs_per_generation[0]
+                if len(costs)>self._last_reset_generation+self.reset_check_generations and \
+                        costs[-1][0]==costs[-self.reset_check_generations][0] and \
+                        costs[-1][1]>=self.reset_check_threshold*costs[-self.reset_check_generations][1]:                    
+                    self.reset()
+                    self._last_reset_generation = len(self.best_costs_per_generation)-1
+                    self.best_costs_per_generation[0].pop(-1)
+                    self._score(register_best)
+                    self._skip_next_selection = True
+
 
     def generate_offspring(self, mate_sol, mate_weights):
         if mate_sol is not None:
@@ -208,6 +227,9 @@ class GA(kgs.BaseClass):
         return self._get_list_for_simulation()
            
     def apply_selection(self):
+        if self._skip_next_selection:
+            self._skip_next_selection = False
+            return
         self._apply_selection()
 
     def finalize(self):
@@ -252,6 +274,7 @@ class GAMulti(GA):
     single_champion: bool = field(init=True, default=True)
     plot_diversity_ax = None
     plot_subpopulation_costs_per_generation_ax = None
+    allow_reset_ratio: float = field(init=True, default=0.5) # allow only the worst X% of subpopulations to reset
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -281,6 +304,18 @@ class GAMulti(GA):
             best_ga = self.ga_list[best_ga_idx]
             self.champions = [best_ga.champions[0]]
             self.best_costs_per_generation[0].append(best_ga.champions[0].fitness[0])
+            # Apply allow_reset_ratio - only allow worst X% of GAs to reset
+            if self.allow_reset_ratio < 1.0:
+                sorted_indices = kgs.lexicographic_argsort(costs_per_ga)
+                n_allowed_to_reset = int(np.ceil(len(self.ga_list) * self.allow_reset_ratio))
+                # Worst performers are at the end of the sorted list
+                for i, idx in enumerate(sorted_indices):
+                    if i < len(self.ga_list) - n_allowed_to_reset:
+                        # Better performers - disable reset
+                        self.ga_list[idx].allow_reset = False
+                    else:
+                        # Worst performers - enable reset
+                        self.ga_list[idx].allow_reset = True
     def _generate_offspring(self, mate_sol, mate_weights):
         return sum([ga.generate_offspring(mate_sol, mate_weights) for ga in self.ga_list], [])
     def _merge_offspring(self):
@@ -356,8 +391,8 @@ class GAMultiRing(GAMultiSimilar):
     mate_distance: int = field(init=True, default=4)     
     def _generate_offspring(self, mate_sol, mate_weights):
         assert mate_sol is None
-        if self.champions is None:
-            return super()._generate_offspring(mate_sol, mate_weights)
+        #if self.champions is None:
+        #    return super()._generate_offspring(mate_sol, mate_weights)
         # Sort ga_list by cost value using lexicographic sort
         # Get the best cost for each GA
         costs_per_ga = np.array([ga.champions[0].fitness[0] for ga in self.ga_list])
@@ -682,7 +717,8 @@ class Orchestrator(kgs.BaseClass):
         # Initialize
         self.ga.initialize()
         self.ga.reset()
-        self._relax(self.ga.get_list_for_simulation())    
+        #self._relax(self.ga.get_list_for_simulation())    
+        self.ga.score(register_best=True)
 
         if self.diagnostic_plot:
             #plt.ion() 
@@ -697,7 +733,7 @@ class Orchestrator(kgs.BaseClass):
             
             self.ga.score(register_best=True)            
             for s in self.ga.best_costs_per_generation:
-                assert len(s) == self._current_generation + 1
+                assert len(s) == self._current_generation + 2
             self.ga.apply_selection()
             # Format best costs as lists for display (max 6 decimals)
             best_costs_str = [[round(float(x), 6) for x in s[-1].flatten()] for s in self.ga.best_costs_per_generation]
