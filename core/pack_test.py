@@ -10,6 +10,7 @@ import pack_basics
 import pack_cuda
 import pack_cuda_primitives_test
 import pack_runner
+import pack_ga2
 import matplotlib.pyplot as plt
 import pack_vis_sol
 import copy
@@ -26,20 +27,19 @@ def run_all_tests(regenerate_reference=False):
     print("All tests passed.")
 
 def test_ga(regenerate_reference):
-    runner = pack_runner.baseline_runner(fast_mode=False)
-    runner.use_missing_value = True
-    runner.base_ga.n_generations = 2
-    runner.base_ga.N_trees_to_do = np.array([10])
-    runner.base_ga.initializer.base_solution.use_fixed_h = False
-    runner.base_ga.do_legalize = False
-    #runner.modifier_dict = dict()
-    runner.modifier_dict['scale_population_size'] = pack_runner.pm(0.25, lambda r:0.25, pack_runner.scale_population_size)
-    runner.modifier_dict['n_generations'] = pack_runner.pm(3, lambda r:3, pack_runner.set_ga_prop)
-    runner.run()
+    ga = pack_ga2.Orchestrator()
+    ga.ga = pack_ga2.GASinglePopulationOld()
+    ga.n_generations = 5       
+    ga.ga.N_trees_to_do = 10
+    ga.ga.population_size = 100
+    ga.ga.selection_size = list(np.arange(1,80))
+    ga.ga.do_legalize = False
+    ga.run()
+    res = ga.ga.population.fitness
     if regenerate_reference:
-        kgs.dill_save(kgs.code_dir + 'ref_ga.pickle', runner.result_ga.populations[-1].fitness)
+        kgs.dill_save(kgs.code_dir + 'ref_ga.pickle', res)
     ref = kgs.dill_load(kgs.code_dir + 'ref_ga.pickle')
-    assert np.all(ref==runner.result_ga.populations[-1].fitness), "GA test failed: final fitness does not match reference."
+    assert np.all(ref==res), "GA test failed: final fitness does not match reference."
 
 def test_costs():
     print('Testing cost computation and gradients')
