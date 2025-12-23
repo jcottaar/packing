@@ -133,16 +133,22 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,601).item(), set_orchestrator_prop)
     #res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
     #res.modifier_dict['fixed_h'] = pm(0.605576, lambda r:r.uniform(0.6,0.618), set_ga_prop)
-    res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(1.,1.), scale_population_size)
+    #res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(1.,1.), scale_population_size)
+    res.modifier_dict['champion_fraction'] = pm (0.1, lambda r:r.uniform(0.05,0.2), set_ga_prop)
+    res.modifier_dict['tournament_size'] = pm(4, lambda r:r.integers(2,6).item(), set_ga_prop)
+    res.modifier_dict['selection_fraction'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
 
-    res.base_ga.ga = pack_ga3.GASinglePopulationOld()
+     # Set base GA
+
+    res.base_ga.ga = pack_ga3.GASinglePopulationTournament()
     
     runner = res.base_ga
+    runner.n_generations = 500
 
     if fast_mode:         
         runner.n_generations = 5
         runner.ga.population_size = 100
-        runner.ga.selection_size = [1,2,5,10]
+        #runner.ga.selection_size = [1,2,5,10]
         runner.ga.do_legalize = False
         res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(5,6).item(), set_orchestrator_prop)
 

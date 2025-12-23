@@ -580,6 +580,142 @@ class GASinglePopulation(GA):
     
     
 @dataclass
+class GASinglePopulationTournament(GASinglePopulation):
+    """Tournament-based selection GA with explicit champion exploitation.
+    
+    Selection strategy:
+    - Keep top `selection_fraction` (default 50%) of population as parents
+    - Generate `champion_fraction` (default 10%) offspring from champion
+    - Generate remaining offspring via tournament selection (N=tournament_size)
+    
+    Designed for use with GAMultiRing (32 islands, ring topology).
+    """
+    
+    population_size: int = field(init=True, default=500)
+    champion_fraction: float = field(init=True, default=0.1)  # 10% from champion
+    tournament_size: int = field(init=True, default=4)  # Tournament N=4
+    selection_fraction: float = field(init=True, default=0.5)  # Keep top 50%
+    prob_mate_own: float = field(init=True, default=0.5)  # For ring migration
+    
+    # Internal state
+    _cached_champion_pop: Population = field(init=False, default=None)
+    
+    # Computed from selection_fraction * population_size (used by _reset)
+    @property
+    def selection_size(self):
+        return list(range(int(self.population_size * self.selection_fraction)))
+
+    def _apply_selection(self):
+        """Keep top selection_fraction of population as parents."""
+        current_pop = self.population
+        sorted_ids = kgs.lexicographic_argsort(current_pop.fitness)
+        n_keep = int(self.population_size * self.selection_fraction)
+        current_pop.select_ids(sorted_ids[:n_keep])
+        self.population = current_pop
+        self.population.check_constraints()
+
+    def _tournament_select(self, parent_size: int, n_offspring: int) -> cp.ndarray:
+        """Perform tournament selection to choose parents.
+        
+        For each offspring, draw tournament_size candidates and select the best.
+        Returns array of parent indices (shape: n_offspring).
+        """
+        # Draw tournament candidates: (n_offspring, tournament_size)
+        candidates = self._generator.integers(0, parent_size, (n_offspring, self.tournament_size))
+        
+        # Get fitness for all candidates - need to find best in each tournament
+        # fitness shape: (parent_size, n_components)
+        fitness = self.population.fitness
+        
+        # For each tournament, find the winner (lexicographically smallest fitness)
+        winners = cp.zeros(n_offspring, dtype=cp.int64)
+        candidates_cpu = candidates.get()
+        for i in range(n_offspring):
+            tournament_fitness = fitness[candidates_cpu[i]]  # (tournament_size, n_components)
+            best_in_tournament = kgs.lexicographic_argmin(tournament_fitness)
+            winners[i] = candidates_cpu[i, best_in_tournament]
+        
+        return winners
+
+    def _generate_offspring(self, mate_sol, mate_weights):
+        old_pop = self.population
+        old_pop.check_constraints()
+        old_pop.parent_fitness = old_pop.fitness.copy()
+        parent_size = old_pop.configuration.N_solutions  # This is the surviving 50%
+        
+        # Save the champion for elitism (will be inserted in _merge_offspring)
+        best_idx = kgs.lexicographic_argmin(old_pop.fitness)
+        self._cached_champion_pop = copy.deepcopy(old_pop)
+        self._cached_champion_pop.select_ids([best_idx])
+        
+        # Create new population with full size
+        new_pop = old_pop.create_empty(self.population_size, self.N_trees_to_do)
+        
+        # Layout:
+        # - indices 0 to n_champion-1: champion offspring (mutated clones of champion)
+        # - indices n_champion to end: tournament offspring
+        # Note: position 0 will be overwritten with unmutated champion in _merge_offspring
+        
+        n_champion = int(self.population_size * self.champion_fraction)
+        n_tournament = self.population_size - n_champion
+        
+        # === Determine parent for each offspring ===
+        # Champion offspring: parent is always the champion
+        # Tournament offspring: parent selected via tournament
+        all_parent_ids = cp.zeros(self.population_size, dtype=cp.int64)
+        
+        if n_champion > 0:
+            all_parent_ids[:n_champion] = best_idx
+        
+        if n_tournament > 0:
+            all_parent_ids[n_champion:] = self._tournament_select(parent_size, n_tournament)
+        
+        # Clone all parents at once
+        all_inds = cp.arange(self.population_size)
+        new_pop.create_clone_batch(all_inds, old_pop, all_parent_ids)
+        
+        # === Determine mates for all offspring (same logic for champion and tournament) ===
+        if mate_sol is None or mate_sol.N_solutions == 0:
+            use_own = cp.ones(self.population_size, dtype=bool)
+        else:
+            use_own = self._generator.random(self.population_size) < self.prob_mate_own
+        
+        # Own-population mates
+        inds_use_own = cp.where(use_own)[0]
+        if len(inds_use_own) > 0:
+            parent_ids_own = all_parent_ids[inds_use_own]
+            mate_ids_own = self._generator.integers(0, parent_size, len(inds_use_own))
+            # Avoid self-mating
+            mate_ids_own = cp.where(mate_ids_own == parent_ids_own,
+                                    (mate_ids_own + 1) % parent_size,
+                                    mate_ids_own)
+            self.move.do_move_vec(new_pop, inds_use_own, old_pop.configuration,
+                                  mate_ids_own, self._generator)
+        
+        # External-population mates
+        inds_use_external = cp.where(~use_own)[0]
+        if len(inds_use_external) > 0:
+            mate_prob = cp.asarray(mate_weights) / cp.sum(mate_weights)
+            cum_prob = cp.cumsum(mate_prob)
+            random_vals = self._generator.random(len(inds_use_external))
+            mate_ids_external = cp.searchsorted(cum_prob, random_vals)
+            self.move.do_move_vec(new_pop, inds_use_external, mate_sol,
+                                  mate_ids_external, self._generator)
+        
+        return [new_pop]
+
+    def _merge_offspring(self):
+        """Replace population with offspring, preserving the champion (elitism)."""
+        new_pop = self._cached_offspring[0]
+        
+        # Insert unmutated champion at position 0 (overwrite the first champion offspring)
+        new_pop.create_clone_batch(cp.array([0]), self._cached_champion_pop, cp.array([0]))
+        
+        self.population = new_pop
+        self.population.check_constraints()
+
+
+@dataclass
 class GASinglePopulationOld(GASinglePopulation):
 
     population_size:int = field(init=True, default=4000)
