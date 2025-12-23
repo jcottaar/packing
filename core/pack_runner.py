@@ -180,7 +180,7 @@ def baseline_runner(fast_mode=False):
     print(len(ga_base.selection_size))
     res.modifier_dict['n_selection_size'] = pm(len(ga_base.selection_size), lambda r:r.choice([1,4,10,20,30,len(ga_base.selection_size)]).item(), set_n_selection_size)
     res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.uniform(0.5,0.8), set_ga_base_ga_prop)
-    res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:r.choice([1e-5, 1e-5]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:r.choice([1e-4, 1e-5]).item(), set_ga_base_ga_prop)
     res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.4,0.6), set_ga_prop)
     res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([True,False]).item(), disable_stripe_crossover)
     res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
