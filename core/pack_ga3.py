@@ -16,8 +16,7 @@ import copy
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 import lap_batch
-from pack_move import (Move, NoOp, MoveSelector, MoveRandomTree, JiggleRandomTree,
-                       JiggleCluster, Translate, Twist, Crossover)
+import pack_move
 
 
 # ============================================================
@@ -466,7 +465,7 @@ class GASinglePopulation(GA):
     N_trees_to_do: int = field(init=True, default=None)
     population_size:int = field(init=True, default=4000) 
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
-    move: Move = field(init=True, default=None)
+    move: pack_move.Move = field(init=True, default=None)
     fixed_h: float = field(init=True, default=0.61)
     reduce_h_threshold: float = field(init=True, default=1e-5)
     reduce_h_amount: float = field(init=True, default=2e-3)
@@ -483,16 +482,17 @@ class GASinglePopulation(GA):
     def __post_init__(self):        
         self.initializer.jiggler.n_rounds=0        
 
-        self.move = MoveSelector()
+        self.move = pack_move.MoveSelector()
         self.move.moves = []
-        self.move.moves.append( [MoveRandomTree(), 'MoveRandomTree', 1.0] )
-        self.move.moves.append( [JiggleRandomTree(max_xy_move=0.05, max_theta_move=np.pi/6), 'JiggleTreeSmall', 1.0] ) 
-        self.move.moves.append( [JiggleRandomTree(max_xy_move=0.1, max_theta_move=np.pi), 'JiggleTreeBig', 1.0] ) 
-        self.move.moves.append( [JiggleCluster(max_xy_move=0.05, max_theta_move=np.pi/6), 'JiggleClusterSmall', 1.0] )
-        self.move.moves.append( [JiggleCluster(max_xy_move=0.1, max_theta_move=np.pi), 'JiggleClusterBig', 1.0] )
-        self.move.moves.append( [Translate(), 'Translate', 1.0] )
-        self.move.moves.append( [Twist(), 'Twist', 1.0] )
-        self.move.moves.append( [Crossover(), 'Crossover', 3.0] )
+        self.move.moves.append( [pack_move.MoveRandomTree(), 'MoveRandomTree', 1.0] )
+        self.move.moves.append( [pack_move.JiggleRandomTree(max_xy_move=0.05, max_theta_move=np.pi/6), 'JiggleTreeSmall', 1.0] ) 
+        self.move.moves.append( [pack_move.JiggleRandomTree(max_xy_move=0.1, max_theta_move=np.pi), 'JiggleTreeBig', 1.0] ) 
+        self.move.moves.append( [pack_move.JiggleCluster(max_xy_move=0.05, max_theta_move=np.pi/6), 'JiggleClusterSmall', 1.0] )
+        self.move.moves.append( [pack_move.JiggleCluster(max_xy_move=0.1, max_theta_move=np.pi), 'JiggleClusterBig', 1.0] )
+        self.move.moves.append( [pack_move.Translate(), 'Translate', 1.0] )
+        self.move.moves.append( [pack_move.Twist(), 'Twist', 1.0] )
+        self.move.moves.append( [pack_move.Crossover(), 'Crossover', 2.0] )
+        self.move.moves.append( [pack_move.CrossoverStripe(), 'CrossoverStripe', 2.0] )
 
         super().__post_init__()
 
