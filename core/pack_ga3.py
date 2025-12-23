@@ -25,7 +25,8 @@ import pack_move
 
 @dataclass
 class Population(kgs.BaseClass):
-    configuration: kgs.SolutionCollection = field(init=True, default=None)
+    genotype: kgs.SolutionCollection = field(init=True, default=None)
+    phenotype: kgs.SolutionCollection = field(init=True, default=None)
     fitness: np.ndarray = field(init=True, default=None)  # Shape: (N_solutions, N_components)
     parent_fitness: np.ndarray = field(init=True, default=None)  # Shape: (N_solutions, N_components)
     # lineages: list = field(init=True, default=None)
@@ -39,10 +40,12 @@ class Population(kgs.BaseClass):
     #  - After fine relax
 
     def _check_constraints(self):
-        self.configuration.check_constraints()
-        assert self.fitness.shape[0] == self.configuration.N_solutions
+        self.genotype.check_constraints()
+        self.phenotype.check_constraints()
+        assert self.fitness.shape[0] == self.genotype.N_solutions
+        assert self.fitness.shape[0] == self.phenotype.N_solutions
         assert self.fitness.ndim == 2  # Shape: (N_solutions, N_components)
-        assert self.parent_fitness.shape[0] == self.configuration.N_solutions
+        assert self.parent_fitness.shape[0] == self.genotype.N_solutions
         assert self.parent_fitness.ndim == 2  # Shape: (N_solutions, N_components)
         # assert len(self.lineages) == self.configuration.N_solutions
 
@@ -54,18 +57,20 @@ class Population(kgs.BaseClass):
         n_components : int, optional
             Number of fitness components (default: 1)
         """
-        self.fitness = np.zeros((self.configuration.N_solutions, n_components), dtype=kgs.dtype_np)
-        self.parent_fitness = np.zeros((self.configuration.N_solutions, n_components), dtype=kgs.dtype_np)
+        self.fitness = np.zeros((self.phenotype.N_solutions, n_components), dtype=kgs.dtype_np)
+        self.parent_fitness = np.zeros((self.phenotype.N_solutions, n_components), dtype=kgs.dtype_np)
 
     def select_ids(self, inds):
-        self.configuration.select_ids(inds)
+        self.genotype.select_ids(inds)
+        self.phenotype.select_ids(inds)
         self.fitness = self.fitness[inds]
         self.parent_fitness = self.parent_fitness[inds]
         # self.lineages = [self.lineages[i] for i in inds]
 
     def create_empty(self, N_individuals, N_trees):
-        configuration = self.configuration.create_empty(N_individuals, N_trees)
-        population = type(self)(configuration=configuration)
+        genotype = self.genotype.create_empty(N_individuals, N_trees)
+        phenotype = self.phenotype.create_empty(N_individuals, N_trees)
+        population = type(self)(phenotype=phenotype, genotype=genotype)
         # Initialize with same number of components as self
         n_components = self.fitness.shape[1]
         population.fitness = np.zeros((N_individuals, n_components), dtype=kgs.dtype_np)
@@ -74,15 +79,15 @@ class Population(kgs.BaseClass):
         return population
 
     def create_clone(self, idx: int, other: 'Population', parent_id: int):
-        assert idx<self.configuration.N_solutions
-        self.configuration.create_clone(idx, other.configuration, parent_id)
+        assert idx<self.genotype.N_solutions
+        self.genotype.create_clone(idx, other.genotype, parent_id)
         self.fitness[idx] = other.fitness[parent_id]
         self.parent_fitness[idx] = other.fitness[parent_id]
         # self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
 
     def create_clone_batch(self, inds: cp.ndarray, other: 'Population', parent_ids: cp.ndarray):
         """Vectorized batch clone operation."""
-        self.configuration.create_clone_batch(inds, other.configuration, parent_ids)
+        self.genotype.create_clone_batch(inds, other.genotype, parent_ids)
         # Convert indices to CPU for NumPy array indexing
         inds_cpu = inds.get() if isinstance(inds, cp.ndarray) else inds
         parent_ids_cpu = parent_ids.get() if isinstance(parent_ids, cp.ndarray) else parent_ids
@@ -90,7 +95,8 @@ class Population(kgs.BaseClass):
         self.parent_fitness[inds_cpu] = other.fitness[parent_ids_cpu]
 
     def merge(self, other:'Population'):
-        self.configuration.merge(other.configuration)
+        self.genotype.merge(other.genotype)
+        self.phenotype.merge(other.phenotype)
         self.fitness = np.concatenate([self.fitness, other.fitness], axis=0)
         self.parent_fitness = np.concatenate([self.parent_fitness, other.parent_fitness], axis=0)
         # self.lineages = self.lineages + other.lineages
@@ -105,9 +111,10 @@ class Initializer(kgs.BaseClass):
     seed: int = field(init=True, default=42)
     def initialize_population(self, N_individuals, N_trees):
         population = self._initialize_population(N_individuals, N_trees)
+        population.phenotype = copy.deepcopy(population.genotype)
         population.set_dummy_fitness()
-        assert population.configuration.N_solutions == N_individuals
-        assert population.configuration.N_trees == N_trees
+        assert population.genotype.N_solutions == N_individuals
+        assert population.genotype.N_trees == N_trees        
         population.check_constraints()
         return population        
 
@@ -141,7 +148,7 @@ class InitializerRandomJiggled(Initializer):
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
         sol = self.jiggler.run_simulation(sol)
         sol.snap()
-        population = Population(configuration=sol)
+        population = Population(genotype=sol)
         return population
     
 
@@ -169,7 +176,8 @@ class GA(kgs.BaseClass):
     
 
     best_costs_per_generation_ax = None
-    champion_ax = None
+    champion_genotype_ax = None
+    champion_phenotype_ax = None
 
     _cached_offspring: list = field(init=False, default=None)
     _last_reset_generation: int = field(init=False, default=0)
@@ -182,7 +190,7 @@ class GA(kgs.BaseClass):
             self.fitness_cost.check_constraints()
         if self.champions is not None:
             for champion in self.champions:
-                assert(champion.configuration.N_solutions==1)
+                assert(champion.phenotype.N_solutions==1)
                 champion.check_constraints()
             assert(len(self.champions) == len(self.best_costs_per_generation))     
             for champion, cost in zip(self.champions, self.best_costs_per_generation):
@@ -260,7 +268,7 @@ class GA(kgs.BaseClass):
         self._finalize()
         if self.do_legalize:
             for champion in self.champions:
-                champion.configuration = pack_io.legalize(champion.configuration)
+                champion.phenotype = pack_io.legalize(champion.phenotype)
     
     def abbreviate(self):
         self._abbreviate()
@@ -278,12 +286,20 @@ class GA(kgs.BaseClass):
                 plt.grid(True)
                 plt.xlabel('Generation')
                 plt.ylabel('Best Cost')
-        if not self.champion_ax is None:
-            ax = plot_ax[ self.champion_ax ]
+        if not self.champion_genotype_ax is None:
+            ax = plot_ax[ self.champion_genotype_ax ]
             plt.sca(ax)
             if len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
                 ax.clear()
-                pack_vis_sol.pack_vis_sol(self.champions[0].configuration, ax=ax)
+                pack_vis_sol.pack_vis_sol(self.champions[0].genotype, ax=ax)
+                plt.title('Champion Genotype')
+        if not self.champion_phenotype_ax is None:
+            ax = plot_ax[ self.champion_phenotype_ax ]
+            plt.sca(ax)
+            if len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
+                ax.clear()
+                pack_vis_sol.pack_vis_sol(self.champions[0].phenotype, ax=ax)
+                plt.title('Champion Phenotype')
         self._diagnostic_plots(plot_ax)
     
 
@@ -380,9 +396,9 @@ class GAMulti(GA):
             ax = plot_ax[self.plot_diversity_ax]
             ax.clear()
             plt.sca(ax)
-            champions_pop = copy.deepcopy(self.ga_list[0].champions[0].configuration)
+            champions_pop = copy.deepcopy(self.ga_list[0].champions[0].genotype)
             for ga in self.ga_list[1:]:
-                champions_pop.merge(ga.champions[0].configuration)
+                champions_pop.merge(ga.champions[0].genotype)
             # Compute diversity matrix
             N_sols = champions_pop.N_solutions
             diversity_matrix = np.zeros((N_sols, N_sols), dtype=kgs.dtype_np)
@@ -447,9 +463,9 @@ class GAMultiRing(GAMultiSimilar):
             
             # Merge all collected populations into a single solution collection
             if len(populations_to_merge)>0:
-                merged_sol = copy.deepcopy(populations_to_merge[0].configuration)
+                merged_sol = copy.deepcopy(populations_to_merge[0].genotype)
                 for pop in populations_to_merge[1:]:
-                    merged_sol.merge(pop.configuration)
+                    merged_sol.merge(pop.genotype)
                 mate_weights = np.ones(merged_sol.N_solutions) / merged_sol.N_solutions
             else:
                 merged_sol, mate_weights = None, None
@@ -517,22 +533,24 @@ class GASinglePopulation(GA):
 
     def _score(self, register_best):
         # Compute cost and reshape to (N_solutions, 1) for tuple-based fitness
-        cost_values = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
+        cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()
 
         
-        if self.population.configuration.use_fixed_h:
+        if self.population.phenotype.use_fixed_h:
             if not self.reduce_h_per_individual:
                 if np.min(cost_values) < self.reduce_h_threshold:
                     # Reduce h if below threshold
-                    self.population.configuration.h[:, 0] -= self.reduce_h_amount
-                    cost_values = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()            
+                    self.population.genotype.h[:, 0] -= self.reduce_h_amount
+                    self.population.phenotype.h[:, 0] -= self.reduce_h_amount
+                    cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()            
             else:
                 # Reduce h per individual if below threshold
-                for i in range(self.population.configuration.N_solutions):
+                for i in range(self.population.phenotype.N_solutions):
                     if cost_values[i] < self.reduce_h_threshold:
-                        self.population.configuration.h[i, 0] -= self.reduce_h_amount
-                cost_values = self.fitness_cost.compute_cost_allocate(self.population.configuration, evaluate_gradient=False)[0].get()
-            self.population.fitness = np.stack( (self.population.configuration.h[:,0].get(), cost_values)).T # Shape: (N_solutions, 2)
+                        self.population.genotype.h[i, 0] -= self.reduce_h_amount
+                        self.population.phenotype.h[i, 0] -= self.reduce_h_amount
+                cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()
+            self.population.fitness = np.stack( (self.population.phenotype.h[:,0].get(), cost_values)).T # Shape: (N_solutions, 2)
         else:
             self.population.fitness = cost_values.reshape((-1, 1))  # Shape: (N_solutions, 1)
         
@@ -549,7 +567,7 @@ class GASinglePopulation(GA):
         self.check_constraints()
 
     def _get_list_for_simulation(self):
-        return [self.population.configuration]
+        return [self.population]
     
     def _finalize(self):
         self._generator = None
@@ -562,7 +580,7 @@ class GASinglePopulation(GA):
             ax = plot_ax[self.plot_diversity_ax]
             ax.clear()
             plt.sca(ax)
-            pop = self.population.configuration
+            pop = self.population.genotype
             # Compute diversity matrix
             N_sols = pop.N_solutions
             diversity_matrix = np.zeros((N_sols, N_sols), dtype=kgs.dtype_np)
@@ -641,7 +659,7 @@ class GASinglePopulationTournament(GASinglePopulation):
         old_pop = self.population
         old_pop.check_constraints()
         old_pop.parent_fitness = old_pop.fitness.copy()
-        parent_size = old_pop.configuration.N_solutions  # This is the surviving 50%
+        parent_size = old_pop.genotype.N_solutions  # This is the surviving 50%
         
         # Save the champion for elitism (will be inserted in _merge_offspring)
         best_idx = kgs.lexicographic_argmin(old_pop.fitness)
@@ -684,7 +702,7 @@ class GASinglePopulationTournament(GASinglePopulation):
         inds_use_own = cp.where(use_own)[0]
         if len(inds_use_own) > 0:
             mate_ids_own = cp.full(len(inds_use_own), best_idx, dtype=cp.int64)
-            self.move.do_move_vec(new_pop, inds_use_own, old_pop.configuration,
+            self.move.do_move_vec(new_pop, inds_use_own, old_pop.genotype,
                                   mate_ids_own, self._generator)
         
         # External-population mates
@@ -694,7 +712,7 @@ class GASinglePopulationTournament(GASinglePopulation):
             cum_prob = cp.cumsum(mate_prob)
             random_vals = self._generator.random(len(inds_use_external))
             mate_ids_external = cp.searchsorted(cum_prob, random_vals)
-            self.move.do_move_vec(new_pop, inds_use_external, mate_sol,
+            self.move.do_move_vec(new_pop, inds_use_external, mate_sol.genotype,
                                   mate_ids_external, self._generator)
         
         return [new_pop]
@@ -721,7 +739,7 @@ class GASinglePopulationOld(GASinglePopulation):
     def _apply_selection(self):
         current_pop = self.population
         current_pop.select_ids(kgs.lexicographic_argsort(current_pop.fitness))  # Sort by fitness lexicographically
-        current_xyt = current_pop.configuration.xyt  # (N_individuals, N_trees, 3)
+        current_xyt = current_pop.genotype.xyt  # (N_individuals, N_trees, 3)
 
         max_sel = np.max(self.selection_size)
         selected = np.zeros(self.population_size, dtype=bool)
@@ -741,11 +759,11 @@ class GASinglePopulationOld(GASinglePopulation):
         old_pop = self.population
         old_pop.check_constraints()
         old_pop.parent_fitness = old_pop.fitness.copy()
-        parent_size = old_pop.configuration.N_solutions
+        parent_size = old_pop.genotype.N_solutions
         new_pop = old_pop.create_empty(self.population_size-parent_size, self.N_trees_to_do)
 
         # Generate all parent and mate selections at once (vectorized)
-        N_offspring = new_pop.configuration.N_solutions
+        N_offspring = new_pop.genotype.N_solutions
 
         # Pick random parents (all from old_pop)
         parent_ids = self._generator.integers(0, parent_size, size=N_offspring)
@@ -772,7 +790,7 @@ class GASinglePopulationOld(GASinglePopulation):
             new_pop.create_clone_batch(inds_use_own, old_pop, parent_ids_own)
             
             # Apply moves with mates from own population
-            self.move.do_move_vec(new_pop, cp.array(inds_use_own), old_pop.configuration, cp.array(mate_ids_own), self._generator)
+            self.move.do_move_vec(new_pop, cp.array(inds_use_own), old_pop.genotype, cp.array(mate_ids_own), self._generator)
 
         # Process offspring using external population as mate source
         if len(inds_use_external) > 0:
@@ -813,7 +831,9 @@ class Orchestrator(kgs.BaseClass):
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
     n_generations: int = field(init=True, default=200)
+    genotype_at: int = field(init=True, default=1)  # 0:before relax, 1:after rough relax, 2:after fine relax(=phenotype)
     seed: int = field(init=True, default=42)
+    
 
     # Diagnostics
     diagnostic_plot: bool = field(init=True, default=False)
@@ -858,10 +878,30 @@ class Orchestrator(kgs.BaseClass):
         super().__post_init__()
 
     def _relax(self, sol_list):
+        # pack_vis_sol.pack_vis_sol(sol_list[0].genotype)  # Sanity check
+        # plt.title('Genotype')
+        # pack_vis_sol.pack_vis_sol(sol_list[0].phenotype)  # Sanity check
+        # plt.title('Phenotype')
+        for s in sol_list:
+            s.phenotype.xyt[:] = s.genotype.xyt[:]
+            s.phenotype.h[:] = s.genotype.h[:]
+        conf_list = [s.phenotype for s in sol_list]
+        if self.genotype_at == 0:
+            for s in sol_list:
+                s.genotype.xyt[:] = s.phenotype.xyt[:]
+                s.genotype.h[:] = s.phenotype.h[:]
         for relaxer in self.rough_relaxers:
-            pack_dynamics.run_simulation_list(relaxer, sol_list)
+            pack_dynamics.run_simulation_list(relaxer, conf_list)
+        if self.genotype_at == 1:
+            for s in sol_list:
+                s.genotype.xyt[:] = s.phenotype.xyt[:]
+                s.genotype.h[:] = s.phenotype.h[:]
         for relaxer in self.fine_relaxers:
-            pack_dynamics.run_simulation_list(relaxer, sol_list)
+            pack_dynamics.run_simulation_list(relaxer, conf_list)
+        if self.genotype_at == 2:
+            for s in sol_list:
+                s.genotype.xyt[:] = s.phenotype.xyt[:]
+                s.genotype.h[:] = s.phenotype.h[:]
 
 
     def _check_constraints(self):        
@@ -888,7 +928,7 @@ class Orchestrator(kgs.BaseClass):
             self._current_generation = i_gen
 
             offspring_list = self.ga.generate_offspring(None, None)
-            self._relax([s.configuration for s in offspring_list])
+            self._relax(offspring_list)
             self.ga.merge_offspring()
             
             self.ga.score(register_best=True)            

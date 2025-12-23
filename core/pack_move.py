@@ -120,8 +120,8 @@ class MoveRandomTree(Move):
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: randomly reposition selected trees in multiple individuals."""
-        new_h = population.configuration.h
-        new_xyt = population.configuration.xyt
+        new_h = population.genotype.h
+        new_xyt = population.genotype.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
@@ -147,7 +147,7 @@ class JiggleRandomTree(Move):
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: jiggle random trees in multiple individuals."""
-        new_xyt = population.configuration.xyt
+        new_xyt = population.genotype.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
@@ -171,8 +171,8 @@ class JiggleCluster(Move):
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Fully vectorized version: jiggle variable numbers of trees in clusters."""
-        new_h = population.configuration.h
-        new_xyt = population.configuration.xyt
+        new_h = population.genotype.h
+        new_xyt = population.genotype.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
@@ -229,8 +229,8 @@ class Translate(Move):
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: translate all trees in multiple individuals."""
-        new_h = population.configuration.h
-        new_xyt = population.configuration.xyt
+        new_h = population.genotype.h
+        new_xyt = population.genotype.xyt
         N_moves = int(inds_to_do.shape[0])
 
         # Get h parameters (on GPU)
@@ -254,8 +254,8 @@ class Twist(Move):
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: twist trees around centers in multiple individuals."""
-        new_h = population.configuration.h
-        new_xyt = population.configuration.xyt
+        new_h = population.genotype.h
+        new_xyt = population.genotype.xyt
         N_moves = int(inds_to_do.shape[0])
 
         # Get h parameters (on GPU)
@@ -307,8 +307,8 @@ class Crossover(Move):
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
         """Fully vectorized version: crossover trees from mates into multiple individuals."""
-        new_h = population.configuration.h
-        new_xyt = population.configuration.xyt
+        new_h = population.genotype.h
+        new_xyt = population.genotype.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
@@ -532,8 +532,8 @@ class CrossoverStripe(Move):
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
         # Cache configuration tensors and short-circuit if nothing to do
-        new_h = population.configuration.h
-        new_xyt = population.configuration.xyt
+        new_h = population.genotype.h
+        new_xyt = population.genotype.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
         if N_moves == 0:
