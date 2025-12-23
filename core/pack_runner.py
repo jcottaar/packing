@@ -103,21 +103,36 @@ def set_ga_prop(ga, name, value):
     # Handle special case where modifier name differs from property name
     setattr(ga.ga, name, value)
 
+def set_ga_base_ga_prop(ga,name,value):
+    """Generic setter for GA properties - sets ga.ga.{name} = value"""
+    # Handle special case where modifier name differs from property name
+    setattr(ga.ga.ga_base, name, value)
+
 def scale_population_size(ga, name, value):
     """Scale population size by given factor"""
-    ga.ga.population_size = int(ga.ga.population_size * value)
-    ga.ga.selection_size = [int( (s-1) * value)+1 for s in ga.ga.selection_size]
-    ga.n_generations = int(ga.n_generations / value)
+    ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size * value)
+    ga.ga.ga_base.selection_size = [int( (s-1) * value)+1 for s in ga.ga.ga_base.selection_size]
+    #ga.n_generations = int(ga.n_generations / value)
     # now make sure selection_size is unique, i.e. 1,2,2,3,3,4,4,5,20 must become 1,2,3,4,5,6,7,8,40
     seen = set()
     unique_selection = []
-    for s in ga.ga.selection_size:
+    for s in ga.ga.ga_base.selection_size:
         while s in seen:
             s += 1
         seen.add(s)
         unique_selection.append(s)
-    ga.ga.selection_size = unique_selection
-    print(ga.ga.selection_size)
+    ga.ga.ga_base.selection_size = unique_selection
+    print(ga.ga.ga_base.population_size, ga.ga.ga_base.selection_size)
+
+def set_n_selection_size(ga, name, value):
+    """Set number of selection sizes to use"""
+    ga.ga.ga_base.selection_size = ga.ga.ga_base.selection_size[:value]
+
+def disable_stripe_crossover(ga, name, value):
+    """Disable stripe crossover in multi-ring GA"""
+    print(ga.ga.ga_base.move.moves[-1])
+    if value:
+        ga.ga.ga_base.move.moves.pop(-1)
 
 
 
@@ -130,27 +145,47 @@ def baseline_runner(fast_mode=False):
     res = Runner()
     res.label = 'Baseline'
 
-    #res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(200,601).item(), set_orchestrator_prop)
-    #res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
-    #res.modifier_dict['fixed_h'] = pm(0.605576, lambda r:r.uniform(0.6,0.618), set_ga_prop)
-    #res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(1.,1.), scale_population_size)
-    res.modifier_dict['champion_fraction'] = pm (0.1, lambda r:r.uniform(0.05,0.2), set_ga_prop)
-    res.modifier_dict['tournament_size'] = pm(4, lambda r:r.integers(2,6).item(), set_ga_prop)
-    res.modifier_dict['selection_fraction'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
+    runner = pack_ga3.Orchestrator(n_generations=600 if not fast_mode else 5)
+    runner.ga = pack_ga3.GAMultiRing(N=16)
+    runner.ga.diversity_reset_threshold = 5./40
+    runner.ga.mate_distance=6
 
-     # Set base GA
+    ga_base = pack_ga3.GASinglePopulationOld(N_trees_to_do=40)
+    #ga_base.population_size = 250
+    #ga_base.prob_mate_own = 0.25
+    value = 0.125
+    ga_base.population_size = int(ga_base.population_size * value)
+    ga_base.selection_size = [int( (s-1) * value)+1 for s in ga_base.selection_size]
+    ga_base.do_legalize = False
+    ga_base.reset_check_generations = 50
+    ga_base.reset_check_threshold = 0.5
+    ga_base.freeze_duration = 100
+    #ga_base.move.moves[-1][2] *= 2
+    ga_base.prob_mate_own = 0.7
+    ga_base.reduce_h_threshold = 1e-4
 
-    res.base_ga.ga = pack_ga3.GASinglePopulationTournament()
-    
-    runner = res.base_ga
-    runner.n_generations = 500
+    runner.ga.ga_base = ga_base
+    runner.ga.do_legalize = True
+    runner.ga.allow_reset_ratio = 0.5
+    runner.ga.best_costs_per_generation_ax = ((0,False,(0,1)),)#( (0,False,(0,0)) ,(1,True,(0,1)))
+    runner.ga.plot_subpopulation_costs_per_generation_ax = ( (0,False,(0,2)) ,(1,True,(1,2)))
+    runner.ga.champion_genotype_ax = (1,0)
+    runner.ga.champion_phenotype_ax = (0,0)
+    runner.ga.plot_diversity_ax = (1,1)
+    runner.diagnostic_plot = False
 
-    if fast_mode:         
-        runner.n_generations = 5
-        runner.ga.population_size = 100
-        #runner.ga.selection_size = [1,2,5,10]
-        runner.ga.do_legalize = False
-        res.modifier_dict['n_generations'] = pm(200, lambda r:r.integers(5,6).item(), set_orchestrator_prop)
+    res.base_ga = runner
+
+    res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(1.,1.25), scale_population_size)
+    print(len(ga_base.selection_size))
+    res.modifier_dict['n_selection_size'] = pm(len(ga_base.selection_size), lambda r:r.choice([1,4,10,20,30,len(ga_base.selection_size)]).item(), set_n_selection_size)
+    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.uniform(0.5,0.8), set_ga_base_ga_prop)
+    res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:r.choice([1e-5, 1e-5]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.4,0.6), set_ga_prop)
+    res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([True,False]).item(), disable_stripe_crossover)
+    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
+    res.modifier_dict['fixed_h'] = pm(ga_base.fixed_h, lambda r:r.uniform(0.61,0.615), set_ga_base_ga_prop)
+    res.modifier_dict['reduce_h_amount'] = pm(ga_base.reduce_h_amount, lambda r:r.choice([0.001,0.002]), set_ga_base_ga_prop)
 
     return res
 

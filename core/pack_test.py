@@ -32,7 +32,7 @@ def test_ga(regenerate_reference):
     ga.n_generations = 5       
     ga.ga.N_trees_to_do = 10
     ga.ga.population_size = 100
-    ga.ga.selection_size = list(np.arange(1,80))
+    ga.ga.selection_size = [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,26,27,28,29,30,35,40,45,50,60,70,80,90]
     ga.ga.do_legalize = False
     ga.run()
     res = ga.ga.population.fitness

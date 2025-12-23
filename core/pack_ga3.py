@@ -168,7 +168,7 @@ class GA(kgs.BaseClass):
     do_legalize: bool = field(init=True, default=True)
 
     allow_reset: bool = field(init=True, default=True)
-    allow_freeze: bool = field(init=True, default=True)
+    allow_freeze: bool = field(init=True, default=False)
     reset_check_generations: int = field(init=True, default=None)
     reset_check_generations_ratio: float = field(init=True, default=0.1)
     reset_check_threshold: float = field(init=True, default=0.1)
