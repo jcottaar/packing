@@ -999,35 +999,35 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
         (3*np.pi/2,  True),   # Mirror + 270° rotation
     ]
     
-    # Reference coordinates (fixed, not transformed)
-    ref_x = reference_xyt[:, :, 0]      # (N_ref, N_trees)
-    ref_y = reference_xyt[:, :, 1]      # (N_ref, N_trees)
-    ref_theta = reference_xyt[:, :, 2]  # (N_ref, N_trees)
+    # Population coordinates (fixed, not transformed)
+    pop_x = population_xyt[:, :, 0]      # (N_pop, N_trees)
+    pop_y = population_xyt[:, :, 1]      # (N_pop, N_trees)
+    pop_theta = population_xyt[:, :, 2]  # (N_pop, N_trees)
     
     # Compute cost matrices for all 8 transformations on GPU
     all_cost_matrices = []
     for rot_angle, do_mirror in transformations:
         # ---------------------------------------------------------
-        # Step 1: Apply transformation to population individuals (GPU)
+        # Step 1: Apply transformation to reference individuals (GPU)
         # ---------------------------------------------------------
-        pop_x = population_xyt[:, :, 0].copy()
-        pop_y = population_xyt[:, :, 1].copy()
-        pop_theta = population_xyt[:, :, 2].copy()
+        ref_x = reference_xyt[:, :, 0].copy()
+        ref_y = reference_xyt[:, :, 1].copy()
+        ref_theta = reference_xyt[:, :, 2].copy()
         
         if do_mirror:
-            pop_y = -pop_y
-            pop_theta = -pop_theta
+            ref_y = -ref_y
+            ref_theta = -ref_theta
         
         if rot_angle != 0.0:
             cos_a = np.cos(rot_angle)
             sin_a = np.sin(rot_angle)
-            new_x = pop_x * cos_a - pop_y * sin_a
-            new_y = pop_x * sin_a + pop_y * cos_a
-            pop_x = new_x
-            pop_y = new_y
-            pop_theta = pop_theta + rot_angle
+            new_x = ref_x * cos_a - ref_y * sin_a
+            new_y = ref_x * sin_a + ref_y * cos_a
+            ref_x = new_x
+            ref_y = new_y
+            ref_theta = ref_theta + rot_angle
         
-        pop_theta = cp.remainder(pop_theta + np.pi, 2*np.pi) - np.pi
+        ref_theta = cp.remainder(ref_theta + np.pi, 2*np.pi) - np.pi
         
         # ---------------------------------------------------------
         # Step 2: Compute pairwise cost matrix (GPU)
