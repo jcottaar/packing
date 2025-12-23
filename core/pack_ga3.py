@@ -680,15 +680,10 @@ class GASinglePopulationTournament(GASinglePopulation):
         else:
             use_own = self._generator.random(self.population_size) < self.prob_mate_own
         
-        # Own-population mates
+        # Own-population mates (always mate with champion)
         inds_use_own = cp.where(use_own)[0]
         if len(inds_use_own) > 0:
-            parent_ids_own = all_parent_ids[inds_use_own]
-            mate_ids_own = self._generator.integers(0, parent_size, len(inds_use_own))
-            # Avoid self-mating
-            mate_ids_own = cp.where(mate_ids_own == parent_ids_own,
-                                    (mate_ids_own + 1) % parent_size,
-                                    mate_ids_own)
+            mate_ids_own = cp.full(len(inds_use_own), best_idx, dtype=cp.int64)
             self.move.do_move_vec(new_pop, inds_use_own, old_pop.configuration,
                                   mate_ids_own, self._generator)
         
