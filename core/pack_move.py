@@ -301,7 +301,7 @@ class Crossover(Move):
     applying a random rotation (0/90/180/270°) and optional mirroring.
     """
     min_N_trees: int = field(init=True, default=4)
-    max_N_trees: int = field(init=True, default=20)
+    max_N_trees_ratio: float = field(init=True, default=0.5)
     simple_mate_location: bool = field(init=True, default=False)
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
@@ -340,7 +340,9 @@ class Crossover(Move):
 
         # Generate n_trees_to_replace, rotation, and mirror for all
         min_trees = min(self.min_N_trees, N_trees)
-        max_trees = min(self.max_N_trees, N_trees)
+        max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
+        if max_trees< min_trees:
+            max_trees = min_trees
         n_trees_to_replace_all = generator.integers(min_trees, max_trees + 1, size=N_moves)
         rotation_choice_all = generator.integers(0, 4, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
