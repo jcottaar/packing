@@ -776,18 +776,10 @@ class GASinglePopulationOld(GASinglePopulation):
         max_sel = np.max(self.selection_size)
         selected = np.zeros(self.population_size, dtype=bool)
         diversity = np.inf*np.ones(max_sel)
-        
-        # Pre-compute full diversity matrix once (max_sel × max_sel)
-        diversity_matrix = kgs.compute_genetic_diversity_matrix(
-            cp.array(current_xyt[:max_sel]), 
-            cp.array(current_xyt[:max_sel])
-        ).get()
-        
         for sel_size in self.selection_size:
             selected_id = np.argmax(diversity[:sel_size])
             selected[selected_id] = True
-            # Index into pre-computed matrix instead of recomputing
-            diversity = np.minimum(diversity_matrix[:, selected_id], diversity)
+            diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
             #print(sel_size, diversity)
             assert(np.all(diversity[selected[:max_sel]]<1e-4))
         current_pop.select_ids(np.where(selected)[0])
