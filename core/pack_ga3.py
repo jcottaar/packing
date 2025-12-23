@@ -316,7 +316,7 @@ class GAMulti(GA):
     plot_subpopulation_costs_per_generation_ax = None
     allow_reset_ratio: float = field(init=True, default=1.) # allow only the worst X% of subpopulations to reset
     diversity_reset_threshold: float = field(init=True, default=np.inf) # diversity required to avoid reset
-    diversity_reset_check_frequency: int = field(init=True, default=30) # in generations
+    diversity_reset_check_frequency: int = field(init=True, default=5) # in generations
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -364,9 +364,7 @@ class GAMulti(GA):
                 if n_ga > 1:
                     champion_xyts = cp.concatenate([ga.champions[0].genotype.xyt for ga in self.ga_list], axis=0)
                     champion_xyts_cp = cp.array(champion_xyts)
-                    diversity_matrix = np.zeros((n_ga, n_ga), dtype=kgs.dtype_np)
-                    for i in range(n_ga):
-                        diversity_matrix[:, i] = kgs.compute_genetic_diversity(champion_xyts_cp, champion_xyts_cp[i]).get()
+                    diversity_matrix = kgs.compute_genetic_diversity_matrix(champion_xyts_cp, champion_xyts_cp).get()
                     to_reset = set()
                     for i in range(n_ga):
                         if i in to_reset:
@@ -439,9 +437,7 @@ class GAMulti(GA):
                 champions_pop.merge(ga.champions[0].genotype)
             # Compute diversity matrix
             N_sols = champions_pop.N_solutions
-            diversity_matrix = np.zeros((N_sols, N_sols), dtype=kgs.dtype_np)
-            for i in range(N_sols):
-                diversity_matrix[:,i] = kgs.compute_genetic_diversity(cp.array(champions_pop.xyt), cp.array(champions_pop.xyt[i])).get()
+            diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(champions_pop.xyt), cp.array(champions_pop.xyt)).get()
             im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
             if not hasattr(ax, '_colorbar') or ax._colorbar is None:
                 ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
@@ -621,9 +617,7 @@ class GASinglePopulation(GA):
             pop = self.population.genotype
             # Compute diversity matrix
             N_sols = pop.N_solutions
-            diversity_matrix = np.zeros((N_sols, N_sols), dtype=kgs.dtype_np)
-            for i in range(N_sols):
-                diversity_matrix[:,i] = kgs.compute_genetic_diversity(cp.array(pop.xyt), cp.array(pop.xyt[i])).get()
+            diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt)).get()
             im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
             if not hasattr(ax, '_colorbar') or ax._colorbar is None:
                 ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')

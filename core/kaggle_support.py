@@ -939,27 +939,27 @@ def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
     return False  # Equal
 
 
-def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
+def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
     """
-    Compute the minimum-cost assignment distance between each individual in a population
-    and a single reference configuration, considering all 8 symmetry transformations
+    Compute the minimum-cost assignment distance between each pair of individuals
+    from two populations, considering all 8 symmetry transformations
     (4 rotations × 2 mirror states).
     
-    Uses the Hungarian algorithm (via scipy) to find the optimal tree-to-tree mapping
+    Uses the Hungarian algorithm to find the optimal tree-to-tree mapping
     that minimizes total distance. The distance metric includes (x, y, theta) with equal weights.
     
     Parameters
     ----------
     population_xyt : cp.ndarray
-        Shape (N_pop, N_trees, 3). Population of individuals, where each individual
+        Shape (N_pop, N_trees, 3). First population of individuals, where each individual
         has N_trees trees with (x, y, theta) coordinates.
     reference_xyt : cp.ndarray
-        Shape (N_trees, 3). Single reference configuration to compare against.
+        Shape (N_ref, N_trees, 3). Second population of individuals to compare against.
         
     Returns
     -------
     cp.ndarray
-        Shape (N_pop,). Minimum assignment distance for each individual, taken over
+        Shape (N_pop, N_ref). Minimum assignment distance for each pair, taken over
         all 8 symmetry transformations.
         
     Notes
@@ -978,10 +978,11 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     import lap_batch
     
     N_pop, N_trees, _ = population_xyt.shape
+    N_ref, N_trees_ref, _ = reference_xyt.shape
     
     # Validate shapes
-    assert reference_xyt.shape == (N_trees, 3), \
-        f"Reference shape {reference_xyt.shape} doesn't match expected ({N_trees}, 3)"
+    assert N_trees == N_trees_ref, \
+        f"Number of trees mismatch: population has {N_trees}, reference has {N_trees_ref}"
     
     # Pre-compute the 8 transformation parameters
     # Each transformation is (rotation_angle, mirror_x)
@@ -998,13 +999,10 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
         (3*np.pi/2,  True),   # Mirror + 270° rotation
     ]
     
-    # Initialize result: will store minimum distance across all transformations
-    min_distances = cp.full(N_pop, cp.inf, dtype=dtype_cp)
-    
     # Reference coordinates (fixed, not transformed)
-    ref_x = reference_xyt[:, 0]      # (N_trees,)
-    ref_y = reference_xyt[:, 1]      # (N_trees,)
-    ref_theta = reference_xyt[:, 2]  # (N_trees,)
+    ref_x = reference_xyt[:, :, 0]      # (N_ref, N_trees)
+    ref_y = reference_xyt[:, :, 1]      # (N_ref, N_trees)
+    ref_theta = reference_xyt[:, :, 2]  # (N_ref, N_trees)
     
     # Compute cost matrices for all 8 transformations on GPU
     all_cost_matrices = []
@@ -1034,9 +1032,13 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
         # ---------------------------------------------------------
         # Step 2: Compute pairwise cost matrix (GPU)
         # ---------------------------------------------------------
-        dx = pop_x[:, :, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :]
-        dy = pop_y[:, :, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :]
-        dtheta = pop_theta[:, :, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :]
+        # Shape calculations:
+        # pop_x[:, :, None, None]: (N_pop, N_trees, 1, 1)
+        # ref_x[None, None, :, :]: (1, 1, N_ref, N_trees)
+        # Result: (N_pop, N_trees, N_ref, N_trees)
+        dx = pop_x[:, :, cp.newaxis, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :, :]
+        dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
+        dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
         dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
         cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)
         
@@ -1045,22 +1047,57 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     # ---------------------------------------------------------
     # Step 3: Solve assignment problems on GPU using RAFT
     # ---------------------------------------------------------
-    # Stack all cost matrices on GPU: shape (8, N_pop, N_trees, N_trees)
-    # Then reshape to (8*N_pop, N_trees, N_trees) for batched solving
-    stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_trees)
-    batched = stacked.reshape(-1, N_trees, N_trees)    # (8*N_pop, N_trees, N_trees)
+    # Stack all cost matrices on GPU: shape (8, N_pop, N_trees, N_ref, N_trees)
+    # Then reshape to (8*N_pop*N_ref, N_trees, N_trees) for batched solving
+    stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_ref, N_trees)
+    batched = stacked.transpose(0, 1, 3, 2, 4).reshape(-1, N_trees, N_trees)  # (8*N_pop*N_ref, N_trees, N_trees)
     
     # Solve all LAPs on GPU
-    _, all_assignment_costs = lap_batch.solve_lap_batch(batched)  # (8*N_pop,)
+    _, all_assignment_costs = lap_batch.solve_lap_batch(batched)  # (8*N_pop*N_ref,)
     
     # Reshape back and take minimum across transformations
-    all_costs_array = all_assignment_costs.reshape(8, N_pop)  # (8, N_pop)
-    min_distances = all_costs_array.min(axis=0)
+    all_costs_array = all_assignment_costs.reshape(8, N_pop, N_ref)  # (8, N_pop, N_ref)
+    min_distances = all_costs_array.min(axis=0)  # (N_pop, N_ref)
     
     if profiling:
         cp.cuda.Device().synchronize()
     
     return min_distances
+
+
+def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
+    """
+    Compute the minimum-cost assignment distance between each individual in a population
+    and a single reference configuration, considering all 8 symmetry transformations
+    (4 rotations × 2 mirror states).
+    
+    This is a wrapper around compute_genetic_diversity_matrix for backward compatibility.
+    
+    Parameters
+    ----------
+    population_xyt : cp.ndarray
+        Shape (N_pop, N_trees, 3). Population of individuals, where each individual
+        has N_trees trees with (x, y, theta) coordinates.
+    reference_xyt : cp.ndarray
+        Shape (N_trees, 3). Single reference configuration to compare against.
+        
+    Returns
+    -------
+    cp.ndarray
+        Shape (N_pop,). Minimum assignment distance for each individual, taken over
+        all 8 symmetry transformations.
+    """
+    N_pop, N_trees, _ = population_xyt.shape
+    
+    # Validate shapes
+    assert reference_xyt.shape == (N_trees, 3), \
+        f"Reference shape {reference_xyt.shape} doesn't match expected ({N_trees}, 3)"
+    
+    # Add batch dimension to reference and call the matrix version
+    reference_batch = reference_xyt[cp.newaxis, :, :]  # (1, N_trees, 3)
+    result_matrix = compute_genetic_diversity_matrix(population_xyt, reference_batch)  # (N_pop, 1)
+    
+    return result_matrix[:, 0]  # (N_pop,)
 
 
 set_float32(True)
