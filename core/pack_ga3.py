@@ -316,6 +316,7 @@ class GAMulti(GA):
     plot_subpopulation_costs_per_generation_ax = None
     allow_reset_ratio: float = field(init=True, default=1.) # allow only the worst X% of subpopulations to reset
     diversity_reset_threshold: float = field(init=True, default=np.inf) # diversity required to avoid reset
+    diversity_reset_check_frequency: int = field(init=True, default=30) # in generations
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -358,7 +359,7 @@ class GAMulti(GA):
                         # Worst performers - enable reset
                         self.ga_list[idx].allow_reset = True
             # Check for diversity-based resets
-            if self.diversity_reset_threshold < np.inf:
+            if self.diversity_reset_threshold < np.inf and len(self.best_costs_per_generation[0]) % self.diversity_reset_check_frequency == 0:
                 n_ga = len(self.ga_list)
                 if n_ga > 1:
                     champion_xyts = cp.concatenate([ga.champions[0].genotype.xyt for ga in self.ga_list], axis=0)
