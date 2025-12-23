@@ -10,7 +10,7 @@ import pack_basics
 import pack_cuda
 import pack_cuda_primitives_test
 import pack_runner
-import pack_ga2
+import pack_ga3
 import matplotlib.pyplot as plt
 import pack_vis_sol
 import copy
@@ -27,8 +27,8 @@ def run_all_tests(regenerate_reference=False):
     print("All tests passed.")
 
 def test_ga(regenerate_reference):
-    ga = pack_ga2.Orchestrator()
-    ga.ga = pack_ga2.GASinglePopulationOld()
+    ga = pack_ga3.Orchestrator()
+    ga.ga = pack_ga3.GASinglePopulationOld()
     ga.n_generations = 5       
     ga.ga.N_trees_to_do = 10
     ga.ga.population_size = 100
