@@ -521,3 +521,138 @@ class Crossover(Move):
         trees[:, 0] = dst_center_x + dx
         trees[:, 1] = dst_center_y + dy
         trees[:, 2] = theta
+
+
+@dataclass
+class CrossoverStripe(Move):
+    """Stripe-based crossover that selects trees by distance to a random line."""
+    min_N_trees: int = field(init=True, default=10)
+    max_N_trees_ratio: float = field(init=True, default=0.5)
+
+    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
+                     inds_mate: cp.ndarray, generator: cp.random.Generator):
+        # Cache configuration tensors and short-circuit if nothing to do
+        new_h = population.configuration.h
+        new_xyt = population.configuration.xyt
+        N_trees = new_xyt.shape[1]
+        N_moves = int(inds_to_do.shape[0])
+        if N_moves == 0:
+            return
+
+        # Gather boundary parameters for both parents involved in the move
+        h_params = new_h[inds_to_do]
+        mate_h_params = mate_sol.h[inds_mate]
+
+        # Sample a random point inside each square to anchor the crossover stripe
+        h_sizes = h_params[:, 0]
+        offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        line_point_x = offset_x_all + h_params[:, 1]
+        line_point_y = offset_y_all + h_params[:, 2]
+
+        # Mirror that same point into mate coordinates after accounting for its square center
+        mate_line_point_x = offset_x_all + mate_h_params[:, 1]
+        mate_line_point_y = offset_y_all + mate_h_params[:, 2]
+
+        # Draw random line orientations and compute their normals for distance tests
+        line_angles = generator.uniform(0, 2 * cp.pi, size=N_moves)
+        normal_x = -cp.sin(line_angles)
+        normal_y = cp.cos(line_angles)
+
+        # Decide how many trees swap hands and what transforms to apply to mates
+        min_trees = min(self.min_N_trees, N_trees)
+        max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
+        if max_trees < min_trees:
+            max_trees = min_trees
+        n_trees_to_replace_all = generator.integers(min_trees, max_trees + 1, size=N_moves)
+        rotation_choice_all = generator.integers(0, 4, size=N_moves)
+        do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
+
+        # Fetch the full set of tree coordinates for both parents involved
+        tree_positions_all = new_xyt[inds_to_do, :, :2]
+        mate_trees_full = mate_sol.xyt[inds_mate].copy()
+
+        # Apply the random mirror/rotation to the mate data prior to selection
+        self._apply_orientation_preselection(
+            mate_trees_full,
+            rotation_choice_all,
+            do_mirror_all,
+        )
+
+        # Drop the theta channel for distance computations
+        mate_positions_all = mate_trees_full[:, :, :2]
+
+        # Broadcast reference points and line normals for batched projections
+        line_point_x_2d = line_point_x[:, cp.newaxis]
+        line_point_y_2d = line_point_y[:, cp.newaxis]
+        mate_line_point_x_2d = mate_line_point_x[:, cp.newaxis]
+        mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
+        normal_x_2d = normal_x[:, cp.newaxis]
+        normal_y_2d = normal_y[:, cp.newaxis]
+
+        # Compute absolute distances to each line for the target population
+        distances_individual_all = cp.abs(
+            (tree_positions_all[:, :, 0] - line_point_x_2d) * normal_x_2d +
+            (tree_positions_all[:, :, 1] - line_point_y_2d) * normal_y_2d
+        )
+
+        # Repeat the distance evaluation for the transformed mate coordinates
+        distances_mate_all = cp.abs(
+            (mate_positions_all[:, :, 0] - mate_line_point_x_2d) * normal_x_2d +
+            (mate_positions_all[:, :, 1] - mate_line_point_y_2d) * normal_y_2d
+        )
+
+        # Rank trees by proximity to the stripe for both populations
+        sorted_individual_tree_ids = cp.argsort(distances_individual_all, axis=1)
+        sorted_mate_tree_ids = cp.argsort(distances_mate_all, axis=1)
+
+        # Build masks describing how many entries each move will actually use
+        max_n_trees = int(cp.max(n_trees_to_replace_all))
+        tree_idx = cp.arange(max_n_trees)[cp.newaxis, :]
+        valid_mask = tree_idx < n_trees_to_replace_all[:, cp.newaxis]
+
+        # Truncate the sorted indices to that shared maximum for batched work
+        individual_tree_ids_all = sorted_individual_tree_ids[:, :max_n_trees]
+        mate_tree_ids_all = sorted_mate_tree_ids[:, :max_n_trees]
+
+        # Gather the mate trees that will supply the stripe replacement subset
+        move_indices = cp.arange(N_moves)[:, cp.newaxis]
+        mate_trees_all = mate_trees_full[move_indices, mate_tree_ids_all].copy()
+
+        # Scatter the transformed trees directly into the population tensor
+        move_indices_flat, tree_indices_flat = cp.where(valid_mask)
+        individual_ids_flat = inds_to_do[move_indices_flat]
+        tree_ids_flat = individual_tree_ids_all[move_indices_flat, tree_indices_flat]
+        trees_to_write = mate_trees_all[move_indices_flat, tree_indices_flat, :]
+        new_xyt[individual_ids_flat, tree_ids_flat, :] = trees_to_write
+
+    def _apply_orientation_preselection(self, mate_trees_full: cp.ndarray,
+                                        rotation_choice_all: cp.ndarray,
+                                        do_mirror_all: cp.ndarray):
+        # Grab mutable references to positions and orientations for the batched mates
+        mate_x = mate_trees_full[:, :, 0]
+        mate_y = mate_trees_full[:, :, 1]
+        mate_theta = mate_trees_full[:, :, 2]
+
+        # Optionally mirror across the x-axis (flip y and adjust heading)
+        mirror_mask = do_mirror_all[:, cp.newaxis]
+        mate_y = cp.where(mirror_mask, -mate_y, mate_y)
+        mate_theta = cp.where(mirror_mask, cp.pi - mate_theta, mate_theta)
+
+        # Precompute rotation angles (0, 90, 180, 270 degrees)
+        rot_angles = rotation_choice_all[:, cp.newaxis] * (cp.pi / 2)
+        cos_angles = cp.cos(rot_angles)
+        sin_angles = cp.sin(rot_angles)
+
+        # Apply rotations only to entries requesting a non-zero turn
+        rotation_mask = rotation_choice_all[:, cp.newaxis] != 0
+        rotated_x = mate_x * cos_angles - mate_y * sin_angles
+        rotated_y = mate_x * sin_angles + mate_y * cos_angles
+        mate_x = cp.where(rotation_mask, rotated_x, mate_x)
+        mate_y = cp.where(rotation_mask, rotated_y, mate_y)
+        mate_theta = cp.where(rotation_mask, mate_theta + rot_angles, mate_theta)
+
+        # Write the transformed coordinates back in-place for downstream selection
+        mate_trees_full[:, :, 0] = mate_x
+        mate_trees_full[:, :, 1] = mate_y
+        mate_trees_full[:, :, 2] = mate_theta
