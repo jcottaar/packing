@@ -204,6 +204,7 @@ class GA(kgs.BaseClass):
     def reset(self):
         self.champions = None
         self._reset()
+        self._last_reset_generation = len(self.best_costs_per_generation[0])-1
 
     def score(self, register_best=False):
         if self._is_frozen2:
@@ -224,12 +225,11 @@ class GA(kgs.BaseClass):
                 effective_reset_check_generations = self.reset_check_generations + \
                     int(self.reset_check_generations_ratio * (len(self.best_costs_per_generation[0])))
                 costs = self.best_costs_per_generation[0]
-                if len(costs)>self._last_reset_generation+effective_reset_check_generations and \
+                if len(costs)>self._last_reset_generation+effective_reset_check_generations+2 and \
                         costs[-1][0]==costs[-effective_reset_check_generations][0] and \
                         costs[-1][1]>=self.reset_check_threshold*costs[-effective_reset_check_generations][1]:                    
                     if self.allow_reset:
-                        self.reset()
-                        self._last_reset_generation = len(self.best_costs_per_generation[0])-1
+                        self.reset()                        
                         self.best_costs_per_generation[0].pop(-1)
                         self._score(register_best)
                         self._skip_next_selection = True
@@ -315,6 +315,7 @@ class GAMulti(GA):
     plot_diversity_ax = None
     plot_subpopulation_costs_per_generation_ax = None
     allow_reset_ratio: float = field(init=True, default=1.) # allow only the worst X% of subpopulations to reset
+    diversity_reset_threshold: float = field(init=True, default=np.inf) # diversity required to avoid reset
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -356,6 +357,42 @@ class GAMulti(GA):
                     else:
                         # Worst performers - enable reset
                         self.ga_list[idx].allow_reset = True
+            # Check for diversity-based resets
+            if self.diversity_reset_threshold < np.inf:
+                n_ga = len(self.ga_list)
+                if n_ga > 1:
+                    champion_xyts = cp.concatenate([ga.champions[0].genotype.xyt for ga in self.ga_list], axis=0)
+                    champion_xyts_cp = cp.array(champion_xyts)
+                    diversity_matrix = np.zeros((n_ga, n_ga), dtype=kgs.dtype_np)
+                    for i in range(n_ga):
+                        diversity_matrix[:, i] = kgs.compute_genetic_diversity(champion_xyts_cp, champion_xyts_cp[i]).get()
+                    to_reset = set()
+                    for i in range(n_ga):
+                        if i in to_reset:
+                            continue
+                        for j in range(i + 1, n_ga):
+                            if j in to_reset:
+                                continue
+                            if diversity_matrix[i, j] >= self.diversity_reset_threshold*self.ga_list[0].N_trees_to_do:
+                                continue
+                            cost_i = costs_per_ga[i]
+                            cost_j = costs_per_ga[j]
+                            if kgs.lexicographic_less_than(cost_i, cost_j):
+                                worse_idx = j
+                            elif kgs.lexicographic_less_than(cost_j, cost_i):
+                                worse_idx = i
+                            else:
+                                worse_idx = max(i, j)
+                            to_reset.add(worse_idx)
+                    for idx in sorted(to_reset):
+                        ga_to_reset = self.ga_list[idx]
+                        if ga_to_reset.best_costs_per_generation and ga_to_reset.best_costs_per_generation[0]:
+                            ga_to_reset.best_costs_per_generation[0].pop(-1)
+                        ga_to_reset.reset()
+                        ga_to_reset.score(register_best=True)
+                        ga_to_reset._skip_next_selection = True
+                        costs_per_ga[idx] = ga_to_reset.champions[0].fitness[0]
+
     def _generate_offspring(self, mate_sol, mate_weights):
         return sum([ga.generate_offspring(mate_sol, mate_weights) for ga in self.ga_list], [])
     def _merge_offspring(self):
