@@ -340,7 +340,6 @@ class Crossover(Move):
 
         # Generate n_trees_to_replace, rotation, and mirror for all
         min_trees = min(int(np.round(self.min_N_trees_ratio * np.sqrt(N_trees))), N_trees)
-        print(min_trees)
         max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
         if max_trees< min_trees:
             max_trees = min_trees

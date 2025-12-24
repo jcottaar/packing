@@ -553,8 +553,8 @@ class GASinglePopulation(GA):
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     move: pack_move.Move = field(init=True, default=None)
     fixed_h: float = field(init=True, default=0.61)
-    reduce_h_threshold: float = field(init=True, default=1e-5)
-    reduce_h_amount: float = field(init=True, default=2e-3)
+    reduce_h_threshold: float = field(init=True, default=1e-5/40) # scaled by N_trees
+    reduce_h_amount: float = field(init=True, default=2e-3/np.sqrt(40)) # scaled by sqrt(N_trees)
     reduce_h_per_individual: bool = field(init=True, default=True)
 
     plot_diversity_ax = None
@@ -607,18 +607,19 @@ class GASinglePopulation(GA):
 
         
         if self.population.phenotype.use_fixed_h:
+            reduce_h_amount = self.reduce_h_amount*np.sqrt(self.N_trees_to_do)
             if not self.reduce_h_per_individual:
-                if np.min(cost_values) < self.reduce_h_threshold:
+                if np.min(cost_values) < self.reduce_h_threshold*self.N_trees_to_do:
                     # Reduce h if below threshold
-                    self.population.genotype.h[:, 0] -= self.reduce_h_amount
-                    self.population.phenotype.h[:, 0] -= self.reduce_h_amount
+                    self.population.genotype.h[:, 0] -= reduce_h_amount
+                    self.population.phenotype.h[:, 0] -= reduce_h_amount
                     cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()            
             else:
                 # Reduce h per individual if below threshold
                 for i in range(self.population.phenotype.N_solutions):
-                    if cost_values[i] < self.reduce_h_threshold:
-                        self.population.genotype.h[i, 0] -= self.reduce_h_amount
-                        self.population.phenotype.h[i, 0] -= self.reduce_h_amount
+                    if cost_values[i] < self.reduce_h_threshold*self.N_trees_to_do:
+                        self.population.genotype.h[i, 0] -= reduce_h_amount
+                        self.population.phenotype.h[i, 0] -= reduce_h_amount
                 cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()
             self.population.fitness = np.stack( (self.population.phenotype.h[:,0].get(), cost_values)).T # Shape: (N_solutions, 2)
         else:

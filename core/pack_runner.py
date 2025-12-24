@@ -134,6 +134,16 @@ def disable_stripe_crossover(ga, name, value):
     if value:
         ga.ga.ga_base.move.moves.pop(-1)
 
+def scale_rough_iterations(ga, name, value):
+    for r in ga.rough_relaxers:
+        r.n_iterations = int(r.n_iterations * value)
+
+
+def scale_fine_iterations(ga, name, value):
+    for r in ga.fine_relaxers:
+        r.n_iterations = int(r.n_iterations * value)
+
+
 
 
 # ============================================================
@@ -176,16 +186,19 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(1.,1.25), scale_population_size)
+    res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.7,1.), scale_population_size)
+    res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_rough_iterations)
+    res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
     print(len(ga_base.selection_size))
-    res.modifier_dict['n_selection_size'] = pm(len(ga_base.selection_size), lambda r:r.choice([1,4,10,20,30,len(ga_base.selection_size)]).item(), set_n_selection_size)
-    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.uniform(0.5,0.8), set_ga_base_ga_prop)
-    res.modifier_dict['reduce_h_threshold'] = pm(1e-4, lambda r:r.choice([1e-4, 1e-5]).item(), set_ga_base_ga_prop)
-    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.4,0.6), set_ga_prop)
-    res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([True,False]).item(), disable_stripe_crossover)
+    res.modifier_dict['n_selection_size'] = pm(len(ga_base.selection_size), lambda r:r.choice([2,4,10,20,30,len(ga_base.selection_size)]).item(), set_n_selection_size)
+    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.choice([0.7,1.]), set_ga_base_ga_prop)
+    res.modifier_dict['reduce_h_threshold'] = pm(1e-4/40, lambda r:r.choice([1e-5/40, 1e-6/40]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
+    res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([False]).item(), disable_stripe_crossover)
     res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
-    res.modifier_dict['fixed_h'] = pm(ga_base.fixed_h, lambda r:r.uniform(0.61,0.615), set_ga_base_ga_prop)
-    res.modifier_dict['reduce_h_amount'] = pm(ga_base.reduce_h_amount, lambda r:r.choice([0.001,0.002]), set_ga_base_ga_prop)
+    #res.modifier_dict['fixed_h'] = pm(ga_base.fixed_h, lambda r:r.uniform(0.61,0.61), set_ga_base_ga_prop)
+    #res.modifier_dict['reduce_h_amount'] = pm(ga_base.reduce_h_amount/np.sqrt(40), lambda r:r.choice([0.001/np.sqrt(40),0.002/np.sqrt(40)]), set_ga_base_ga_prop)
+    
 
     return res
 
