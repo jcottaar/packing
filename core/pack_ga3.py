@@ -237,12 +237,12 @@ class GA(kgs.BaseClass):
                         self._is_frozen2 = True                        
 
 
-    def generate_offspring(self, mate_sol, mate_weights):
+    def generate_offspring(self, mate_sol, mate_weights, mate_costs=None):
         if self._is_frozen2:
             return []
         if mate_sol is not None:
             assert(mate_sol.N_solutions == len(mate_weights))
-        res = self._generate_offspring(mate_sol, mate_weights)
+        res = self._generate_offspring(mate_sol, mate_weights, mate_costs)
         self._cached_offspring = res
         return res
     
@@ -392,8 +392,11 @@ class GAMulti(GA):
                         ga_to_reset._skip_next_selection = True
                         costs_per_ga[idx] = ga_to_reset.champions[0].fitness[0]
 
-    def _generate_offspring(self, mate_sol, mate_weights):
-        return sum([ga.generate_offspring(mate_sol, mate_weights) for ga in self.ga_list], [])
+    def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
+        return sum([
+            ga.generate_offspring(mate_sol, mate_weights, mate_costs)
+            for ga in self.ga_list
+        ], [])
     def _merge_offspring(self):
         for ga in self.ga_list:
             ga.merge_offspring()
@@ -467,7 +470,7 @@ class GAMultiSimilar(GAMulti):
 class GAMultiRing(GAMultiSimilar):
     # Configuration
     mate_distance: int = field(init=True, default=4)     
-    def _generate_offspring(self, mate_sol, mate_weights):
+    def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
         assert mate_sol is None
         #if self.champions is None:
         #    return super()._generate_offspring(mate_sol, mate_weights)
@@ -498,14 +501,16 @@ class GAMultiRing(GAMultiSimilar):
             # Merge all collected populations into a single solution collection
             if len(populations_to_merge)>0:
                 merged_sol = copy.deepcopy(populations_to_merge[0].genotype)
+                merged_costs = [pop.fitness for pop in populations_to_merge]
                 for pop in populations_to_merge[1:]:
                     merged_sol.merge(pop.genotype)
                 mate_weights = np.ones(merged_sol.N_solutions) / merged_sol.N_solutions
+                mate_costs = np.concatenate(merged_costs, axis=0)
             else:
-                merged_sol, mate_weights = None, None
+                merged_sol, mate_weights, mate_costs = None, None, None
             
             # Generate offspring for this GA using the merged mate population
-            offspring_list.extend(ga.generate_offspring(merged_sol, mate_weights))
+            offspring_list.extend(ga.generate_offspring(merged_sol, mate_weights, mate_costs))
         # offspring_list is out of order - this is OK (child GAs cache their own offspring)
         return offspring_list
 
@@ -687,7 +692,7 @@ class GASinglePopulationTournament(GASinglePopulation):
         
         return winners
 
-    def _generate_offspring(self, mate_sol, mate_weights):
+    def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
         old_pop = self.population
         old_pop.check_constraints()
         old_pop.parent_fitness = old_pop.fitness.copy()
@@ -786,7 +791,7 @@ class GASinglePopulationOld(GASinglePopulation):
         self.population = current_pop
         self.population.check_constraints()
 
-    def _generate_offspring(self, mate_sol, mate_weights):
+    def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
         
         old_pop = self.population
         old_pop.check_constraints()
@@ -959,7 +964,7 @@ class Orchestrator(kgs.BaseClass):
         for i_gen in range(self.n_generations):
             self._current_generation = i_gen
 
-            offspring_list = self.ga.generate_offspring(None, None)
+            offspring_list = self.ga.generate_offspring(None, None, None)
             self._relax(offspring_list)
             self.ga.merge_offspring()
             

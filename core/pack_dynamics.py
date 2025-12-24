@@ -50,8 +50,7 @@ class OptimizerBFGS(kgs.BaseClass):
         sol_tmp = copy.deepcopy(sol)
 
         if self.track_cost:
-            n_steps = self.n_iterations
-            cost_history = np.zeros((n_steps, sol.N_solutions), dtype=kgs.dtype_np)*np.nan
+            cost_history = []
 
         counter = 0
 
@@ -83,7 +82,7 @@ class OptimizerBFGS(kgs.BaseClass):
             self.cost.compute_cost(sol_tmp, tmp_cost[:N], tmp_grad[:N, :], tmp_grad_h[:N, :])
 
             if self.track_cost:
-                cost_history[counter-1,:] = tmp_cost.get()
+                cost_history.append(tmp_cost[:N].get())
                 
             res = cp.zeros_like(tmp_x[:N,:], dtype=kgs.dtype_cp)
             res[:,:N_split] = tmp_grad[:N, :].reshape(sol_tmp.N_solutions,-1)
@@ -103,6 +102,7 @@ class OptimizerBFGS(kgs.BaseClass):
         sol.h = cp.ascontiguousarray(x_result[:,sol.N_trees*3:].reshape(sol.N_solutions,-1))
 
         if self.plot_cost and self.track_cost:
+            cost_history = np.array(cost_history)  # Convert list to array: (n_actual_iterations, N_solutions)
             plt.figure(figsize=(8,8))
             plt.plot(cost_history)
             plt.xlabel('Iteration')
