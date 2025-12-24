@@ -173,6 +173,7 @@ def baseline_runner(fast_mode=False):
     #ga_base.move.moves[-1][2] *= 2
     ga_base.prob_mate_own = 0.7
     ga_base.reduce_h_threshold = 1e-4
+    ga_base.always_allow_mate_with_better = False
 
     runner.ga.ga_base = ga_base
     runner.ga.do_legalize = True
