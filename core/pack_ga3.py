@@ -622,7 +622,7 @@ class GASinglePopulation(GA):
                         self.population.genotype.h[i, 0] -= reduce_h_amount
                         self.population.phenotype.h[i, 0] -= reduce_h_amount
                 cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()
-            self.population.fitness = np.stack( (self.population.phenotype.h[:,0].get(), cost_values)).T # Shape: (N_solutions, 2)
+            self.population.fitness = np.stack( (self.population.phenotype.h[:,0].get()**2/self.N_trees_to_do, cost_values)).T # Shape: (N_solutions, 2)
         else:
             self.population.fitness = cost_values.reshape((-1, 1))  # Shape: (N_solutions, 1)
         
