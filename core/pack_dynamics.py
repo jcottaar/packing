@@ -216,7 +216,8 @@ class Optimizer(kgs.BaseClass):
             plt.figure(figsize=(8,8))
             plt.plot(cost_history)
             plt.xlabel('Iteration')
-            plt.ylabel('Cost')
+            ax = plt.gca()
+            ax.set_yscale('log')
             plt.pause(0.001)
         return sol
 

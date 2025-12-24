@@ -489,9 +489,10 @@ class GAMultiSimilar(GAMulti):
 
     def _initialize(self):
         self.ga_list = []
+        generator = cp.random.default_rng(seed=self.seed)
         for i in range(self.N):
             ga_copy = copy.deepcopy(self.ga_base)
-            ga_copy.seed = self.seed+i
+            ga_copy.seed = generator.integers(0, 2**30).get().item()
             ga_copy.fitness_cost = self.fitness_cost
             ga_copy.initialize()
             self.ga_list.append(ga_copy)     
