@@ -173,6 +173,7 @@ class GA(kgs.BaseClass):
     reset_check_generations_ratio: float = field(init=True, default=0.1)
     reset_check_threshold: float = field(init=True, default=0.1)
     freeze_duration: int = field(init=True, default=100)
+    always_allow_mate_with_better: bool = field(init=True, default=True)
     
 
     best_costs_per_generation_ax = None
@@ -183,6 +184,7 @@ class GA(kgs.BaseClass):
     _last_reset_generation: int = field(init=False, default=0)
     _skip_next_selection: bool = field(init=False, default=False)
     _is_frozen2: bool = field(init=False, default=False)
+    _allow_mate_with_better: bool = field(init=True, default=True)    
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -225,6 +227,11 @@ class GA(kgs.BaseClass):
                 effective_reset_check_generations = self.reset_check_generations + \
                     int(self.reset_check_generations_ratio * (len(self.best_costs_per_generation[0])))
                 costs = self.best_costs_per_generation[0]
+                self._allow_mate_with_better = self.always_allow_mate_with_better
+                if len(costs)>self._last_reset_generation+effective_reset_check_generations//2+2 and \
+                        costs[-1][0]==costs[-effective_reset_check_generations//2][0] and \
+                        costs[-1][1]>=self.reset_check_threshold*costs[-effective_reset_check_generations//2][1]:     
+                    self._allow_mate_with_better = True
                 if len(costs)>self._last_reset_generation+effective_reset_check_generations+2 and \
                         costs[-1][0]==costs[-effective_reset_check_generations][0] and \
                         costs[-1][1]>=self.reset_check_threshold*costs[-effective_reset_check_generations][1]:                    
@@ -237,12 +244,34 @@ class GA(kgs.BaseClass):
                         self._is_frozen2 = True                        
 
 
-    def generate_offspring(self, mate_sol, mate_weights, mate_costs=None):
+    def generate_offspring(self, mate_sol, mate_weights, mate_costs):
         if self._is_frozen2:
             return []
+        filtered_mate_sol = mate_sol
+        filtered_mate_weights = mate_weights
+        filtered_mate_costs = mate_costs
         if mate_sol is not None:
             assert(mate_sol.N_solutions == len(mate_weights))
-        res = self._generate_offspring(mate_sol, mate_weights, mate_costs)
+            if self.champions is not None and len(self.champions) > 1:
+                raise ValueError("Cannot supply mate population when GA has multiple champions.")
+            if not self._allow_mate_with_better:
+                champion_cost = self.champions[0].fitness[0]
+                mate_costs_np = np.asarray(mate_costs)
+                allowed_mask = np.array([
+                    not kgs.lexicographic_less_than(cost, champion_cost)
+                    for cost in mate_costs_np
+                ], dtype=bool)
+                if not np.any(allowed_mask):
+                    filtered_mate_sol = None
+                    filtered_mate_weights = None
+                    filtered_mate_costs = None
+                else:
+                    allowed_idx = np.where(allowed_mask)[0]
+                    filtered_mate_sol = copy.deepcopy(mate_sol)
+                    filtered_mate_sol.select_ids(allowed_idx)
+                    filtered_mate_costs = mate_costs_np[allowed_idx]
+                    filtered_mate_weights = np.asarray(mate_weights)[allowed_idx]                    
+        res = self._generate_offspring(filtered_mate_sol, filtered_mate_weights, filtered_mate_costs)
         self._cached_offspring = res
         return res
     
@@ -429,6 +458,8 @@ class GAMulti(GA):
                 for i, ga in enumerate(self.ga_list):
                     if ga._is_frozen2:
                         plt.plot(i, -0.5, 'rx', markersize=10, markeredgewidth=2)
+                    elif ga._allow_mate_with_better:
+                        plt.plot(i, -0.5, 'gx', markersize=10, markeredgewidth=2)
                 plt.xlabel('Subpopulation')
                 plt.ylabel('Generation')
         if self.plot_diversity_ax is not None:

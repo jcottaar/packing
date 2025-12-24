@@ -300,8 +300,8 @@ class Crossover(Move):
     square selection) and replaces them with the n closest trees from the mate,
     applying a random rotation (0/90/180/270°) and optional mirroring.
     """
-    min_N_trees: int = field(init=True, default=4)
-    max_N_trees_ratio: float = field(init=True, default=0.5)
+    min_N_trees_ratio: float = field(init=True, default=4/np.sqrt(40)) # to be multiplied by sqrt(N_trees)
+    max_N_trees_ratio: float = field(init=True, default=0.5) # to be multiplied by N_trees
     simple_mate_location: bool = field(init=True, default=False)
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
@@ -339,7 +339,8 @@ class Crossover(Move):
         mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]
 
         # Generate n_trees_to_replace, rotation, and mirror for all
-        min_trees = min(self.min_N_trees, N_trees)
+        min_trees = min(int(np.round(self.min_N_trees_ratio * np.sqrt(N_trees))), N_trees)
+        print(min_trees)
         max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
         if max_trees< min_trees:
             max_trees = min_trees
@@ -526,7 +527,7 @@ class Crossover(Move):
 @dataclass
 class CrossoverStripe(Move):
     """Stripe-based crossover that selects trees by distance to a random line."""
-    min_N_trees: int = field(init=True, default=10)
+    min_N_trees_ratio: float = field(init=True, default=4/np.sqrt(40)) # to be multiplied by sqrt(N_trees)
     max_N_trees_ratio: float = field(init=True, default=0.5)
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
@@ -560,7 +561,7 @@ class CrossoverStripe(Move):
         normal_y = cp.cos(line_angles)
 
         # Decide how many trees swap hands and what transforms to apply to mates
-        min_trees = min(self.min_N_trees, N_trees)
+        min_trees = min(int(np.round(self.min_N_trees_ratio * np.sqrt(N_trees))), N_trees)
         max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
         if max_trees < min_trees:
             max_trees = min_trees

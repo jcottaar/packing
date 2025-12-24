@@ -107,7 +107,10 @@ class OptimizerBFGS(kgs.BaseClass):
             plt.plot(cost_history)
             plt.xlabel('Iteration')
             plt.ylabel('Cost')
+            ax = plt.gca()
+            ax.set_yscale('log')
             plt.pause(0.001)
+            
 
         #print('after', cp.min(self.cost.compute_cost_allocate(sol)[0]))
 
