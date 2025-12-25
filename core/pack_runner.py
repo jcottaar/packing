@@ -158,8 +158,10 @@ def baseline_runner(fast_mode=False):
 
 
     runner = pack_ga3.baseline()
+    runner.n_generations = 600
     runner.diagnostic_plot = False
     runner.ga.do_legalize = True
+    
 
     # # run some code here to compare runner and runner2, highlighting where they differ. I remember there's a package for this
     # from deepdiff import DeepDiff
