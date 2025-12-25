@@ -645,18 +645,22 @@ class GASinglePopulation(GA):
         if self.population.phenotype.use_fixed_h:
             reduce_h_amount = self.reduce_h_amount*np.sqrt(self.N_trees_to_do)
             if not self.reduce_h_per_individual:
-                if np.min(cost_values) < self.reduce_h_threshold*self.N_trees_to_do:
+                while np.min(cost_values) < self.reduce_h_threshold*self.N_trees_to_do:
                     # Reduce h if below threshold
                     self.population.genotype.h[:, 0] -= reduce_h_amount
                     self.population.phenotype.h[:, 0] -= reduce_h_amount
                     cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()            
             else:
                 # Reduce h per individual if below threshold
-                for i in range(self.population.phenotype.N_solutions):
-                    if cost_values[i] < self.reduce_h_threshold*self.N_trees_to_do:
-                        self.population.genotype.h[i, 0] -= reduce_h_amount
-                        self.population.phenotype.h[i, 0] -= reduce_h_amount
-                cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()
+                any_reduced = True
+                while any_reduced:
+                    any_reduced = False
+                    for i in range(self.population.phenotype.N_solutions):
+                        if cost_values[i] < self.reduce_h_threshold*self.N_trees_to_do:
+                            self.population.genotype.h[i, 0] -= reduce_h_amount
+                            self.population.phenotype.h[i, 0] -= reduce_h_amount
+                            any_reduced = True
+                    cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()
             self.population.fitness = np.stack( (self.population.phenotype.h[:,0].get()**2/self.N_trees_to_do, cost_values)).T # Shape: (N_solutions, 2)
         else:
             self.population.fitness = cost_values.reshape((-1, 1))  # Shape: (N_solutions, 1)
@@ -1093,10 +1097,10 @@ def baseline():
 
     runner.ga.make_own_fig = (2,3)
     runner.ga.make_own_fig_size = (18,12)
-    runner.ga.best_costs_per_generation_ax = ((0,False,(0,1)),)#( (0,False,(0,0)) ,(1,True,(0,1)))
-    runner.ga.plot_subpopulation_costs_per_generation_ax = ( (0,False,(0,2)) ,(1,True,(1,2)))
-    runner.ga.champion_genotype_ax = (1,0)
-    runner.ga.champion_phenotype_ax = (0,0)
-    runner.ga.plot_diversity_ax = (1,1)
+    runner.ga.best_costs_per_generation_ax = ( (0,False,(0,0)) ,(1,True,(1,0)))
+    runner.ga.plot_subpopulation_costs_per_generation_ax = ( (0,False,(0,1)) ,(1,True,(1,1)))
+    #runner.ga.champion_genotype_ax = (1,0)
+    runner.ga.champion_phenotype_ax = (0,2)
+    runner.ga.plot_diversity_ax = (1,2)
 
     return runner
