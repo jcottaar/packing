@@ -354,11 +354,16 @@ class GAMulti(GA):
             if kgs.debugging_mode>=2:
                 for ga in self.ga_list:
                     ga.check_constraints()
-    def _initialize(self):
+    def _initialize(self):  
+        generator = cp.random.default_rng(seed=self.seed)          
         for ga in self.ga_list:
+            ga.seed = generator.integers(0, 2**30).get().item()
+            ga.fitness_cost = self.fitness_cost
             ga.initialize()
-        assert self.single_champion
-        self.best_costs_per_generation = [[]]
+        if self.single_champion:
+            self.best_costs_per_generation = [[]]
+        else:
+            self.best_costs_per_generation = [ [] for _ in self.ga_list ]
     def _reset(self):
         for ga in self.ga_list:
             ga.reset()
@@ -366,7 +371,12 @@ class GAMulti(GA):
         for ga in self.ga_list:
             ga.score(register_best=register_best)
         if register_best:
-            assert self.single_champion
+            if not self.single_champion:
+                self.champions = [a.champions[0] for a in self.ga_list]
+                for c,a in zip(self.best_costs_per_generation,self.ga_list):
+                    assert(len(a.champions)==1)
+                    c.append(a.champions[0].fitness[0])
+                return
             if kgs.debugging_mode>=2:
                 for ga in self.ga_list:
                     assert(len(ga.champions) == 1)
@@ -488,13 +498,9 @@ class GAMultiSimilar(GAMulti):
     N: int = field(init=True, default=4)
 
     def _initialize(self):
-        self.ga_list = []
-        generator = cp.random.default_rng(seed=self.seed)
+        self.ga_list = []        
         for i in range(self.N):
-            ga_copy = copy.deepcopy(self.ga_base)
-            ga_copy.seed = generator.integers(0, 2**30).get().item()
-            ga_copy.fitness_cost = self.fitness_cost
-            ga_copy.initialize()
+            ga_copy = copy.deepcopy(self.ga_base)            
             self.ga_list.append(ga_copy)     
         super()._initialize()    
 
