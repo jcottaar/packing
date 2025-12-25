@@ -1086,6 +1086,8 @@ def baseline():
     #ga_base.selection_size = [int( (s-1) * value)+1 for s in ga_base.selection_size]
     ga_base.population_size = 500 
     ga_base.selection_size = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 23, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 225, 250]
+    ga_base.reset_check_generations = 50
+    ga_base.reset_check_threshold = 0.5
     ga_base.freeze_duration = 100
     ga_base.prob_mate_own = 0.7
     ga_base.reduce_h_threshold = 1e-5/40
