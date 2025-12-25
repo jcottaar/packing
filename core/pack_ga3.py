@@ -350,6 +350,17 @@ class GA(kgs.BaseClass):
 
     def _diagnostic_plots(self, plot_ax):
         pass
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_fig'] = None
+        state['_ax'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._fig = None
+        self._ax = None
     
 
 @dataclass

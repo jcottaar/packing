@@ -1016,7 +1016,7 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
         
         if do_mirror:
             ref_y = -ref_y
-            ref_theta = -ref_theta
+            ref_theta = cp.pi-ref_theta
         
         if rot_angle != 0.0:
             cos_a = np.cos(rot_angle)
