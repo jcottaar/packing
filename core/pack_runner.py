@@ -155,48 +155,28 @@ def baseline_runner(fast_mode=False):
     res = Runner()
     res.label = 'Baseline'
 
-    runner = pack_ga3.Orchestrator(n_generations=600 if not fast_mode else 5)
-    runner.ga = pack_ga3.GAMultiRing(N=16)
-    runner.ga.diversity_reset_threshold = 5./40
-    runner.ga.mate_distance=6
 
-    ga_base = pack_ga3.GASinglePopulationOld(N_trees_to_do=40)
-    #ga_base.population_size = 250
-    #ga_base.prob_mate_own = 0.25
-    value = 0.125
-    ga_base.population_size = int(ga_base.population_size * value)
-    ga_base.selection_size = [int( (s-1) * value)+1 for s in ga_base.selection_size]
-    ga_base.do_legalize = False
-    ga_base.reset_check_generations = 50
-    ga_base.reset_check_threshold = 0.5
-    ga_base.freeze_duration = 100
-    #ga_base.move.moves[-1][2] *= 2
-    ga_base.prob_mate_own = 0.7
-    ga_base.reduce_h_threshold = 1e-4
-    ga_base.always_allow_mate_with_better = False
-
-    runner.ga.ga_base = ga_base
-    runner.ga.do_legalize = True
-    runner.ga.allow_reset_ratio = 0.5
-    runner.ga.best_costs_per_generation_ax = ((0,False,(0,1)),)#( (0,False,(0,0)) ,(1,True,(0,1)))
-    runner.ga.plot_subpopulation_costs_per_generation_ax = ( (0,False,(0,2)) ,(1,True,(1,2)))
-    runner.ga.champion_genotype_ax = (1,0)
-    runner.ga.champion_phenotype_ax = (0,0)
-    runner.ga.plot_diversity_ax = (1,1)
+    runner = pack_ga3.baseline()
     runner.diagnostic_plot = False
+    runner.ga.ga_base.reduce_h_threshold = 1e-4
+    runner.ga.do_legalize = True
+
+    # # run some code here to compare runner and runner2, highlighting where they differ. I remember there's a package for this
+    # from deepdiff import DeepDiff
+    # print(DeepDiff(runner,runner2,ignore_order=True).pretty())
 
     res.base_ga = runner
 
-    res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.7,1.), scale_population_size)
-    res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_rough_iterations)
-    res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
-    print(len(ga_base.selection_size))
-    res.modifier_dict['n_selection_size'] = pm(len(ga_base.selection_size), lambda r:r.choice([2,4,10,20,30,len(ga_base.selection_size)]).item(), set_n_selection_size)
-    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.choice([0.7,1.]), set_ga_base_ga_prop)
-    res.modifier_dict['reduce_h_threshold'] = pm(1e-4/40, lambda r:r.choice([1e-5/40, 1e-6/40]).item(), set_ga_base_ga_prop)
-    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
-    res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([False]).item(), disable_stripe_crossover)
-    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
+    # res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.7,1.), scale_population_size)
+    # res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_rough_iterations)
+    # res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
+    # print(len(ga_base.selection_size))
+    # res.modifier_dict['n_selection_size'] = pm(len(ga_base.selection_size), lambda r:r.choice([2,4,10,20,30,len(ga_base.selection_size)]).item(), set_n_selection_size)
+    # res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.choice([0.7,1.]), set_ga_base_ga_prop)
+    # res.modifier_dict['reduce_h_threshold'] = pm(1e-4/40, lambda r:r.choice([1e-5/40, 1e-6/40]).item(), set_ga_base_ga_prop)
+    # res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
+    # res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([False]).item(), disable_stripe_crossover)
+    # res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
     #res.modifier_dict['fixed_h'] = pm(ga_base.fixed_h, lambda r:r.uniform(0.61,0.61), set_ga_base_ga_prop)
     #res.modifier_dict['reduce_h_amount'] = pm(ga_base.reduce_h_amount/np.sqrt(40), lambda r:r.choice([0.001/np.sqrt(40),0.002/np.sqrt(40)]), set_ga_base_ga_prop)
     

@@ -849,7 +849,26 @@ class GASinglePopulationOld(GASinglePopulation):
         max_sel = np.max(self.selection_size)
         selected = np.zeros(self.population_size, dtype=bool)
         diversity = np.inf*np.ones(max_sel)
-        for sel_size in self.selection_size:
+
+        # Determine how many initial selection sizes are sequential (1,2,3,...)
+        prefix_count = 0
+        for idx, sel_size in enumerate(self.selection_size):
+            if sel_size == idx + 1:
+                prefix_count += 1
+            else:
+                break
+
+        prefix_size = prefix_count  # Number of individuals to auto-select
+        if prefix_size > 0:
+            selected[:prefix_size] = True
+            diversity_matrix = kgs.compute_genetic_diversity_matrix(
+                cp.array(current_xyt[:max_sel]),
+                cp.array(current_xyt[:prefix_size])
+            ).get()
+            diversity = diversity_matrix.min(axis=1)
+            diversity[:prefix_size] = 0.0
+
+        for sel_size in self.selection_size[prefix_count:]:
             selected_id = np.argmax(diversity[:sel_size])
             selected[selected_id] = True
             diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
@@ -1050,3 +1069,34 @@ class Orchestrator(kgs.BaseClass):
                 self.check_constraints()
         
         self.ga.finalize()
+
+def baseline():
+    runner = Orchestrator(n_generations=60000)
+    runner.ga = GAMultiRing(N=16)
+    runner.ga.diversity_reset_threshold = 5./40
+    runner.ga.mate_distance=6
+
+    ga_base = GASinglePopulationOld(N_trees_to_do=-1)
+    #value = 0.125
+    #ga_base.population_size = int(ga_base.population_size * value)
+    #ga_base.selection_size = [int( (s-1) * value)+1 for s in ga_base.selection_size]
+    ga_base.population_size = 500 
+    ga_base.selection_size = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 23, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 225, 250]
+    ga_base.freeze_duration = 100
+    ga_base.prob_mate_own = 0.7
+    ga_base.reduce_h_threshold = 1e-5/40
+    ga_base.always_allow_mate_with_better = False
+    ga_base.fixed_h = -1.
+
+    runner.ga.ga_base = ga_base
+    runner.ga.allow_reset_ratio = 0.5
+
+    runner.ga.make_own_fig = (2,3)
+    runner.ga.make_own_fig_size = (18,12)
+    runner.ga.best_costs_per_generation_ax = ((0,False,(0,1)),)#( (0,False,(0,0)) ,(1,True,(0,1)))
+    runner.ga.plot_subpopulation_costs_per_generation_ax = ( (0,False,(0,2)) ,(1,True,(1,2)))
+    runner.ga.champion_genotype_ax = (1,0)
+    runner.ga.champion_phenotype_ax = (0,0)
+    runner.ga.plot_diversity_ax = (1,1)
+
+    return runner
