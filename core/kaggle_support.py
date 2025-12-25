@@ -1100,4 +1100,119 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     return result_matrix[:, 0]  # (N_pop,)
 
 
+def find_best_transformation(xyt1: cp.ndarray, xyt2: cp.ndarray) -> tuple:
+    """
+    Find the transformation of xyt2 that minimizes genetic diversity with xyt1.
+
+    Both individuals are centered at their centroids before comparison to make
+    the result invariant to initial translation.
+
+    Parameters
+    ----------
+    xyt1 : cp.ndarray
+        Shape (N_trees, 3) - first individual (x, y, theta)
+    xyt2 : cp.ndarray
+        Shape (N_trees, 3) - second individual to transform
+
+    Returns
+    -------
+    transformed_xyt2 : cp.ndarray
+        Shape (N_trees, 3) - xyt2 after applying best transformation, centered at origin
+    rotation_angle : float
+        Rotation angle applied in radians (0, π/2, π, 3π/2)
+    mirrored : bool
+        Whether x-axis mirroring was applied
+    """
+    import lap_batch
+
+    N_trees = xyt1.shape[0]
+
+    # Validate shapes
+    assert xyt1.shape == (N_trees, 3), f"xyt1 shape {xyt1.shape} doesn't match expected ({N_trees}, 3)"
+    assert xyt2.shape == (N_trees, 3), f"xyt2 shape {xyt2.shape} doesn't match expected ({N_trees}, 3)"
+
+    # Center both individuals at origin (immune to transforms)
+    xyt1_centered = xyt1.copy()
+    xyt1_centered[:, 0] -= cp.mean(xyt1[:, 0])
+    xyt1_centered[:, 1] -= cp.mean(xyt1[:, 1])
+
+    xyt2_centered = xyt2.copy()
+    xyt2_centered[:, 0] -= cp.mean(xyt2[:, 0])
+    xyt2_centered[:, 1] -= cp.mean(xyt2[:, 1])
+
+    # Define the 8 transformations (rotation_angle, mirror_x)
+    transformations = [
+        (0.0,        False),  # Identity
+        (np.pi/2,    False),  # 90° rotation
+        (np.pi,      False),  # 180° rotation
+        (3*np.pi/2,  False),  # 270° rotation
+        (0.0,        True),   # Mirror only
+        (np.pi/2,    True),   # Mirror + 90° rotation
+        (np.pi,      True),   # Mirror + 180° rotation
+        (3*np.pi/2,  True),   # Mirror + 270° rotation
+    ]
+
+    # Fixed reference (xyt1_centered)
+    ref_x = xyt1_centered[:, 0]      # (N_trees,)
+    ref_y = xyt1_centered[:, 1]      # (N_trees,)
+    ref_theta = xyt1_centered[:, 2]  # (N_trees,)
+
+    # Track best transformation
+    best_cost = float('inf')
+    best_transform_idx = 0
+    best_transformed_xyt2 = None
+    best_assignment = None
+
+    # Try all 8 transformations
+    for idx, (rot_angle, do_mirror) in enumerate(transformations):
+        # Apply transformation to xyt2_centered
+        trans_x = xyt2_centered[:, 0].copy()
+        trans_y = xyt2_centered[:, 1].copy()
+        trans_theta = xyt2_centered[:, 2].copy()
+
+        if do_mirror:
+            trans_y = -trans_y
+            trans_theta = cp.pi - trans_theta
+
+        if rot_angle != 0.0:
+            cos_a = np.cos(rot_angle)
+            sin_a = np.sin(rot_angle)
+            new_x = trans_x * cos_a - trans_y * sin_a
+            new_y = trans_x * sin_a + trans_y * cos_a
+            trans_x = new_x
+            trans_y = new_y
+            trans_theta = trans_theta + rot_angle
+
+        trans_theta = cp.remainder(trans_theta + np.pi, 2*np.pi) - np.pi
+
+        # Compute pairwise cost matrix
+        # ref: (N_trees,), trans: (N_trees,) -> cost_matrix: (N_trees, N_trees)
+        dx = ref_x[:, cp.newaxis] - trans_x[cp.newaxis, :]
+        dy = ref_y[:, cp.newaxis] - trans_y[cp.newaxis, :]
+        dtheta = ref_theta[:, cp.newaxis] - trans_theta[cp.newaxis, :]
+        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
+        cost_matrix = cp.sqrt(dx**2 + dy**2 + dtheta**2)
+
+        # Solve assignment problem
+        cost_matrix_batch = cost_matrix[cp.newaxis, :, :]  # (1, N_trees, N_trees)
+        assignments, assignment_costs = lap_batch.solve_lap_batch(cost_matrix_batch)
+        assignment_cost = float(assignment_costs[0])
+
+        # Track best
+        if assignment_cost < best_cost:
+            best_cost = assignment_cost
+            best_transform_idx = idx
+            best_transformed_xyt2 = cp.stack([trans_x, trans_y, trans_theta], axis=1)
+            best_assignment = assignments[0]  # (N_trees,) - col indices for each row
+
+    # Extract best transformation parameters
+    best_rotation_angle, best_mirrored = transformations[best_transform_idx]
+
+    # Reorder trees in transformed_xyt2 to match xyt1 ordering
+    # best_assignment[i] tells us which tree in transformed_xyt2 corresponds to tree i in xyt1
+    best_transformed_xyt2_reordered = best_transformed_xyt2[best_assignment]
+
+    return best_transformed_xyt2_reordered, best_rotation_angle, best_mirrored
+
+
 set_float32(True)
