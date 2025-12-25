@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_move
+from IPython.display import clear_output, display
 
 
 # ============================================================
@@ -165,7 +166,7 @@ class GA(kgs.BaseClass):
 
     champions: list = field(init=True, default=None)
     best_costs_per_generation: list = field(init=True, default_factory=list)  
-    do_legalize: bool = field(init=True, default=True)
+    do_legalize: bool = field(init=True, default=False)
 
     allow_reset: bool = field(init=True, default=True)
     allow_freeze: bool = field(init=True, default=False)
@@ -175,6 +176,8 @@ class GA(kgs.BaseClass):
     freeze_duration: int = field(init=True, default=100)
     always_allow_mate_with_better: bool = field(init=True, default=True)
     
+    make_own_fig = None # input to plt.subplots()
+    make_own_fig_size = None
 
     best_costs_per_generation_ax = None
     champion_genotype_ax = None
@@ -185,6 +188,9 @@ class GA(kgs.BaseClass):
     _skip_next_selection: bool = field(init=False, default=False)
     _is_frozen2: bool = field(init=False, default=False)
     _allow_mate_with_better: bool = field(init=True, default=True)    
+
+    _fig = None
+    _ax = None
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -302,16 +308,23 @@ class GA(kgs.BaseClass):
     def abbreviate(self):
         self._abbreviate()
 
-    def diagnostic_plots(self, plot_ax):
+    def diagnostic_plots(self, i_gen, plot_ax):
+        if self.make_own_fig:
+            if self._fig is None:
+                self._fig, self._ax = plt.subplots(*self.make_own_fig, figsize=self.make_own_fig_size, squeeze=False)
+            plot_ax = self._ax
+            plt.tight_layout()
         if not self.best_costs_per_generation_ax is None:
             for xx in self.best_costs_per_generation_ax:
                 ax = plot_ax[xx[2]]
                 ax.clear()
                 plt.sca(ax)
-                to_plot = np.array([ [y[xx[0]] for y in x] for x in self.best_costs_per_generation])
+                to_plot = np.array([[y[xx[0]] for y in x] for x in self.best_costs_per_generation])
                 if xx[1]:
-                    to_plot=np.log(to_plot)/np.log(10)
-                plt.plot(to_plot.T)
+                    to_plot = np.log10(to_plot)
+                plt.plot(to_plot.T, alpha=0.5)
+                avg_line = np.mean(to_plot, axis=0)
+                plt.plot(avg_line, color='black', linewidth=2.0)
                 plt.grid(True)
                 plt.xlabel('Generation')
                 plt.ylabel('Best Cost')
@@ -321,15 +334,18 @@ class GA(kgs.BaseClass):
             if len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
                 ax.clear()
                 pack_vis_sol.pack_vis_sol(self.champions[0].genotype, ax=ax)
-                plt.title('Champion Genotype')
+                plt.title(f'Champion Genotype ({self.champions[0].phenotype.N_trees} trees)')
         if not self.champion_phenotype_ax is None:
             ax = plot_ax[ self.champion_phenotype_ax ]
             plt.sca(ax)
             if len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
                 ax.clear()
                 pack_vis_sol.pack_vis_sol(self.champions[0].phenotype, ax=ax)
-                plt.title('Champion Phenotype')
-        self._diagnostic_plots(plot_ax)
+                plt.title(f'Champion Phenotype ({self.champions[0].phenotype.N_trees} trees)')
+        self._diagnostic_plots(i_gen, plot_ax)
+        if self.make_own_fig:
+            plt.suptitle(f'Generation {i_gen}')
+            display(self._fig)
     
 
     def _diagnostic_plots(self, plot_ax):
@@ -450,7 +466,7 @@ class GAMulti(GA):
     def _abbreviate(self):
         for ga in self.ga_list:
             ga.abbreviate()
-    def _diagnostic_plots(self, plot_ax):
+    def _diagnostic_plots(self, i_gen, plot_ax):
         if not self.plot_subpopulation_costs_per_generation_ax is None:
             for xx in self.plot_subpopulation_costs_per_generation_ax:
                 ax = plot_ax[xx[2]]
@@ -490,6 +506,8 @@ class GAMulti(GA):
             plt.title('Diversity Matrix Across GA Subpopulations')
             plt.xlabel('Individual')
             plt.ylabel('Individual')
+        for ga in self.ga_list:
+            ga.diagnostic_plots(i_gen, plot_ax)
 
 @dataclass
 class GAMultiSimilar(GAMulti):
@@ -552,6 +570,11 @@ class GAMultiRing(GAMultiSimilar):
         # offspring_list is out of order - this is OK (child GAs cache their own offspring)
         return offspring_list
 
+
+import pack_io
+import pandas as pd
+ref_solution = pack_io.dataframe_to_solution_list(pd.read_csv(kgs.code_dir + '../res/71.01.csv'))
+
 @dataclass
 class GASinglePopulation(GA):
     # Configuration
@@ -559,7 +582,7 @@ class GASinglePopulation(GA):
     population_size:int = field(init=True, default=4000) 
     initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
     move: pack_move.Move = field(init=True, default=None)
-    fixed_h: float = field(init=True, default=0.61)
+    fixed_h: float = field(init=True, default=-1.)
     reduce_h_threshold: float = field(init=True, default=1e-5/40) # scaled by N_trees
     reduce_h_amount: float = field(init=True, default=2e-3/np.sqrt(40)) # scaled by sqrt(N_trees)
     reduce_h_per_individual: bool = field(init=True, default=True)
@@ -603,7 +626,13 @@ class GASinglePopulation(GA):
     def _reset(self):
         self.initializer.seed = self._generator.integers(0, 2**30).get().item()
         if self.fixed_h is not None:
-            self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
+            if self.fixed_h == -1.:
+                ref_score = ref_solution[1][self.N_trees_to_do-1]
+                ref_h = np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.055))
+                self.initializer.fixed_h = cp.array([ref_h,0,0],dtype=kgs.dtype_cp)
+            else:
+                self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
+            #print('Setting starting h to', self.initializer.fixed_h)
             self.initializer.base_solution.use_fixed_h = True
         self.population = self.initializer.initialize_population(len(self.selection_size), self.N_trees_to_do)    
         self.population.check_constraints()        
@@ -653,7 +682,7 @@ class GASinglePopulation(GA):
     def _abbreviate(self):
         self.population = None
 
-    def _diagnostic_plots(self, plot_ax):
+    def _diagnostic_plots(self, i_gen,plot_ax):
         if self.plot_diversity_ax is not None:
             ax = plot_ax[self.plot_diversity_ax]
             ax.clear()
@@ -913,6 +942,7 @@ class Orchestrator(kgs.BaseClass):
 
     # Diagnostics
     diagnostic_plot: bool = field(init=True, default=False)
+    plot_every: int = field(init=True, default=1)
 
     # Intermediate
     _current_generation: int = field(init=False, default=0)
@@ -996,10 +1026,6 @@ class Orchestrator(kgs.BaseClass):
         #self._relax(self.ga.get_list_for_simulation())    
         self.ga.score(register_best=True)
 
-        if self.diagnostic_plot:
-            #plt.ion() 
-            plot_fig, plot_ax = plt.subplots(2,3, figsize=(18,12))
-
         for i_gen in range(self.n_generations):
             self._current_generation = i_gen
 
@@ -1014,11 +1040,9 @@ class Orchestrator(kgs.BaseClass):
             # Format best costs as lists for display (max 6 decimals)
             best_costs_str = [[round(float(x), 6) for x in s[-1].flatten()] for s in self.ga.best_costs_per_generation]
             if self.diagnostic_plot:
-                self.ga.diagnostic_plots(plot_ax)                
-                from IPython.display import clear_output, display
-                clear_output(wait=True)  # Clear previous output                
-                plt.suptitle(f'Generation {i_gen}: Best costs = {best_costs_str}')
-                display(plot_fig)
+                if i_gen % self.plot_every == 0:                    
+                    self.ga.diagnostic_plots(i_gen, None)        
+                    clear_output(wait=True)  # Clear previous output                
             else:
                 print(f'Generation {i_gen}: Best costs = {best_costs_str}')
 

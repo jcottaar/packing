@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_metric
 
-def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10):
+def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True):
     solx = copy.deepcopy(sol)
     solx.use_fixed_h = False
     solx.snap()
@@ -47,13 +47,16 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
         if cost_overlap.compute_cost_allocate(solx)[0].get().item()<target:
             break   
     try:
-        solution_list_to_dataframe([solx], compact=False)
+        if validate:
+            solution_list_to_dataframe([solx], compact=False)
+        else:
+            assert cost_overlap.compute_cost_allocate(solx)[0].get().item()<target
         return solx
     except:
         if tolerance_rel_change==0.:
             raise Exception('Could not legalize solution')
         else:
-            return legalize(solx, do_plot=do_plot, move_factor=move_factor, tolerance_rel_change=0., stop_on_cost_increase=stop_on_cost_increase, n_iter=n_iter, target=target)
+            return legalize(solx, do_plot=do_plot, move_factor=move_factor, tolerance_rel_change=0., stop_on_cost_increase=stop_on_cost_increase, n_iter=n_iter, target=target, validate=validate)
 
 
 def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1.):
