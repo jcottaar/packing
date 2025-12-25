@@ -977,6 +977,8 @@ class Orchestrator(kgs.BaseClass):
     # Diagnostics
     diagnostic_plot: bool = field(init=True, default=False)
     plot_every: int = field(init=True, default=1)
+    filename: str = field(init=True, default='default')
+    save_every: int = field(init=True, default=10)
 
     # Intermediate
     _current_generation: int = field(init=False, default=0)
@@ -1051,17 +1053,21 @@ class Orchestrator(kgs.BaseClass):
     
     def run(self):
         self.check_constraints(debugging_mode_offset=2)
-        self.ga.fitness_cost = self.fitness_cost
-        self.ga.seed = self.seed
+        save_filename = kgs.temp_dir + self.filename + '.pickle'
 
-        # Initialize
-        self.ga.initialize()
-        self.ga.reset()
-        #self._relax(self.ga.get_list_for_simulation())    
-        self.ga.score(register_best=True)
+        while self._current_generation<self.n_generations:
+            if self._current_generation==0:
+                self.ga.fitness_cost = self.fitness_cost
+                self.ga.seed = self.seed
 
-        for i_gen in range(self.n_generations):
-            self._current_generation = i_gen
+                # Initialize
+                self.ga.initialize()
+                self.ga.reset()
+                #self._relax(self.ga.get_list_for_simulation())    
+                self.ga.score(register_best=True)
+
+
+            self._current_generation = self._current_generation
 
             offspring_list = self.ga.generate_offspring(None, None, None)
             self._relax(offspring_list)
@@ -1074,11 +1080,16 @@ class Orchestrator(kgs.BaseClass):
             # Format best costs as lists for display (max 6 decimals)
             best_costs_str = [[round(float(x), 6) for x in s[-1].flatten()] for s in self.ga.best_costs_per_generation]
             if self.diagnostic_plot:
-                if i_gen % self.plot_every == 0:                    
-                    self.ga.diagnostic_plots(i_gen, None)        
+                if self._current_generation % self.plot_every == 0:                    
+                    self.ga.diagnostic_plots(self._current_generation, None)        
                     clear_output(wait=True)  # Clear previous output                
             else:
-                print(f'Generation {i_gen}: Best costs = {best_costs_str}')
+                print(f'Generation {self._current_generation}: Best costs = {best_costs_str}')
+
+            self._current_generation += 1
+
+            if self._current_generation % self.save_every == 0:
+                kgs.dill_save(save_filename, self)
 
             if kgs.debugging_mode>=2:
                 self.check_constraints()

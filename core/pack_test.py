@@ -21,21 +21,32 @@ pack_cuda._ensure_initialized()
 
 def run_all_tests(regenerate_reference=False):
     kgs.debugging_mode = 2    
-    test_ga(regenerate_reference)
+    test_ga(regenerate_reference, False)
+    test_ga(False, True)
     test_costs()        
     pack_cuda_primitives_test.run_all_tests()    
     print("All tests passed.")
 
-def test_ga(regenerate_reference):
+def test_ga(regenerate_reference, do_resume):
     ga = pack_ga3.Orchestrator()
+    ga.save_every = 1
+    ga.filename = 'ga_test'
     ga.ga = pack_ga3.GASinglePopulationOld()
     ga.n_generations = 5       
     ga.ga.N_trees_to_do = 10
     ga.ga.population_size = 100
     ga.ga.selection_size = [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,26,27,28,29,30,35,40,45,50,60,70,80,90]
     ga.ga.do_legalize = False
-    ga.run()
-    res = ga.ga.population.fitness
+    if not do_resume:
+        ga.run()
+        res = ga.ga.population.fitness
+    else:
+        ga.n_generations = 3
+        ga.run()
+        ga2 = kgs.dill_load(kgs.temp_dir + 'ga_test.pickle')
+        ga2.n_generations = 5
+        ga2.run()
+        res = ga2.ga.population.fitness   
     if regenerate_reference:
         kgs.dill_save(kgs.code_dir + 'ref_ga.pickle', res)
     ref = kgs.dill_load(kgs.code_dir + 'ref_ga.pickle')
