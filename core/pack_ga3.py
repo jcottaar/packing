@@ -1094,7 +1094,9 @@ class Orchestrator(kgs.BaseClass):
             if kgs.debugging_mode>=2:
                 self.check_constraints()
         
+        kgs.dill_save(save_filename, self)
         self.ga.finalize()
+        kgs.dill_save(save_filename+'d', self)
 
 def baseline():
     runner = Orchestrator(n_generations=60000)
@@ -1115,8 +1117,10 @@ def baseline():
     ga_base.reduce_h_threshold = 1e-5/40
     ga_base.always_allow_mate_with_better = False
     ga_base.fixed_h = -1.
+    #ga_base.do_legalize = True
 
     runner.ga.ga_base = ga_base
+    runner.ga.do_legalize = True
     runner.ga.allow_reset_ratio = 0.5
 
     runner.ga.make_own_fig = (2,3)
