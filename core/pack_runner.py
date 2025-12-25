@@ -122,7 +122,8 @@ def scale_population_size(ga, name, value):
         seen.add(s)
         unique_selection.append(s)
     ga.ga.ga_base.selection_size = unique_selection
-    print(ga.ga.ga_base.population_size, ga.ga.ga_base.selection_size)
+    ga.ga.N = int(ga.ga.N / value)
+    print(ga.ga.N, ga.ga.ga_base.population_size, ga.ga.ga_base.selection_size)
 
 def set_n_selection_size(ga, name, value):
     """Set number of selection sizes to use"""
@@ -167,16 +168,15 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    # res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.7,1.), scale_population_size)
-    # res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_rough_iterations)
-    # res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
-    # print(len(ga_base.selection_size))
-    # res.modifier_dict['n_selection_size'] = pm(len(ga_base.selection_size), lambda r:r.choice([2,4,10,20,30,len(ga_base.selection_size)]).item(), set_n_selection_size)
-    # res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.choice([0.7,1.]), set_ga_base_ga_prop)
-    # res.modifier_dict['reduce_h_threshold'] = pm(1e-4/40, lambda r:r.choice([1e-5/40, 1e-6/40]).item(), set_ga_base_ga_prop)
-    # res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
-    # res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([False]).item(), disable_stripe_crossover)
-    # res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
+    res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.5,1.), scale_population_size)
+    res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.5,1.), scale_rough_iterations)
+    #res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
+    res.modifier_dict['n_selection_size'] = pm(36, lambda r:r.integers(18,36).item(), set_n_selection_size)
+    #res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.choice([0.7,1.]), set_ga_base_ga_prop)
+    #res.modifier_dict['reduce_h_threshold'] = pm(1e-4/40, lambda r:r.choice([1e-5/40, 1e-6/40]).item(), set_ga_base_ga_prop)
+    #res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
+    #res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([False]).item(), disable_stripe_crossover)
+    #res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
     #res.modifier_dict['fixed_h'] = pm(ga_base.fixed_h, lambda r:r.uniform(0.61,0.61), set_ga_base_ga_prop)
     #res.modifier_dict['reduce_h_amount'] = pm(ga_base.reduce_h_amount/np.sqrt(40), lambda r:r.choice([0.001/np.sqrt(40),0.002/np.sqrt(40)]), set_ga_base_ga_prop)
     
