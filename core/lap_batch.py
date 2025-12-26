@@ -24,7 +24,7 @@ class LAPConfig:
     # Notes:
     # - Smaller epsilon_final is closer to exact but slower.
     # - For many use-cases (binary "similar vs not"), larger eps can be fine.
-    auction_epsilon_init: float = 1e-2
+    auction_epsilon_init: float = 0.1
     auction_epsilon_final: float = 1e-3
     auction_epsilon_decay: float = 0.8
     auction_max_rounds: int = 1
@@ -276,6 +276,7 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = No
     costs : cp.ndarray
         Shape (batch_size,). Total assignment cost for each problem.
     """
+    import kaggle_support as kgs
     if config is None:
         config = LAPConfig()
 
@@ -295,11 +296,16 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = No
         u = cp.zeros((batch_size, N), dtype=cp.float32)
         v = cp.zeros((batch_size, N), dtype=cp.float32)
 
+        if kgs.profiling:
+            cp.cuda.Device().synchronize()
         # One block per problem, ONE thread per block
         _hungarian_kernel(
             (batch_size,), (1,),
             (cost_matrices_gpu, costs_work, row_match, col_match, u, v, batch_size, N)
         )
+
+        if kgs.profiling:
+            cp.cuda.Device().synchronize()
     elif config.algorithm == 'auction':
         prices = cp.zeros((batch_size, N), dtype=cp.float32)
 
@@ -312,12 +318,18 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = No
             # Practical upper bound for convergence; tuned for float32 and typical dense problems.
             max_iters = max(10, 5 * N * N)
 
+        if kgs.profiling:
+            cp.cuda.Device().synchronize()
+
         _auction_kernel(
             (batch_size,), (1,),
             (cost_matrices_gpu, row_match, col_match, prices, batch_size, N,
              cp.float32(eps_init), cp.float32(eps_final), cp.float32(eps_decay),
              max_rounds, max_iters)
         )
+        
+        if kgs.profiling:
+            cp.cuda.Device().synchronize()
     else:
         raise ValueError(f"Unknown LAPConfig.algorithm={config.algorithm!r}")
     

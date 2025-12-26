@@ -905,7 +905,8 @@ class GASinglePopulationOld(GASinglePopulation):
             selected[:prefix_size] = True
             diversity_matrix = kgs.compute_genetic_diversity_matrix(
                 cp.array(current_xyt[:max_sel]),
-                cp.array(current_xyt[:prefix_size])
+                cp.array(current_xyt[:prefix_size]),
+                lap_config=self.lap_config
             ).get()
             diversity = diversity_matrix.min(axis=1)
             diversity[:prefix_size] = 0.0
