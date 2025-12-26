@@ -191,6 +191,7 @@ class GA(kgs.BaseClass):
 
     _fig = None
     _ax = None
+    _always_plot_trees = True
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -331,17 +332,18 @@ class GA(kgs.BaseClass):
         if not self.champion_genotype_ax is None:
             ax = plot_ax[ self.champion_genotype_ax ]
             plt.sca(ax)
-            if len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
+            if self._always_plot_trees or len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
                 ax.clear()
                 pack_vis_sol.pack_vis_sol(self.champions[0].genotype, ax=ax)
                 plt.title(f'Champion Genotype ({self.champions[0].phenotype.N_trees} trees)')
         if not self.champion_phenotype_ax is None:
             ax = plot_ax[ self.champion_phenotype_ax ]
             plt.sca(ax)
-            if len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
+            if self._always_plot_trees or len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
                 ax.clear()
                 pack_vis_sol.pack_vis_sol(self.champions[0].phenotype, ax=ax)
                 plt.title(f'Champion Phenotype ({self.champions[0].phenotype.N_trees} trees)')
+        self._always_plot_trees = False
         self._diagnostic_plots(i_gen, plot_ax)
         if self.make_own_fig:
             plt.suptitle(f'Generation {i_gen}, {self.champions[0].phenotype.N_trees} trees')
@@ -355,6 +357,7 @@ class GA(kgs.BaseClass):
         state = self.__dict__.copy()
         state['_fig'] = None
         state['_ax'] = None
+        state['_always_plot_trees'] = True
         return state
 
     def __setstate__(self, state):
