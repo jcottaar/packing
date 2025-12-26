@@ -863,6 +863,7 @@ class GASinglePopulationOld(GASinglePopulation):
     survival_rate: float = field(init=True, default=0.074)  # Fraction of population that survives (37/500)
     elitism_fraction: float = field(init=True, default=0.49)  # Fraction of survivors that are elite (18/37)
     search_depth: float = field(init=True, default=0.5)  # How deep to look for diversity (max_tier/pop_size)
+    lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lap_batch.LAPConfig)
 
     def _initialize(self):
         # Generate selection_size from parameters if not provided
@@ -912,7 +913,7 @@ class GASinglePopulationOld(GASinglePopulation):
         for sel_size in self.selection_size[prefix_count:]:
             selected_id = np.argmax(diversity[:sel_size])
             selected[selected_id] = True
-            diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
+            diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id]), lap_config=self.lap_config).get(), diversity)
             #print(sel_size, diversity)
             assert(np.all(diversity[selected[:max_sel]]<1e-4))
         current_pop.select_ids(np.where(selected)[0])

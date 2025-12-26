@@ -939,7 +939,7 @@ def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
     return False  # Equal
 
 
-def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
+def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None) -> cp.ndarray:
     """
     Compute the minimum-cost assignment distance between each pair of individuals
     from two populations, considering all 8 symmetry transformations
@@ -1053,7 +1053,7 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     batched = stacked.transpose(0, 1, 3, 2, 4).reshape(-1, N_trees, N_trees)  # (8*N_pop*N_ref, N_trees, N_trees)
     
     # Solve all LAPs on GPU
-    _, all_assignment_costs = lap_batch.solve_lap_batch(batched)  # (8*N_pop*N_ref,)
+    _, all_assignment_costs = lap_batch.solve_lap_batch(batched, config=lap_config)  # (8*N_pop*N_ref,)
     
     # Reshape back and take minimum across transformations
     all_costs_array = all_assignment_costs.reshape(8, N_pop, N_ref)  # (8, N_pop, N_ref)
@@ -1065,7 +1065,7 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     return min_distances
 
 
-def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray) -> cp.ndarray:
+def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None) -> cp.ndarray:
     """
     Compute the minimum-cost assignment distance between each individual in a population
     and a single reference configuration, considering all 8 symmetry transformations
@@ -1095,7 +1095,7 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     
     # Add batch dimension to reference and call the matrix version
     reference_batch = reference_xyt[cp.newaxis, :, :]  # (1, N_trees, 3)
-    result_matrix = compute_genetic_diversity_matrix(population_xyt, reference_batch)  # (N_pop, 1)
+    result_matrix = compute_genetic_diversity_matrix(population_xyt, reference_batch, lap_config=lap_config)  # (N_pop, 1)
     
     return result_matrix[:, 0]  # (N_pop,)
 
