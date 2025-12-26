@@ -1051,6 +1051,9 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     # Then reshape to (8*N_pop*N_ref, N_trees, N_trees) for batched solving
     stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_ref, N_trees)
     batched = stacked.transpose(0, 1, 3, 2, 4).reshape(-1, N_trees, N_trees)  # (8*N_pop*N_ref, N_trees, N_trees)
+
+    if profiling:
+        cp.cuda.Device().synchronize()
     
     # Solve all LAPs on GPU
     _, all_assignment_costs = lap_batch.solve_lap_batch(batched, config=lap_config)  # (8*N_pop*N_ref,)

@@ -158,7 +158,7 @@ def baseline_runner(fast_mode=False):
 
 
     runner = pack_ga3.baseline()
-    runner.n_generations = 600
+    runner.n_generations = 600 if not fast_mode else 5
     runner.diagnostic_plot = False
     runner.ga.do_legalize = True
     runner.ga.ga_base.selection_size = None

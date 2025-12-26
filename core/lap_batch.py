@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-@dataclass(frozen=True)
+@dataclass
 class LAPConfig:
     algorithm: Literal['hungarian', 'auction'] = 'hungarian'
 
@@ -24,10 +24,10 @@ class LAPConfig:
     # Notes:
     # - Smaller epsilon_final is closer to exact but slower.
     # - For many use-cases (binary "similar vs not"), larger eps can be fine.
-    auction_epsilon_init: float = 0.1
+    auction_epsilon_init: float = 1e-2
     auction_epsilon_final: float = 1e-3
     auction_epsilon_decay: float = 0.8
-    auction_max_rounds: int = 3
+    auction_max_rounds: int = 1
     auction_max_iters: int = 0  # 0 => choose based on N on the host
 
 # Hungarian algorithm kernel - one block per problem, one thread per block
