@@ -344,7 +344,7 @@ class GA(kgs.BaseClass):
                 plt.title(f'Champion Phenotype ({self.champions[0].phenotype.N_trees} trees)')
         self._diagnostic_plots(i_gen, plot_ax)
         if self.make_own_fig:
-            plt.suptitle(f'Generation {i_gen}')
+            plt.suptitle(f'Generation {i_gen}, {self.champions[0].phenotype.N_trees} trees')
             display(self._fig)
     
 
@@ -854,7 +854,30 @@ class GASinglePopulationOld(GASinglePopulation):
     population_size:int = field(init=True, default=4000)
     selection_size:list = field(init=True, default_factory=lambda: [int(4.*(x-1))+1 for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
     prob_mate_own: float = field(init=True, default=0.5)
+    
+    # Parameters for generating selection_size (used only if selection_size is None)
+    # These are ratios that remain constant when scaling population_size
+    survival_rate: float = field(init=True, default=0.074)  # Fraction of population that survives (37/500)
+    elitism_fraction: float = field(init=True, default=0.49)  # Fraction of survivors that are elite (18/37)
+    search_depth: float = field(init=True, default=0.5)  # How deep to look for diversity (max_tier/pop_size)
 
+    def _initialize(self):
+        # Generate selection_size from parameters if not provided
+        if self.selection_size is None:
+            total_survivors = max(2, int(self.population_size * self.survival_rate))
+            n_elite = max(1, int(total_survivors * self.elitism_fraction))
+            n_diversity_tiers = total_survivors - n_elite
+            max_tier = max(n_elite + 1, int(self.population_size * self.search_depth))
+            
+            elite = list(range(1, n_elite + 1))
+            if n_diversity_tiers > 0:
+                tiers = np.geomspace(n_elite + 1, max_tier, n_diversity_tiers).astype(int)
+                tiers = list(np.unique(tiers))
+            else:
+                tiers = []
+            self.selection_size = elite + tiers
+            print(self.selection_size)
+        super()._initialize()
 
     def _apply_selection(self):
         current_pop = self.population

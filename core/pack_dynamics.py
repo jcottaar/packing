@@ -120,11 +120,12 @@ class OptimizerBFGS(kgs.BaseClass):
 class Optimizer(kgs.BaseClass):
     # Minimizes the cost, not physics-based
 
-    # Configuration    
+    # Configuration
     plot_interval = None
     use_lookahead = False  # Enable second-order lookahead (predictor-corrector)
     track_cost = False  # Record cost history
     plot_cost = False  # Plot cost history at end
+    adaptive_step_size = False  # Enable adaptive step size based on cost changes
 
     # Hyperparameters
     cost = None
@@ -165,24 +166,52 @@ class Optimizer(kgs.BaseClass):
 
         if self.track_cost:
             cost_history = np.zeros((self.n_iterations, n_ensembles), dtype=kgs.dtype_np)
-        
+
         # For second-order lookahead, store previous gradients
         if self.use_lookahead:
             prev_grad = cp.zeros_like(xyt, dtype=kgs.dtype_cp)
             prev_bound_grad = cp.zeros_like(h, dtype=kgs.dtype_cp)
-            
-        for i_iteration in range(self.n_iterations):
-            dt = self.dt
-            # Reuse pre-allocated arrays
+
+        # For adaptive step size, track previous cost and state
+        if self.adaptive_step_size:
+            prev_cost = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
+            prev_xyt = cp.zeros_like(xyt, dtype=kgs.dtype_cp)
+            prev_h = cp.zeros_like(h, dtype=kgs.dtype_cp)
+            new_cost = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
+            temp_grad = cp.zeros_like(xyt, dtype=kgs.dtype_cp)
+            temp_grad_h = cp.zeros_like(h, dtype=kgs.dtype_cp)
+            # Initialize dt as a scalar to allow per-iteration modification
+            current_dt = self.dt
+            # Compute initial cost
+            self.cost.compute_cost(sol, prev_cost, total_grad, bound_grad)
+
+        for i_iteration in range(self.n_iterations):            
+            if self.adaptive_step_size:
+                dt = current_dt
+            else:
+                dt = self.dt
+            #print(dt)
+
+            # Save state before step (for adaptive step size)
+            if self.adaptive_step_size:
+                prev_xyt[:] = xyt
+                prev_h[:] = h
+                prev_cost_value = prev_cost.copy()
+
+            # Compute cost and gradient at current position
             self.cost.compute_cost(sol, total_cost, total_grad, bound_grad)
-            
+
             # Clip gradients per tree to prevent violent repulsion
             # if self.max_grad_norm is not None:
             #     grad_norms = cp.sqrt(cp.sum(total_grad**2, axis=2))  # (n_ensembles, n_trees)
             #     grad_norms = cp.maximum(grad_norms, 1e-8)  # Avoid division by zero
             #     clip_factor = cp.minimum(1.0, self.max_grad_norm / grad_norms)  # (n_ensembles, n_trees)
             #     total_grad = total_grad * clip_factor[:, :, None]  # Apply to each component
-            
+
+            # Store cost before taking step (for adaptive and non-adaptive cases)
+            if self.adaptive_step_size:
+                prev_cost[:] = total_cost
+
             if self.use_lookahead and i_iteration > 0:
                 # Second-order lookahead: use gradient + 0.5 * (gradient - prev_gradient)
                 # This is a predictor-corrector scheme: x_{n+1} = x_n - dt * (1.5*g_n - 0.5*g_{n-1})
@@ -194,15 +223,40 @@ class Optimizer(kgs.BaseClass):
             else:
                 xyt -= dt * total_grad
                 h -= dt * bound_grad
-                
+
+            # Adaptive step size: check if cost increased or decreased after taking step
+            if self.adaptive_step_size:
+                # Compute new cost after the step (reuse pre-allocated arrays)
+                self.cost.compute_cost(sol, new_cost, temp_grad, temp_grad_h)
+
+                # Compare with previous cost
+                cost_increased = new_cost > prev_cost_value
+                cost_decreased = new_cost <= prev_cost_value
+
+                if cp.any(cost_increased):
+                    # Restore previous state for all (global dt reduction)
+                    xyt[:] = prev_xyt
+                    h[:] = prev_h
+                    # Reduce dt by half
+                    current_dt *= 0.5
+                    # Cost stays at prev_cost_value (step was rejected)
+                    total_cost[:] = prev_cost_value
+                elif cp.any(cost_decreased):
+                    # Accept new state, cost decreased, increase dt
+                    current_dt *= 1.05
+                    total_cost[:] = new_cost
+                else:
+                    # Cost stayed the same, accept state but don't change dt
+                    total_cost[:] = new_cost
+
             if self.track_cost:
                 cost_history[i_iteration, :] = total_cost.get()
-            
+
             if self.use_lookahead:
                 # Store current gradients for next iteration
                 prev_grad[:] = total_grad
                 prev_bound_grad[:] = bound_grad
-                
+
             t_total0 += dt
             
             if self.plot_interval is not None and t_total0 - t_last_plot >= self.plot_interval*0.999:
