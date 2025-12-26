@@ -21,8 +21,8 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
     solx = copy.deepcopy(sol)
     solx.use_fixed_h = False
     solx.snap()
-    import pack_ga
-    ga = pack_ga.GA()
+    import pack_ga3
+    ga = pack_ga3.baseline()
     cost = copy.deepcopy(ga.fitness_cost)
     #cost.costs[0].scaling*=0.1
     cost_overlap = copy.deepcopy(cost)

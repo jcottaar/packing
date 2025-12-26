@@ -144,6 +144,10 @@ def scale_fine_iterations(ga, name, value):
     for r in ga.fine_relaxers:
         r.n_iterations = int(r.n_iterations * value)
 
+def set_auction(ga, name, value):
+    if value:
+        ga.ga.ga_base.lap_config.algorithm='auction'
+
 
 
 
@@ -176,6 +180,7 @@ def baseline_runner(fast_mode=False):
     res.modifier_dict['survival_rate'] = pm(0.074, lambda r:r.uniform(0.04,0.1), set_ga_base_ga_prop)
     res.modifier_dict['elitism_fraction'] = pm(0.49, lambda r:r.uniform(0.2,0.6), set_ga_base_ga_prop)
     res.modifier_dict['search_depth'] = pm(0.5, lambda r:r.uniform(0.2,0.8), set_ga_base_ga_prop)
+    res.modifier_dict['use_auction'] = pm(False, lambda r:r.choice([False,True]), set_auction)
 
     #res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
     #res.modifier_dict['n_selection_size'] = pm(36, lambda r:r.integers(18,36).item(), set_n_selection_size)
