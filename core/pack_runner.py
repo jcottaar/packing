@@ -161,6 +161,8 @@ def baseline_runner(fast_mode=False):
     runner.n_generations = 600
     runner.diagnostic_plot = False
     runner.ga.do_legalize = True
+    runner.ga.ga_base.selection_size = None
+    
     
 
     # # run some code here to compare runner and runner2, highlighting where they differ. I remember there's a package for this
@@ -169,10 +171,14 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.5,1.), scale_population_size)
-    res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.5,1.), scale_rough_iterations)
+    #res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.5,1.), scale_population_size)
+    res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.,0.7), scale_rough_iterations)
+    res.modifier_dict['survival_rate'] = pm(0.074, lambda r:r.uniform(0.04,0.1), set_ga_base_ga_prop)
+    res.modifier_dict['elitism_fraction'] = pm(0.49, lambda r:r.uniform(0.2,0.6), set_ga_base_ga_prop)
+    res.modifier_dict['search_depth'] = pm(0.5, lambda r:r.uniform(0.2,0.8), set_ga_base_ga_prop)
+
     #res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
-    res.modifier_dict['n_selection_size'] = pm(36, lambda r:r.integers(18,36).item(), set_n_selection_size)
+    #res.modifier_dict['n_selection_size'] = pm(36, lambda r:r.integers(18,36).item(), set_n_selection_size)
     #res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.choice([0.7,1.]), set_ga_base_ga_prop)
     #res.modifier_dict['reduce_h_threshold'] = pm(1e-4/40, lambda r:r.choice([1e-5/40, 1e-6/40]).item(), set_ga_base_ga_prop)
     #res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
