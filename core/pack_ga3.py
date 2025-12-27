@@ -602,6 +602,7 @@ class GASinglePopulation(GA):
     reduce_h_per_individual: bool = field(init=True, default=True)
 
     plot_diversity_ax = None
+    plot_diversity_alt_ax = None
 
     # Results
     population: Population = field(init=True, default=None)    
@@ -709,6 +710,24 @@ class GASinglePopulation(GA):
             # Compute diversity matrix
             N_sols = pop.N_solutions
             diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt)).get()
+            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
+            if not hasattr(ax, '_colorbar') or ax._colorbar is None:
+                ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
+            else:
+                ax._colorbar.update_normal(im)
+            plt.title('Diversity Matrix Across single population')
+            plt.xlabel('Individual')
+            plt.ylabel('Individual')
+        if self.plot_diversity_alt_ax is not None:
+            ax = plot_ax[self.plot_diversity_alt_ax]
+            ax.clear()
+            plt.sca(ax)
+            pop = self.population.genotype
+            # Compute diversity matrix
+            N_sols = pop.N_solutions
+            import lap_batch
+            diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt), lap_config = lap_batch.LAPConfig(algorithm='auction')).get() - \
+                kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt), lap_config = lap_batch.LAPConfig(algorithm='hungarian')).get()
             im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
             if not hasattr(ax, '_colorbar') or ax._colorbar is None:
                 ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
@@ -861,9 +880,9 @@ class GASinglePopulationOld(GASinglePopulation):
     # Parameters for generating selection_size (used only if selection_size is None)
     # These are ratios that remain constant when scaling population_size
     survival_rate: float = field(init=True, default=0.074)  # Fraction of population that survives (37/500)
-    elitism_fraction: float = field(init=True, default=0.49)  # Fraction of survivors that are elite (18/37)
+    elitism_fraction: float = field(init=True, default=0.25)  # Fraction of survivors that are elite (18/37)
     search_depth: float = field(init=True, default=0.5)  # How deep to look for diversity (max_tier/pop_size)
-    lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lap_batch.LAPConfig)
+    lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='auction'))
 
     def _initialize(self):
         # Generate selection_size from parameters if not provided
@@ -903,18 +922,27 @@ class GASinglePopulationOld(GASinglePopulation):
         prefix_size = prefix_count  # Number of individuals to auto-select
         if prefix_size > 0:
             selected[:prefix_size] = True
-            diversity_matrix = kgs.compute_genetic_diversity_matrix(
-                cp.array(current_xyt[:max_sel]),
-                cp.array(current_xyt[:prefix_size]),
-                lap_config=self.lap_config
-            ).get()
+            try:
+                diversity_matrix = kgs.compute_genetic_diversity_matrix(
+                    cp.array(current_xyt[:max_sel]),
+                    cp.array(current_xyt[:prefix_size]),
+                    lap_config=self.lap_config
+                ).get()
+            except:
+                diversity_matrix = kgs.compute_genetic_diversity_matrix(
+                    cp.array(current_xyt[:max_sel]),
+                    cp.array(current_xyt[:prefix_size])
+                ).get()
             diversity = diversity_matrix.min(axis=1)
             diversity[:prefix_size] = 0.0
 
         for sel_size in self.selection_size[prefix_count:]:
             selected_id = np.argmax(diversity[:sel_size])
             selected[selected_id] = True
-            diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id]), lap_config=self.lap_config).get(), diversity)
+            try:
+                diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id]), lap_config=self.lap_config).get(), diversity)
+            except:
+                diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
             #print(sel_size, diversity)
             assert(np.all(diversity[selected[:max_sel]]<1e-4))
         current_pop.select_ids(np.where(selected)[0])
@@ -1021,7 +1049,7 @@ class Orchestrator(kgs.BaseClass):
         relaxer = pack_dynamics.OptimizerBFGS()
         relaxer.cost = copy.deepcopy(self.fitness_cost)
         relaxer.cost.costs[2] = pack_cost.CollisionCostOverlappingArea(scaling=1.)
-        relaxer.n_iterations = 120
+        relaxer.n_iterations = 80
         self.rough_relaxers.append(relaxer)
 
 
