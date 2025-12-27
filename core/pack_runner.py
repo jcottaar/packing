@@ -158,6 +158,15 @@ def set_fixed_scaling(ga, name, value):
 def make_single(ga, name, value):
     ga.ga = ga.ga.ga_base
 
+def set_alternative_selection(ga, name, value):
+    if value:
+        ga.ga.ga_base.alternative_selection = True
+        ga.ga.ga_base.search_depth = 1.
+
+def generate_extra(ga, name, value):
+    ga.ga.ga_base.generate_extra = value
+    ga.filter_before_rough = value
+
 
 
 
@@ -176,8 +185,8 @@ def baseline_runner(fast_mode=False):
     runner.diagnostic_plot = False
     runner.ga.do_legalize = True
 
-    runner.ga.ga_base.alternative_selection = True
-    runner.ga.ga_base.search_depth = 1.
+    #runner.ga.ga_base.alternative_selection = True
+    #runner.ga.ga_base.search_depth = 1.
     
     
 
@@ -192,14 +201,16 @@ def baseline_runner(fast_mode=False):
 
     #res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.5,1.), scale_population_size)
     #res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.,0.7), scale_rough_iterations)
-    res.modifier_dict['survival_rate'] = pm(0.074, lambda r:r.uniform(0.04,0.1), set_ga_base_ga_prop)
-    res.modifier_dict['elitism_fraction'] = pm(0.25, lambda r:r.uniform(0.1,0.5), set_ga_base_ga_prop)
-    res.modifier_dict['diversity_criterion'] = pm(0.0, lambda r:r.uniform(0.0,0.2), set_ga_base_ga_prop)
+    #res.modifier_dict['survival_rate'] = pm(0.074, lambda r:r.uniform(0.04,0.1), set_ga_base_ga_prop)
+    #res.modifier_dict['elitism_fraction'] = pm(0.25, lambda r:r.uniform(0.1,0.5), set_ga_base_ga_prop)
+    #res.modifier_dict['diversity_criterion'] = pm(0.0, lambda r:r.uniform(0.0,0.2), set_ga_base_ga_prop)
     #res.modifier_dict['diversity_criterion_scaling'] = pm(0.01, lambda r:r.uniform(0.0,0.03), set_ga_base_ga_prop)
-    res.modifier_dict['use_fixed_scaling'] = pm(True, lambda r:r.choice([True,False]), set_fixed_scaling)
+    #res.modifier_dict['use_fixed_scaling'] = pm(True, lambda r:r.choice([True,False]), set_fixed_scaling)
     #res.modifier_dict['search_depth'] = pm(0.5, lambda r:r.uniform(0.2,0.8), set_ga_base_ga_prop)
     #res.modifier_dict['use_auction'] = pm(False, lambda r:r.choice([False,True]), set_auction)
 
+    res.modifier_dict['alternative_selection'] = pm(True, lambda r:r.choice([True]), set_alternative_selection)
+    res.modifier_dict['generate_extra'] = pm(1., lambda r:r.choice([0.1,0.5,1.]).item(), generate_extra)
     res.modifier_dict['make_single'] = pm(False, lambda r:r.choice([True]), make_single)
 
     #res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)

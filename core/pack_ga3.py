@@ -887,6 +887,7 @@ class GASinglePopulationTournament(GASinglePopulation):
 class GASinglePopulationOld(GASinglePopulation):
 
     population_size:int = field(init=True, default=4000)
+    generate_extra: float = field(init=True, default=1.)  # Make this equal to Orchestrator.filter_before_rought
     selection_size:list = field(init=True, default=None)#lambda: [int(4.*(x-1))+1 for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
     prob_mate_own: float = field(init=True, default=0.5)
     
@@ -896,8 +897,8 @@ class GASinglePopulationOld(GASinglePopulation):
     elitism_fraction: float = field(init=True, default=0.25)  # Fraction of survivors that are elite (18/37)
     search_depth: float = field(init=True, default=0.5)  # How deep to look for diversity (max_tier/pop_size)
     alternative_selection: bool = field(init=True, default=False) 
-    diversity_criterion: float = field(init=True, default=0.)  # will scale with N_trees
-    diversity_criterion_scaling: float = field(init=True, default=0.01) # will scale with N_trees
+    diversity_criterion: float = field(init=True, default=0.2)  # will scale with N_trees
+    diversity_criterion_scaling: float = field(init=True, default=0.) # will scale with N_trees
     lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='auction'))
 
     def _initialize(self):
@@ -1040,7 +1041,7 @@ class GASinglePopulationOld(GASinglePopulation):
         old_pop.check_constraints()
         old_pop.parent_fitness = old_pop.fitness.copy()
         parent_size = old_pop.genotype.N_solutions
-        new_pop = old_pop.create_empty(self.population_size-parent_size, self.N_trees_to_do)
+        new_pop = old_pop.create_empty(int(self.population_size/self.generate_extra)-parent_size, self.N_trees_to_do)
 
         # Generate all parent and mate selections at once (vectorized)
         N_offspring = new_pop.genotype.N_solutions
@@ -1109,6 +1110,7 @@ class Orchestrator(kgs.BaseClass):
     ga: GA = field(init=True, default=None)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
+    filter_before_rough: float = field(init=True, default=1.)  # fraction of solutions to keep before rough relax
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
     n_generations: int = field(init=True, default=200)
     genotype_at: int = field(init=True, default=1)  # 0:before relax, 1:after rough relax, 2:after fine relax(=phenotype)
@@ -1161,10 +1163,11 @@ class Orchestrator(kgs.BaseClass):
         super().__post_init__()
 
     def _relax(self, sol_list):
-        # pack_vis_sol.pack_vis_sol(sol_list[0].genotype)  # Sanity check
-        # plt.title('Genotype')
-        # pack_vis_sol.pack_vis_sol(sol_list[0].phenotype)  # Sanity check
-        # plt.title('Phenotype')
+        for s in sol_list:
+            fitness = self.fitness_cost.compute_cost_allocate(s.genotype, evaluate_gradient=False)[0].get()
+            sorted_ids = kgs.lexicographic_argsort(fitness)
+            n_keep = int(s.genotype.N_solutions*self.filter_before_rough)
+            s.select_ids(sorted_ids[:n_keep])
         for s in sol_list:
             s.phenotype.xyt[:] = s.genotype.xyt[:]
             s.phenotype.h[:] = s.genotype.h[:]
@@ -1271,5 +1274,6 @@ def baseline():
     #runner.ga.champion_genotype_ax = (1,0)
     runner.ga.champion_phenotype_ax = (0,2)
     runner.ga.plot_diversity_ax = (1,2)
+    runner.plot_every = 3
 
     return runner
