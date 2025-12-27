@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_move
+import os
 from IPython.display import clear_output, display
 
 
@@ -170,6 +171,7 @@ class GA(kgs.BaseClass):
 
     allow_reset: bool = field(init=True, default=True)
     allow_freeze: bool = field(init=True, default=False)
+    stop_check_generations: int = field(init=True, default=1000)
     reset_check_generations: int = field(init=True, default=None)
     reset_check_generations_ratio: float = field(init=True, default=0.1)
     reset_check_threshold: float = field(init=True, default=0.1)
@@ -188,6 +190,7 @@ class GA(kgs.BaseClass):
     _skip_next_selection: bool = field(init=False, default=False)
     _is_frozen2: bool = field(init=False, default=False)
     _allow_mate_with_better: bool = field(init=True, default=True)    
+    _stopped: bool = field(init=False, default=False)
 
     _fig = None
     _ax = None
@@ -228,7 +231,15 @@ class GA(kgs.BaseClass):
             return
         self._score(register_best)
         if register_best:
-            assert(len(self.champions) == len(self.best_costs_per_generation))            
+            assert(len(self.champions) == len(self.best_costs_per_generation))        
+            if not self.stop_check_generations is None:
+                assert len(self.best_costs_per_generation)==1
+                effective_stop_check_generations = self.stop_check_generations
+                costs = self.best_costs_per_generation[0]          
+                if len(costs)>effective_stop_check_generations+2 and \
+                        costs[-1][0]==costs[-effective_stop_check_generations][0] and \
+                        costs[-1][1]>=self.reset_check_threshold*costs[-effective_stop_check_generations][1]:     
+                    self._stopped = True        
             if not self.reset_check_generations is None:
                 assert len(self.best_costs_per_generation)==1
                 effective_reset_check_generations = self.reset_check_generations + \
@@ -251,7 +262,7 @@ class GA(kgs.BaseClass):
                         self._is_frozen2 = True                        
 
 
-    def generate_offspring(self, mate_sol, mate_weights, mate_costs):
+    def generate_offspring(self, mate_sol, mate_weights, mate_costs):        
         if self._is_frozen2:
             return []
         filtered_mate_sol = mate_sol
@@ -1122,9 +1133,11 @@ class Orchestrator(kgs.BaseClass):
     plot_every: int = field(init=True, default=1)
     filename: str = field(init=True, default='default')
     save_every: int = field(init=True, default=10)
+    use_atomic_save: bool = field(init=True, default=True)
 
     # Intermediate
     _current_generation: int = field(init=False, default=0)
+    _is_finalized: bool = field(init=False, default=False)
 
     
     def __post_init__(self):        
@@ -1195,11 +1208,20 @@ class Orchestrator(kgs.BaseClass):
         self.ga.check_constraints()
         return super()._check_constraints()
     
+    def _save_checkpoint(self, filename):
+        """Save checkpoint with optional atomic write."""
+        if self.use_atomic_save:
+            temp_filename = filename + '.tmp'
+            kgs.dill_save(temp_filename, self)
+            os.replace(temp_filename, filename)
+        else:
+            kgs.dill_save(filename, self)
+    
     def run(self):
         self.check_constraints(debugging_mode_offset=2)
         save_filename = kgs.temp_dir + self.filename + '.pickle'
 
-        while self._current_generation<self.n_generations:
+        while self._current_generation<self.n_generations and not self.ga._stopped:
             if self._current_generation==0:
                 self.ga.fitness_cost = self.fitness_cost
                 self.ga.seed = self.seed
@@ -1233,14 +1255,16 @@ class Orchestrator(kgs.BaseClass):
             self._current_generation += 1
 
             if self._current_generation % self.save_every == 0:
-                kgs.dill_save(save_filename, self)
+                self._save_checkpoint(save_filename)
 
             if kgs.debugging_mode>=2:
                 self.check_constraints()
         
-        kgs.dill_save(save_filename, self)
-        self.ga.finalize()
-        kgs.dill_save(save_filename+'d', self)
+        if not self._is_finalized:
+            self._save_checkpoint(save_filename)
+            self.ga.finalize()
+            self._is_finalized = True
+            self._save_checkpoint(save_filename)
 
 def baseline():
     runner = Orchestrator(n_generations=60000)
