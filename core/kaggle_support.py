@@ -48,8 +48,8 @@ def assert_mps():
     )
     if out.returncode != 0:
         print("WARNING: CUDA MPS not active")
-        if env=='vast':
-            raise Exception('no MPS')
+        #if env=='vast':
+        #    raise Exception('no MPS')
 
 if os.path.isdir('/mnt/d/packing/'):
     env = 'local'
