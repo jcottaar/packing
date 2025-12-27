@@ -1264,7 +1264,7 @@ class Orchestrator(kgs.BaseClass):
             self._save_checkpoint(save_filename)
             self.ga.finalize()
             self._is_finalized = True
-            self._save_checkpoint(save_filename)
+            self._save_checkpoint(save_filename+'d')
 
 def baseline():
     runner = Orchestrator(n_generations=60000)

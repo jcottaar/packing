@@ -38,6 +38,7 @@ def test_ga(regenerate_reference, do_resume):
     ga.ga.search_depth = 0.8
     ga.ga.elitism_fraction = 0.5
     ga.ga.survival_rate = 0.7
+    ga.use_atomic_save = False
     #ga.ga.selection_size = [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,26,27,28,29,30,35,40,45,50,60,70,80,90]
     ga.ga.do_legalize = False
     if not do_resume:
