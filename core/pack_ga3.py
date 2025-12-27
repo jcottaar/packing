@@ -603,6 +603,7 @@ class GASinglePopulation(GA):
 
     plot_diversity_ax = None
     plot_diversity_alt_ax = None
+    plot_population_fitness_ax = None
 
     # Results
     population: Population = field(init=True, default=None)    
@@ -736,6 +737,18 @@ class GASinglePopulation(GA):
             plt.title('Diversity Matrix Across single population')
             plt.xlabel('Individual')
             plt.ylabel('Individual')
+        if self.plot_population_fitness_ax is not None:
+            for a in self.plot_population_fitness_ax:
+                ax = plot_ax[a[2]]
+                ax.clear()
+                plt.sca(ax)
+                fitness_values = self.population.fitness[:,a[0]]
+                if a[1]:
+                    fitness_values = np.log(fitness_values)/np.log(10)
+                plt.plot(fitness_values)
+                plt.grid(True)
+                plt.title('Population Fitness Distribution')
+                plt.legend()
     
     
     
@@ -874,7 +887,7 @@ class GASinglePopulationTournament(GASinglePopulation):
 class GASinglePopulationOld(GASinglePopulation):
 
     population_size:int = field(init=True, default=4000)
-    selection_size:list = field(init=True, default_factory=lambda: [int(4.*(x-1))+1 for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
+    selection_size:list = field(init=True, default=None)#lambda: [int(4.*(x-1))+1 for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
     prob_mate_own: float = field(init=True, default=0.5)
     
     # Parameters for generating selection_size (used only if selection_size is None)
@@ -895,7 +908,9 @@ class GASinglePopulationOld(GASinglePopulation):
             elite = list(range(1, n_elite + 1))
             if n_diversity_tiers > 0:
                 tiers = np.geomspace(n_elite + 1, max_tier, n_diversity_tiers).astype(int)
+                print(tiers)
                 tiers = list(np.unique(tiers))
+                print(tiers)
             else:
                 tiers = []
             self.selection_size = elite + tiers
