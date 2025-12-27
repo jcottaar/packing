@@ -156,10 +156,11 @@ def set_fixed_scaling(ga, name, value):
         ga.ga.ga_base.diversity_criterion = 0.
 
 def make_single(ga, name, value):
-    ga.ga = ga.ga.ga_base
-    ga.n_generations //= 2
-    ga.ga.do_legalize = True
-    ga.ga.reset_check_generations = 10000000
+    if value:
+        ga.ga = ga.ga.ga_base
+        ga.n_generations //= 2
+        ga.ga.do_legalize = True
+        ga.ga.reset_check_generations = 10000000
 
 def set_alternative_selection(ga, name, value):
     if value:
@@ -220,8 +221,8 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['use_auction'] = pm(False, lambda r:r.choice([False,True]), set_auction)
 
     res.modifier_dict['alternative_selection'] = pm(True, lambda r:r.choice([False, True]), set_alternative_selection)
-    res.modifier_dict['remove_fine_1'] = pm(False, lambda r:r.choice([False,True]), remove_fine_1)
     res.modifier_dict['remove_fine_3'] = pm(False, lambda r:r.choice([False,True]), remove_fine_3)
+    res.modifier_dict['remove_fine_1'] = pm(False, lambda r:r.choice([False,True]), remove_fine_1)
     res.modifier_dict['generate_extra'] = pm(1., lambda r:r.choice([1.,0.5,0.25]).item(), generate_extra)
     res.modifier_dict['make_single'] = pm(False, lambda r:r.choice([False]), make_single)
 
