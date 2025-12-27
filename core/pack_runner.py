@@ -157,6 +157,9 @@ def set_fixed_scaling(ga, name, value):
 
 def make_single(ga, name, value):
     ga.ga = ga.ga.ga_base
+    ga.n_generations //= 2
+    ga.ga.do_legalize = True
+    ga.ga.reset_check_generations = 10000000
 
 def set_alternative_selection(ga, name, value):
     if value:
@@ -167,6 +170,13 @@ def generate_extra(ga, name, value):
     ga.ga.ga_base.generate_extra = value
     ga.filter_before_rough = value
 
+def remove_fine_1(ga, name, value):
+    if value:
+        ga.fine_relaxers.pop(0)
+
+def remove_fine_3(ga, name, value):
+    if value:
+        ga.fine_relaxers.pop(2)
 
 
 
@@ -209,9 +219,11 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['search_depth'] = pm(0.5, lambda r:r.uniform(0.2,0.8), set_ga_base_ga_prop)
     #res.modifier_dict['use_auction'] = pm(False, lambda r:r.choice([False,True]), set_auction)
 
-    res.modifier_dict['alternative_selection'] = pm(True, lambda r:r.choice([True]), set_alternative_selection)
-    res.modifier_dict['generate_extra'] = pm(1., lambda r:r.choice([0.1,0.5,1.]).item(), generate_extra)
-    res.modifier_dict['make_single'] = pm(False, lambda r:r.choice([True]), make_single)
+    res.modifier_dict['alternative_selection'] = pm(True, lambda r:r.choice([False, True]), set_alternative_selection)
+    res.modifier_dict['remove_fine_1'] = pm(False, lambda r:r.choice([False,True]), remove_fine_1)
+    res.modifier_dict['remove_fine_3'] = pm(False, lambda r:r.choice([False,True]), remove_fine_3)
+    res.modifier_dict['generate_extra'] = pm(1., lambda r:r.choice([1.,0.5,0.25]).item(), generate_extra)
+    res.modifier_dict['make_single'] = pm(False, lambda r:r.choice([False]), make_single)
 
     #res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
     #res.modifier_dict['n_selection_size'] = pm(36, lambda r:r.integers(18,36).item(), set_n_selection_size)
