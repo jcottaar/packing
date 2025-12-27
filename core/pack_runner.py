@@ -166,6 +166,9 @@ def set_alternative_selection(ga, name, value):
     if value:
         ga.ga.ga_base.alternative_selection = True
         ga.ga.ga_base.search_depth = 1.
+    else:
+        ga.ga.ga_base.alternative_selection = False
+        ga.ga.ga_base.search_depth = 0.5
 
 def generate_extra(ga, name, value):
     ga.ga.ga_base.generate_extra = value

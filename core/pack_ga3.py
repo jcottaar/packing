@@ -898,7 +898,7 @@ class GASinglePopulationTournament(GASinglePopulation):
 class GASinglePopulationOld(GASinglePopulation):
 
     population_size:int = field(init=True, default=4000)
-    generate_extra: float = field(init=True, default=1.)  # Make this equal to Orchestrator.filter_before_rought
+    generate_extra: float = field(init=True, default=0.4)  # Make this equal to Orchestrator.filter_before_rought
     selection_size:list = field(init=True, default=None)#lambda: [int(4.*(x-1))+1 for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
     prob_mate_own: float = field(init=True, default=0.5)
     
@@ -906,8 +906,8 @@ class GASinglePopulationOld(GASinglePopulation):
     # These are ratios that remain constant when scaling population_size
     survival_rate: float = field(init=True, default=0.074)  # Fraction of population that survives (37/500)
     elitism_fraction: float = field(init=True, default=0.25)  # Fraction of survivors that are elite (18/37)
-    search_depth: float = field(init=True, default=0.5)  # How deep to look for diversity (max_tier/pop_size)
-    alternative_selection: bool = field(init=True, default=False) 
+    search_depth: float = field(init=True, default=1.)  # How deep to look for diversity (max_tier/pop_size)
+    alternative_selection: bool = field(init=True, default=True) 
     diversity_criterion: float = field(init=True, default=0.2)  # will scale with N_trees
     diversity_criterion_scaling: float = field(init=True, default=0.) # will scale with N_trees
     lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='auction'))
@@ -1121,7 +1121,7 @@ class Orchestrator(kgs.BaseClass):
     ga: GA = field(init=True, default=None)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
     rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
-    filter_before_rough: float = field(init=True, default=1.)  # fraction of solutions to keep before rough relax
+    filter_before_rough: float = field(init=True, default=0.4)  # fraction of solutions to keep before rough relax
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
     n_generations: int = field(init=True, default=200)
     genotype_at: int = field(init=True, default=1)  # 0:before relax, 1:after rough relax, 2:after fine relax(=phenotype)
@@ -1154,12 +1154,12 @@ class Orchestrator(kgs.BaseClass):
 
 
         self.fine_relaxers = []
-        relaxer = pack_dynamics.OptimizerBFGS()
-        relaxer.cost = copy.deepcopy(self.fitness_cost)
-        relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
-        relaxer.n_iterations = 30
-        relaxer.max_step = 1e-2
-        self.fine_relaxers.append(relaxer)
+        # relaxer = pack_dynamics.OptimizerBFGS()
+        # relaxer.cost = copy.deepcopy(self.fitness_cost)
+        # relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        # relaxer.n_iterations = 30
+        # relaxer.max_step = 1e-2
+        # self.fine_relaxers.append(relaxer)
         relaxer = pack_dynamics.OptimizerBFGS()
         relaxer.cost = copy.deepcopy(self.fitness_cost)
         relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
