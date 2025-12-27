@@ -57,7 +57,7 @@ if os.path.isdir('/mnt/d/packing/'):
 else:
     env = 'vast'
 print(env)
-#assert_mps()
+assert_mps()
 
 profiling = False
 debugging_mode = 1
@@ -993,18 +993,18 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     where angular_dist wraps to [-pi, pi].
     """
     import lap_batch
-
+    
     N_pop, N_trees, _ = population_xyt.shape
     N_ref, N_trees_ref, _ = reference_xyt.shape
-
+    
     # Validate shapes
     assert N_trees == N_trees_ref, \
         f"Number of trees mismatch: population has {N_trees}, reference has {N_trees_ref}"
-
-    if lap_config is None:
-        lap_config = lap_batch.LAPConfig(algorithm='hungarian')
-
-    # 8 symmetry transformations: (rotation_angle, mirror_y)
+    
+    # Pre-compute the 8 transformation parameters
+    # Each transformation is (rotation_angle, mirror_x)
+    # rotation_angle: angle to rotate coordinates (0, pi/2, pi, 3pi/2)
+    # mirror_x: whether to mirror across x-axis before rotation
     transformations = [
         (0.0,        False),  # Identity
         (np.pi/2,    False),  # 90° rotation
@@ -1015,71 +1015,76 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
         (np.pi,      True),   # Mirror + 180° rotation
         (3*np.pi/2,  True),   # Mirror + 270° rotation
     ]
-
+    
     # Population coordinates (fixed, not transformed)
-    pop_x = population_xyt[:, :, 0].astype(cp.float32, copy=False)      # (N_pop, N_trees)
-    pop_y = population_xyt[:, :, 1].astype(cp.float32, copy=False)      # (N_pop, N_trees)
-    pop_theta = population_xyt[:, :, 2].astype(cp.float32, copy=False)  # (N_pop, N_trees)
-
-    # Output: min over transforms (initialized to +inf)
-    min_distances = cp.full((N_pop, N_ref), cp.inf, dtype=cp.float32)
-
-    # Reusable buffers (avoid per-transform allocations where practical)
-    ref_x = cp.empty((N_ref, N_trees), dtype=cp.float32)
-    ref_y = cp.empty((N_ref, N_trees), dtype=cp.float32)
-    ref_theta = cp.empty((N_ref, N_trees), dtype=cp.float32)
-    batched_costs = cp.empty((N_pop * N_ref, N_trees, N_trees), dtype=cp.float32)
-
-    if profiling:
-        cp.cuda.Device().synchronize()
-
+    pop_x = population_xyt[:, :, 0]      # (N_pop, N_trees)
+    pop_y = population_xyt[:, :, 1]      # (N_pop, N_trees)
+    pop_theta = population_xyt[:, :, 2]  # (N_pop, N_trees)
+    
+    # Compute cost matrices for all 8 transformations on GPU
+    all_cost_matrices = []
     for rot_angle, do_mirror in transformations:
-        # Reload references into the reusable buffers
-        ref_x[:] = reference_xyt[:, :, 0].astype(cp.float32, copy=False)
-        ref_y[:] = reference_xyt[:, :, 1].astype(cp.float32, copy=False)
-        ref_theta[:] = reference_xyt[:, :, 2].astype(cp.float32, copy=False)
-
-        # Apply symmetry transform in-place
+        # ---------------------------------------------------------
+        # Step 1: Apply transformation to reference individuals (GPU)
+        # ---------------------------------------------------------
+        ref_x = reference_xyt[:, :, 0].copy()
+        ref_y = reference_xyt[:, :, 1].copy()
+        ref_theta = reference_xyt[:, :, 2].copy()
+        
         if do_mirror:
-            ref_y *= -1.0
-            ref_theta[:] = cp.pi - ref_theta
-
+            ref_y = -ref_y
+            ref_theta = cp.pi-ref_theta
+        
         if rot_angle != 0.0:
-            cos_a = float(np.cos(rot_angle))
-            sin_a = float(np.sin(rot_angle))
-            x0 = ref_x.copy()
-            y0 = ref_y.copy()
-            ref_x[:] = x0 * cos_a - y0 * sin_a
-            ref_y[:] = x0 * sin_a + y0 * cos_a
-            ref_theta += cp.float32(rot_angle)
-
-        # Wrap theta to [-pi, pi]
-        ref_theta[:] = cp.remainder(ref_theta + cp.pi, 2 * cp.pi) - cp.pi
-
-        # Compute full cost tensor for this transform
+            cos_a = np.cos(rot_angle)
+            sin_a = np.sin(rot_angle)
+            new_x = ref_x * cos_a - ref_y * sin_a
+            new_y = ref_x * sin_a + ref_y * cos_a
+            ref_x = new_x
+            ref_y = new_y
+            ref_theta = ref_theta + rot_angle
+        
+        ref_theta = cp.remainder(ref_theta + np.pi, 2*np.pi) - np.pi
+        
+        # ---------------------------------------------------------
+        # Step 2: Compute pairwise cost matrix (GPU)
+        # ---------------------------------------------------------
+        # Shape calculations:
+        # pop_x[:, :, None, None]: (N_pop, N_trees, 1, 1)
+        # ref_x[None, None, :, :]: (1, 1, N_ref, N_trees)
+        # Result: (N_pop, N_trees, N_ref, N_trees)
         dx = pop_x[:, :, cp.newaxis, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :, :]
         dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
         dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
-        dtheta = cp.remainder(dtheta + cp.pi, 2 * cp.pi) - cp.pi
-        cost = cp.sqrt(dx * dx + dy * dy + dtheta * dtheta, dtype=cp.float32)
-
-        # Pack into contiguous (N_pop*N_ref, N, N) buffer to avoid extra copies in lap_batch
-        batched_costs[:] = cost.transpose(0, 2, 1, 3).reshape(N_pop * N_ref, N_trees, N_trees)
-
-        if profiling:
-            cp.cuda.Device().synchronize()
-
-        _, assignment_costs = lap_batch.solve_lap_batch(batched_costs, config=lap_config)  # (N_pop*N_ref,)
-
-        if profiling:
-            cp.cuda.Device().synchronize()
-
-        block_costs = assignment_costs.reshape(N_pop, N_ref)
-        min_distances[:] = cp.minimum(min_distances, block_costs)
+        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
+        cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)
+        
+        all_cost_matrices.append(cost_matrices)
+    
+    # ---------------------------------------------------------
+    # Step 3: Solve assignment problems on GPU using RAFT
+    # ---------------------------------------------------------
+    # Stack all cost matrices on GPU: shape (8, N_pop, N_trees, N_ref, N_trees)
+    # Then reshape to (8*N_pop*N_ref, N_trees, N_trees) for batched solving
+    stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_ref, N_trees)
+    batched = stacked.transpose(0, 1, 3, 2, 4).reshape(-1, N_trees, N_trees)  # (8*N_pop*N_ref, N_trees, N_trees)
 
     if profiling:
         cp.cuda.Device().synchronize()
+    
+    # Solve all LAPs on GPU
+    _, all_assignment_costs = lap_batch.solve_lap_batch(batched, config=lap_config)  # (8*N_pop*N_ref,)
 
+    if profiling:
+        cp.cuda.Device().synchronize()
+    
+    # Reshape back and take minimum across transformations
+    all_costs_array = all_assignment_costs.reshape(8, N_pop, N_ref)  # (8, N_pop, N_ref)
+    min_distances = all_costs_array.min(axis=0)  # (N_pop, N_ref)
+    
+    if profiling:
+        cp.cuda.Device().synchronize()
+    
     return min_distances
 
 
