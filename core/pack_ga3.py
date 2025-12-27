@@ -895,6 +895,9 @@ class GASinglePopulationOld(GASinglePopulation):
     survival_rate: float = field(init=True, default=0.074)  # Fraction of population that survives (37/500)
     elitism_fraction: float = field(init=True, default=0.25)  # Fraction of survivors that are elite (18/37)
     search_depth: float = field(init=True, default=0.5)  # How deep to look for diversity (max_tier/pop_size)
+    alternative_selection: bool = field(init=True, default=False) 
+    diversity_criterion: float = field(init=True, default=0.)  # will scale with N_trees
+    diversity_criterion_scaling: float = field(init=True, default=0.01) # will scale with N_trees
     lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='auction'))
 
     def _initialize(self):
@@ -922,45 +925,112 @@ class GASinglePopulationOld(GASinglePopulation):
         current_pop.select_ids(kgs.lexicographic_argsort(current_pop.fitness))  # Sort by fitness lexicographically
         current_xyt = current_pop.genotype.xyt  # (N_individuals, N_trees, 3)
 
-        max_sel = np.max(self.selection_size)
-        selected = np.zeros(self.population_size, dtype=bool)
-        diversity = np.inf*np.ones(max_sel)
+        if not self.alternative_selection:
 
-        # Determine how many initial selection sizes are sequential (1,2,3,...)
-        prefix_count = 0
-        for idx, sel_size in enumerate(self.selection_size):
-            if sel_size == idx + 1:
-                prefix_count += 1
-            else:
-                break
+            max_sel = np.max(self.selection_size)
+            selected = np.zeros(self.population_size, dtype=bool)
+            diversity = np.inf*np.ones(max_sel)
 
-        prefix_size = prefix_count  # Number of individuals to auto-select
-        if prefix_size > 0:
-            selected[:prefix_size] = True
-            try:
+            # Determine how many initial selection sizes are sequential (1,2,3,...)
+            prefix_count = 0
+            for idx, sel_size in enumerate(self.selection_size):
+                if sel_size == idx + 1:
+                    prefix_count += 1
+                else:
+                    break
+
+            prefix_size = prefix_count  # Number of individuals to auto-select
+            if prefix_size > 0:
+                selected[:prefix_size] = True
+                try:
+                    diversity_matrix = kgs.compute_genetic_diversity_matrix(
+                        cp.array(current_xyt[:max_sel]),
+                        cp.array(current_xyt[:prefix_size]),
+                        lap_config=self.lap_config
+                    ).get()
+                except:
+                    diversity_matrix = kgs.compute_genetic_diversity_matrix(
+                        cp.array(current_xyt[:max_sel]),
+                        cp.array(current_xyt[:prefix_size])
+                    ).get()
+                diversity = diversity_matrix.min(axis=1)
+                diversity[:prefix_size] = 0.0
+
+            for sel_size in self.selection_size[prefix_count:]:
+                selected_id = np.argmax(diversity[:sel_size])
+                selected[selected_id] = True
+                try:
+                    diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id]), lap_config=self.lap_config).get(), diversity)
+                except:
+                    diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
+                #print(sel_size, diversity)
+                assert(np.all(diversity[selected[:max_sel]]<1e-4))
+            current_pop.select_ids(np.where(selected)[0])
+        else:
+            # Alternative selection, based on best individuals that meet diversity criterion
+            
+            # Calculate how many to select
+            total_survivors = max(2, int(self.population_size * self.survival_rate))
+            n_elite = max(1, int(total_survivors * self.elitism_fraction))
+            n_diversity = total_survivors - n_elite
+            
+            # Limit search space to best pop_size*search_depth individuals
+            max_search = max(total_survivors + 1, int(self.population_size * self.search_depth))
+            max_search = min(max_search, self.population_size)  # Don't exceed population
+            
+            # Step 1: Select N best individuals (elite)
+            selected = np.zeros(self.population_size, dtype=bool)
+            selected[:n_elite] = True
+            
+            # Step 2: Select M more individuals based on diversity
+            if n_diversity > 0:
+                # Get xyt for search space
+                search_xyt = current_xyt[:max_search]  # (max_search, N_trees, 3)
+                diversity_threshold = self.diversity_criterion * self.N_trees_to_do
+                
+                # Initialize diversity array by computing to all elite individuals
                 diversity_matrix = kgs.compute_genetic_diversity_matrix(
-                    cp.array(current_xyt[:max_sel]),
-                    cp.array(current_xyt[:prefix_size]),
+                    cp.array(search_xyt),
+                    cp.array(current_xyt[:n_elite]),
                     lap_config=self.lap_config
                 ).get()
-            except:
-                diversity_matrix = kgs.compute_genetic_diversity_matrix(
-                    cp.array(current_xyt[:max_sel]),
-                    cp.array(current_xyt[:prefix_size])
-                ).get()
-            diversity = diversity_matrix.min(axis=1)
-            diversity[:prefix_size] = 0.0
+                diversity = diversity_matrix.min(axis=1)  # (max_search,)
+                diversity[:n_elite] = 0.0  # Elite have zero diversity to themselves
+                
+                # For each diversity pick
+                for i in range(n_diversity):
+                    # Find candidates that meet diversity criterion and are not yet selected
+                    meets_criterion = (diversity >= diversity_threshold) & (~selected[:max_search])
+                    
+                    # Pick the best among those that meet criterion, or just the best if none meet
+                    if np.any(meets_criterion):
+                        # Pick best (lowest index = best fitness) that meets criterion
+                        selected_id = np.where(meets_criterion)[0][0]
+                    else:
+                        # Pick best that's not yet selected
+                        unselected = np.where(~selected[:max_search])[0]
+                        if len(unselected) > 0:
+                            selected_id = unselected[0]
+                        else:
+                            # All searched individuals are selected, can't add more
+                            break
+                    
+                    selected[selected_id] = True
+                    
+                    # Update diversity by computing to the newly selected individual only
+                    diversity = np.minimum(
+                        kgs.compute_genetic_diversity(
+                            cp.array(search_xyt),
+                            cp.array(current_xyt[selected_id]),
+                            lap_config=self.lap_config
+                        ).get(),
+                        diversity
+                    )
 
-        for sel_size in self.selection_size[prefix_count:]:
-            selected_id = np.argmax(diversity[:sel_size])
-            selected[selected_id] = True
-            try:
-                diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id]), lap_config=self.lap_config).get(), diversity)
-            except:
-                diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
-            #print(sel_size, diversity)
-            assert(np.all(diversity[selected[:max_sel]]<1e-4))
-        current_pop.select_ids(np.where(selected)[0])
+                    diversity_threshold += self.diversity_criterion_scaling * self.N_trees_to_do
+            
+            current_pop.select_ids(np.where(selected)[0])
+
         self.population = current_pop
         self.population.check_constraints()
 
@@ -1180,7 +1250,7 @@ def baseline():
     #ga_base.population_size = int(ga_base.population_size * value)
     #ga_base.selection_size = [int( (s-1) * value)+1 for s in ga_base.selection_size]
     ga_base.population_size = 500 
-    ga_base.selection_size = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 23, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 225, 250]
+    #ga_base.selection_size = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 23, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 225, 250]
     ga_base.reset_check_generations = 50
     ga_base.reset_check_threshold = 0.5
     ga_base.freeze_duration = 100
