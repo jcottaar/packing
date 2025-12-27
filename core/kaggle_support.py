@@ -57,7 +57,7 @@ if os.path.isdir('/mnt/d/packing/'):
 else:
     env = 'vast'
 print(env)
-assert_mps()
+#assert_mps()
 
 profiling = False
 debugging_mode = 1
