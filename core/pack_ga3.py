@@ -21,6 +21,68 @@ import os
 from IPython.display import clear_output, display
 
 
+def _sparse_encode_int8_array(arr: np.ndarray):
+    arr_np = np.asarray(arr)
+    if arr_np.dtype != np.int8:
+        raise TypeError(f"Expected int8 array, got {arr_np.dtype}")
+    flat = arr_np.ravel()
+    idx = np.flatnonzero(flat)
+    return {
+        'format': 'sparse_int8_v1',
+        'shape': arr_np.shape,
+        'indices': idx.astype(np.int32, copy=False),
+        'values': flat[idx].astype(np.int8, copy=False),
+    }
+
+
+def _sparse_decode_int8_array(payload: dict):
+    if payload.get('format') != 'sparse_int8_v1':
+        raise ValueError(f"Unsupported sparse payload format: {payload.get('format')}")
+    shape = tuple(payload['shape'])
+    idx = np.asarray(payload['indices'], dtype=np.int64)
+    values = np.asarray(payload['values'], dtype=np.int8)
+    out = np.zeros(int(np.prod(shape, dtype=np.int64)), dtype=np.int8)
+    out[idx] = values
+    return out.reshape(shape)
+
+
+def _encode_int8_array(arr: np.ndarray):
+    arr_np = np.asarray(arr)
+    if arr_np.dtype != np.int8:
+        raise TypeError(f"Expected int8 array, got {arr_np.dtype}")
+
+    sparse = _sparse_encode_int8_array(arr_np)
+    # Rough byte estimate for sparse payload: indices(int32) + values(int8)
+    sparse_bytes = int(sparse['indices'].nbytes + sparse['values'].nbytes)
+
+    import zlib
+    dense_bytes = arr_np.tobytes(order='C')
+    compressed = zlib.compress(dense_bytes, level=6)
+    dense_payload = {
+        'format': 'zlib_int8_v1',
+        'shape': arr_np.shape,
+        'data': compressed,
+    }
+
+    # Choose smaller representation (favor dense on ties).
+    if len(compressed) <= sparse_bytes:
+        return dense_payload
+    return sparse
+
+
+def _decode_int8_array(payload: dict):
+    fmt = payload.get('format')
+    if fmt == 'sparse_int8_v1':
+        return _sparse_decode_int8_array(payload)
+    if fmt == 'zlib_int8_v1':
+        import zlib
+        shape = tuple(payload['shape'])
+        raw = zlib.decompress(payload['data'])
+        arr = np.frombuffer(raw, dtype=np.int8)
+        return arr.reshape(shape)
+    raise ValueError(f"Unsupported int8 payload format: {fmt}")
+
+
 # ============================================================
 # Definition of population
 # ============================================================
@@ -1113,6 +1175,43 @@ class GASinglePopulationOld(GASinglePopulation):
         self.population = old_pop
         
         self.population.check_constraints()
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        gen = state.get('_generator', None)
+        if gen is None:
+            return state
+        bitgen = getattr(gen, 'bit_generator', None)
+        assert not( bitgen is None or type(bitgen).__name__ != 'XORWOW')
+        bit_state = bitgen.__getstate__()
+        raw_state = bit_state.get('_state', None)
+        assert isinstance(raw_state, cp.ndarray)
+        raw_state_np = raw_state.get()
+        assert raw_state_np.dtype == np.int8
+        state['_generator'] = {
+            '__format__': 'cupy_xorwow_state_only_v1',
+            '_state': _encode_int8_array(raw_state_np),
+        }
+        return state
+
+    def __setstate__(self, state):
+        gen_payload = state.get('_generator', None)
+
+        # New compact format: only restores XORWOW._state
+        if isinstance(gen_payload, dict) and gen_payload.get('__format__') == 'cupy_xorwow_state_only_v1':
+            sparse_state = gen_payload.get('_state', None)
+            if isinstance(sparse_state, dict) and sparse_state.get('format') in ('sparse_int8_v1', 'zlib_int8_v1'):
+                decoded = _decode_int8_array(sparse_state)
+
+                gen = cp.random.default_rng()
+                bitgen = getattr(gen, 'bit_generator', None)
+                if bitgen is not None and type(bitgen).__name__ == 'XORWOW':
+                    # Only mutate `_state` as requested.
+                    bitgen._state = cp.asarray(decoded)
+                    state = dict(state)
+                    state['_generator'] = gen
+
+        super().__setstate__(state)
         
 
 @dataclass
@@ -1264,7 +1363,12 @@ class Orchestrator(kgs.BaseClass):
             self._save_checkpoint(save_filename)
             self.ga.finalize()
             self._is_finalized = True
-            self._save_checkpoint(save_filename+'d')
+
+        base_dir = os.path.dirname(save_filename)
+        done_dir = os.path.join(base_dir, 'done')
+        os.makedirs(done_dir, exist_ok=True)
+        done_path_done = os.path.join(done_dir, f"{self.filename}_done.pickle")
+        self._save_checkpoint(done_path_done)
 
 def baseline():
     runner = Orchestrator(n_generations=60000)
