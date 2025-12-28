@@ -145,6 +145,7 @@ class Population(kgs.BaseClass):
     def create_clone(self, idx: int, other: 'Population', parent_id: int):
         assert idx<self.genotype.N_solutions
         self.genotype.create_clone(idx, other.genotype, parent_id)
+        self.phenotype.create_clone(idx, other.phenotype, parent_id)
         self.fitness[idx] = other.fitness[parent_id]
         self.parent_fitness[idx] = other.fitness[parent_id]
         # self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
@@ -152,6 +153,7 @@ class Population(kgs.BaseClass):
     def create_clone_batch(self, inds: cp.ndarray, other: 'Population', parent_ids: cp.ndarray):
         """Vectorized batch clone operation."""
         self.genotype.create_clone_batch(inds, other.genotype, parent_ids)
+        self.phenotype.create_clone_batch(inds, other.phenotype, parent_ids)
         # Convert indices to CPU for NumPy array indexing
         inds_cpu = inds.get() if isinstance(inds, cp.ndarray) else inds
         parent_ids_cpu = parent_ids.get() if isinstance(parent_ids, cp.ndarray) else parent_ids
@@ -724,7 +726,6 @@ class GASinglePopulation(GA):
                 self.initializer.fixed_h = cp.array([ref_h,0,0],dtype=kgs.dtype_cp)
             else:
                 self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
-            #print('Setting starting h to', self.initializer.fixed_h)
             self.initializer.base_solution.use_fixed_h = True
         self.population = self.initializer.initialize_population(len(self.selection_size), self.N_trees_to_do)    
         self.population.check_constraints()        
@@ -988,13 +989,10 @@ class GASinglePopulationOld(GASinglePopulation):
             elite = list(range(1, n_elite + 1))
             if n_diversity_tiers > 0:
                 tiers = np.geomspace(n_elite + 1, max_tier, n_diversity_tiers).astype(int)
-                print(tiers)
                 tiers = list(np.unique(tiers))
-                print(tiers)
             else:
                 tiers = []
             self.selection_size = elite + tiers
-            print(self.selection_size)
         super()._initialize()
 
     def _apply_selection(self):
@@ -1040,7 +1038,6 @@ class GASinglePopulationOld(GASinglePopulation):
                     diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id]), lap_config=self.lap_config).get(), diversity)
                 except:
                     diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
-                #print(sel_size, diversity)
                 assert(np.all(diversity[selected[:max_sel]]<1e-4))
             current_pop.select_ids(np.where(selected)[0])
         else:
