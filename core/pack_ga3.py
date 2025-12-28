@@ -188,10 +188,13 @@ class InitializerRandomJiggled(Initializer):
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array
+    use_fixed_h_for_size_setup: bool = field(init=True, default=False)
 
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
         size_setup_scaled = self.size_setup * np.sqrt(N_trees)
+        if self.use_fixed_h_for_size_setup:
+            size_setup_scaled = float(cp.asnumpy(self.fixed_h[0]))
         xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=(N_individuals, N_trees, 3))
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
         xyt = cp.array(xyt, dtype=kgs.dtype_np)    

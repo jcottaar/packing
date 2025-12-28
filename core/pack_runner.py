@@ -111,19 +111,19 @@ def set_ga_base_ga_prop(ga,name,value):
 def scale_population_size(ga, name, value):
     """Scale population size by given factor"""
     ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size * value)
-    ga.ga.ga_base.selection_size = [int( (s-1) * value)+1 for s in ga.ga.ga_base.selection_size]
+    #ga.ga.ga_base.selection_size = [int( (s-1) * value)+1 for s in ga.ga.ga_base.selection_size]
     #ga.n_generations = int(ga.n_generations / value)
     # now make sure selection_size is unique, i.e. 1,2,2,3,3,4,4,5,20 must become 1,2,3,4,5,6,7,8,40
-    seen = set()
-    unique_selection = []
-    for s in ga.ga.ga_base.selection_size:
-        while s in seen:
-            s += 1
-        seen.add(s)
-        unique_selection.append(s)
-    ga.ga.ga_base.selection_size = unique_selection
-    ga.ga.N = int(ga.ga.N / value)
-    print(ga.ga.N, ga.ga.ga_base.population_size, ga.ga.ga_base.selection_size)
+    # seen = set()
+    # unique_selection = []
+    # for s in ga.ga.ga_base.selection_size:
+    #     while s in seen:
+    #         s += 1
+    #     seen.add(s)
+    #     unique_selection.append(s)
+    # ga.ga.ga_base.selection_size = unique_selection
+    # ga.ga.N = int(ga.ga.N / value)
+    # print(ga.ga.N, ga.ga.ga_base.population_size, ga.ga.ga_base.selection_size)
 
 def set_n_selection_size(ga, name, value):
     """Set number of selection sizes to use"""
@@ -188,6 +188,10 @@ def alter_diversity(ga, name, value):
     elif value == 2:
         ga.ga.ga_base.lap_config.algorithm = 'min_cost_col'
 
+def set_size_setup(ga, name, value):
+    ga.ga.ga_base.initializer.use_fixed_h_for_size_setup = value
+
+
 
 
 # ============================================================
@@ -216,32 +220,27 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
     
+    res.modifier_dict['use_fixed_h_for_size_setup'] = pm(False, lambda r:r.choice([False,True]).item(), set_size_setup)
+    res.modifier_dict['always_allow_mate_with_better'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
+    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
+    res.modifier_dict['diversity_reset_threshold'] = pm(5./40, lambda r:r.uniform(3./40, 10./40), set_ga_prop)
+    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
+    res.modifier_dict['generate_extra'] = pm(0.4, lambda r:r.uniform(0.2,0.6), generate_extra)
+    res.modifier_dict['genotype_at'] = pm(1, lambda r:r.choice([0,1]).item(), set_orchestrator_prop)
+    res.modifier_dict['remove_fine_1'] = pm(False, lambda r:r.choice([False,True]).item(), remove_fine_1)
 
-    
+    res.modifier_dict['reduce_h_threshold'] = pm(1e-5/40, lambda r:r.uniform(0.5e-5/40, 1.5e-5/40), set_ga_base_ga_prop)
+    res.modifier_dict['reduce_h_amount'] = pm(2e-3/np.sqrt(40), lambda r:r.uniform(1e-3/np.sqrt(40), 4e-3/np.sqrt(40)), set_ga_base_ga_prop)
+    res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_base_ga_prop)
 
-    #res.modifier_dict['scale_population_size'] = pm(1., lambda r:r.uniform(0.5,1.), scale_population_size)
-    #res.modifier_dict['scale_rough_iterations'] = pm(1., lambda r:r.uniform(0.,0.7), scale_rough_iterations)
-    #res.modifier_dict['survival_rate'] = pm(0.074, lambda r:r.uniform(0.04,0.1), set_ga_base_ga_prop)
-    #res.modifier_dict['elitism_fraction'] = pm(0.25, lambda r:r.uniform(0.1,0.5), set_ga_base_ga_prop)
-    #res.modifier_dict['diversity_criterion'] = pm(0.0, lambda r:r.uniform(0.0,0.2), set_ga_base_ga_prop)
-    #res.modifier_dict['diversity_criterion_scaling'] = pm(0.01, lambda r:r.uniform(0.0,0.03), set_ga_base_ga_prop)
-    #res.modifier_dict['use_fixed_scaling'] = pm(True, lambda r:r.choice([True,False]), set_fixed_scaling)
-    #res.modifier_dict['search_depth'] = pm(0.5, lambda r:r.uniform(0.2,0.8), set_ga_base_ga_prop)
-    #res.modifier_dict['use_auction'] = pm(False, lambda r:r.choice([False,True]), set_auction)
+    res.modifier_dict['population_size'] = pm(1., lambda r:r.uniform(0.75,1.25), scale_population_size)    
+    res.modifier_dict['prob_mate_own'] = pm(1., lambda r:r.uniform(0.5,0.9), set_ga_base_ga_prop)
+    res.modifier_dict['survival_rate'] = pm(0.074, lambda r:r.uniform(0.05,0.1), set_ga_base_ga_prop)
+    res.modifier_dict['elitism_fraction'] = pm(0.25, lambda r:r.uniform(0.1,0.4), set_ga_base_ga_prop)
+    res.modifier_dict['search_depth'] = pm(1., lambda r:r.uniform(0.5,1.), set_ga_base_ga_prop)
+    res.modifier_dict['diversity_criterion'] = pm(0.2, lambda r:r.uniform(0.1,0.3), set_ga_base_ga_prop)
+    res.modifier_dict['alter_diversity'] = pm(0, lambda r:r.choice([0,1,2]).item(), alter_diversity)
 
-    res.modifier_dict['alter_diversity'] = pm(0, lambda r:r.choice([0,1,2]), alter_diversity)
-    res.modifier_dict['make_single'] = pm(False, lambda r:r.choice([True]), make_single)
-
-    #res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
-    #res.modifier_dict['n_selection_size'] = pm(36, lambda r:r.integers(18,36).item(), set_n_selection_size)
-    #res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.choice([0.7,1.]), set_ga_base_ga_prop)
-    #res.modifier_dict['reduce_h_threshold'] = pm(1e-4/40, lambda r:r.choice([1e-5/40, 1e-6/40]).item(), set_ga_base_ga_prop)
-    #res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
-    #res.modifier_dict['disable_stripe_crossover'] = pm(False, lambda r:r.choice([False]).item(), disable_stripe_crossover)
-    #res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
-    #res.modifier_dict['fixed_h'] = pm(ga_base.fixed_h, lambda r:r.uniform(0.61,0.61), set_ga_base_ga_prop)
-    #res.modifier_dict['reduce_h_amount'] = pm(ga_base.reduce_h_amount/np.sqrt(40), lambda r:r.choice([0.001/np.sqrt(40),0.002/np.sqrt(40)]), set_ga_base_ga_prop)
-    
 
     return res
 
