@@ -11,6 +11,9 @@ from shapely.ops import unary_union
 import colorsys
 
 
+_TWO_PI = 2.0 * np.pi
+
+
 def _pastel_color(i, n, s=0.45, l=0.72):
     """
     Generate a pastel-ish RGB color.
@@ -26,6 +29,18 @@ def _pastel_color(i, n, s=0.45, l=0.72):
     return (r, g, b)
 
 
+def _rotation_color(theta, s=0.85, l=0.55):
+    """Map a rotation angle to a vivid, continuous cyclic color.
+
+    The mapping is continuous on [0, 2π) and wraps seamlessly at 2π.
+    """
+    # Ensure continuity and wrap at 2π (0 and 2π yield identical colors).
+    t = float(theta) % _TWO_PI
+    h = t / _TWO_PI
+    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    return (r, g, b)
+
+
 def _iter_geoms(geom):
     """Yield Polygons from Polygon or MultiPolygon."""
     if isinstance(geom, Polygon):
@@ -37,10 +52,10 @@ def _iter_geoms(geom):
         raise TypeError(f"Expected Polygon or MultiPolygon, got {type(geom)}")
 
 
-def _plot_polygons(polygons, ax, color_indices=None, alpha=1.0):
+def _plot_polygons(polygons, ax, color_indices=None, thetas=None, alpha=1.0):
     """
-    Plot a list of Shapely polygons with distinct unsaturated colors.
-    Overlapping regions are highlighted in bright red.
+    Plot a list of Shapely polygons.
+    Overlapping regions are highlighted in black.
 
     Parameters
     ----------
@@ -49,6 +64,10 @@ def _plot_polygons(polygons, ax, color_indices=None, alpha=1.0):
     color_indices : list of int, optional
         If provided, color_indices[i] determines the color for polygon i.
         Polygons with the same index will have the same color.
+    thetas : array-like, optional
+        If provided, thetas[i] (radians) determines the color for polygon i using
+        a continuous cyclic mapping of (theta mod 2π). Takes precedence over
+        color_indices.
     alpha : float, optional
         Transparency level for polygons (0.0 = fully transparent, 1.0 = fully opaque)
         Default: 1.0
@@ -62,11 +81,17 @@ def _plot_polygons(polygons, ax, color_indices=None, alpha=1.0):
     if n == 0:
         return
 
+    if thetas is not None and len(thetas) != n:
+        raise ValueError(f"Expected thetas of length {n}, got {len(thetas)}")
+
     # Draw base polygons (pastel, no edges)
     for i, poly in enumerate(flat_polys):
         x, y = poly.exterior.xy
-        # Use color index if provided, otherwise use sequential coloring
-        if color_indices is not None:
+        # Prefer rotation-based coloring if available.
+        if thetas is not None:
+            facecolor = _rotation_color(thetas[i])
+        # Otherwise use color index if provided, else use sequential coloring.
+        elif color_indices is not None:
             color_idx = color_indices[i]
             # Determine total number of unique colors
             n_colors = len(set(color_indices))
@@ -83,7 +108,7 @@ def _plot_polygons(polygons, ax, color_indices=None, alpha=1.0):
         )
         ax.add_patch(patch)
 
-    # Compute pairwise intersections and draw them in bright red
+    # Compute pairwise intersections and draw them in black
     intersections = []
     eps_area = 1e-9
     for i in range(n):
@@ -111,7 +136,7 @@ def _plot_polygons(polygons, ax, color_indices=None, alpha=1.0):
             red_patch = MplPolygon(
                 list(zip(x, y)),
                 closed=True,
-                facecolor=(1.0, 0.0, 0.0),  # bright red
+                facecolor=(0.0, 0.0, 0.0),  # black
                 edgecolor=None,
                 zorder=3,
                 alpha=0.5,
@@ -149,6 +174,8 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
     tree_list = kgs.TreeList()
     tree_list.xyt = kgs.to_cpu(sol.xyt[solution_idx])
 
+    thetas = np.asarray(tree_list.xyt)[:, 2]
+
     # Get the trees as shapely polygons
     trees = tree_list.get_trees()
 
@@ -167,7 +194,7 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
         ax.add_patch(patch)
 
         # Plot the trees
-        _plot_polygons(trees, ax=ax, alpha=alpha)
+        _plot_polygons(trees, ax=ax, thetas=thetas, alpha=alpha)
 
         # Set plot limits based on both square AND trees to ensure all are visible
         square_bounds = square.bounds  # (minx, miny, maxx, maxy)
@@ -203,8 +230,7 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
 
         # Create 3x3 tiling (centered on origin)
         all_trees = []
-        color_indices = []  # Track which unit cell each tree belongs to
-        cell_idx = 0
+        all_thetas = []
         for i in range(-1, 2):
             for j in range(-1, 2):
                 # Translation vector for this tile
@@ -212,15 +238,15 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
                 offset_y = i * a_vec[1] + j * b_vec[1]
 
                 # Translate each tree in the base unit cell
-                for tree in trees:
+                for tree, theta in zip(trees, thetas):
                     translated_tree = affinity.translate(tree, offset_x, offset_y)
                     all_trees.append(translated_tree)
-                    color_indices.append(cell_idx)
 
-                cell_idx += 1
+                    # Keep same rotation color for all translated copies.
+                    all_thetas.append(theta)
 
-        # Plot all tiled trees with color indices for each unit cell
-        _plot_polygons(all_trees, ax=ax, color_indices=color_indices, alpha=alpha)
+        # Plot all tiled trees with rotation-based colors
+        _plot_polygons(all_trees, ax=ax, thetas=all_thetas, alpha=alpha)
 
         # Draw the unit cell outline (centered at origin)
         # Unit cell vertices: origin, a, a+b, b
@@ -254,7 +280,7 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
 
     else:
         # Generic SolutionCollection: just plot trees
-        _plot_polygons(trees, ax=ax, alpha=alpha)
+        _plot_polygons(trees, ax=ax, thetas=thetas, alpha=alpha)
 
         # Compute bounds from trees
         all_bounds = [tree.bounds for tree in trees]
