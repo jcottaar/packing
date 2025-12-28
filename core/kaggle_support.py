@@ -1068,7 +1068,7 @@ def compute_genetic_diversity_matrix_shortcut(
 
     return min_distances
 
-def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None, allow_shortcut=True) -> cp.ndarray:
+def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None, allow_shortcut=True, transform=True) -> cp.ndarray:
     """
     Compute the minimum-cost assignment distance between each pair of individuals
     from two populations, considering all 8 symmetry transformations
@@ -1106,7 +1106,8 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     """
     import lap_batch
 
-    if (lap_config is not None) and (lap_config.algorithm == 'min_cost_row' or lap_config.algorithm == 'min_cost_col') and allow_shortcut:
+    if (lap_config is not None) and (lap_config.algorithm == 'min_cost_row' or lap_config.algorithm == 'min_cost_col') and allow_shortcut \
+            and transform:
         return compute_genetic_diversity_matrix_shortcut(population_xyt, reference_xyt, lap_config)
     
     N_pop, N_trees, _ = population_xyt.shape
@@ -1120,16 +1121,21 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     # Each transformation is (rotation_angle, mirror_x)
     # rotation_angle: angle to rotate coordinates (0, pi/2, pi, 3pi/2)
     # mirror_x: whether to mirror across x-axis before rotation
-    transformations = [
-        (0.0,        False),  # Identity
-        (np.pi/2,    False),  # 90° rotation
-        (np.pi,      False),  # 180° rotation
-        (3*np.pi/2,  False),  # 270° rotation
-        (0.0,        True),   # Mirror only
-        (np.pi/2,    True),   # Mirror + 90° rotation
-        (np.pi,      True),   # Mirror + 180° rotation
-        (3*np.pi/2,  True),   # Mirror + 270° rotation
-    ]
+    if transform:
+        transformations = [
+            (0.0,        False),  # Identity
+            (np.pi/2,    False),  # 90° rotation
+            (np.pi,      False),  # 180° rotation
+            (3*np.pi/2,  False),  # 270° rotation
+            (0.0,        True),   # Mirror only
+            (np.pi/2,    True),   # Mirror + 90° rotation
+            (np.pi,      True),   # Mirror + 180° rotation
+            (3*np.pi/2,  True),   # Mirror + 270° rotation
+        ]
+    else:
+        transformations = [
+            (0.0, False),  # Identity only
+        ]
     
     # Population coordinates (fixed, not transformed)
     pop_x = population_xyt[:, :, 0]      # (N_pop, N_trees)
@@ -1200,7 +1206,7 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
         cp.cuda.Device().synchronize()
     
     # Reshape back and take minimum across transformations
-    all_costs_array = all_assignment_costs.reshape(8, N_pop, N_ref)  # (8, N_pop, N_ref)
+    all_costs_array = all_assignment_costs.reshape(8 if transform else 1, N_pop, N_ref)  # (8, N_pop, N_ref)
     min_distances = all_costs_array.min(axis=0)  # (N_pop, N_ref)
     
     if profiling:
@@ -1209,7 +1215,7 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     return min_distances
 
 
-def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None) -> cp.ndarray:
+def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None, transform=True) -> cp.ndarray:
     """
     Compute the minimum-cost assignment distance between each individual in a population
     and a single reference configuration, considering all 8 symmetry transformations
@@ -1239,7 +1245,7 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     
     # Add batch dimension to reference and call the matrix version
     reference_batch = reference_xyt[cp.newaxis, :, :]  # (1, N_trees, 3)
-    result_matrix = compute_genetic_diversity_matrix(population_xyt, reference_batch, lap_config=lap_config)  # (N_pop, 1)
+    result_matrix = compute_genetic_diversity_matrix(population_xyt, reference_batch, lap_config=lap_config, transform=transform)  # (N_pop, 1)
     
     return result_matrix[:, 0]  # (N_pop,)
 
