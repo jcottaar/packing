@@ -18,7 +18,7 @@ from typing import Literal
 
 @dataclass
 class LAPConfig:
-    algorithm: Literal['hungarian', 'auction'] = 'hungarian'
+    algorithm: Literal['hungarian', 'auction', 'min_cost_row', 'min_cost_col'] = 'hungarian'
 
     # Auction algorithm hyperparameters (Bertsekas auction w/ optional epsilon scaling)
     # Notes:
@@ -330,13 +330,24 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = No
         
         if kgs.profiling:
             cp.cuda.Device().synchronize()
+    elif config.algorithm == 'min_cost_row':
+        # For each row take min over columns, then sum rows -> total cost.
+        min_per_row = cp.amin(cost_matrices_gpu, axis=2)  # shape (batch_size, N)
+        total_costs = cp.sum(min_per_row, axis=1).astype(cp.float32)
+    elif config.algorithm == 'min_cost_col':
+        # For each column take min over rows, then sum cols -> total cost.
+        min_per_col = cp.amin(cost_matrices_gpu, axis=1)  # shape (batch_size, N)
+        total_costs = cp.sum(min_per_col, axis=1).astype(cp.float32)
     else:
         raise ValueError(f"Unknown LAPConfig.algorithm={config.algorithm!r}")
-    
-    blocks = (batch_size + 255) // 256
-    _compute_costs_kernel(
-        (blocks,), (256,),
-        (cost_matrices_gpu, row_match, total_costs, batch_size, N)
-    )
-    
+
+    # If we ran Hungarian/Auction, compute costs from assignments; otherwise
+    # `total_costs` was computed directly above.
+    if config.algorithm in ('hungarian', 'auction'):
+        blocks = (batch_size + 255) // 256
+        _compute_costs_kernel(
+            (blocks,), (256,),
+            (cost_matrices_gpu, row_match, total_costs, batch_size, N)
+        )
+
     return row_match, total_costs

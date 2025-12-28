@@ -182,6 +182,12 @@ def remove_fine_3(ga, name, value):
     if value:
         ga.fine_relaxers.pop(2)
 
+def alter_diversity(ga, name, value):
+    if value == 1:
+        ga.ga.ga_base.lap_config.algorithm = 'min_cost_row'
+    elif value == 2:
+        ga.ga.ga_base.lap_config.algorithm = 'min_cost_col'
+
 
 
 # ============================================================
@@ -195,7 +201,7 @@ def baseline_runner(fast_mode=False):
 
 
     runner = pack_ga3.baseline()
-    runner.n_generations = 600 if not fast_mode else 5
+    runner.n_generations = 600 if not fast_mode else 2
     runner.diagnostic_plot = False
     runner.ga.do_legalize = True
 
@@ -223,11 +229,8 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['search_depth'] = pm(0.5, lambda r:r.uniform(0.2,0.8), set_ga_base_ga_prop)
     #res.modifier_dict['use_auction'] = pm(False, lambda r:r.choice([False,True]), set_auction)
 
-    res.modifier_dict['alternative_selection'] = pm(True, lambda r:r.choice([False, True]), set_alternative_selection)
-    res.modifier_dict['remove_fine_3'] = pm(False, lambda r:r.choice([False,True]), remove_fine_3)
-    res.modifier_dict['remove_fine_1'] = pm(False, lambda r:r.choice([False,True]), remove_fine_1)
-    res.modifier_dict['generate_extra'] = pm(1., lambda r:r.choice([1.,0.5,0.25]).item(), generate_extra)
-    res.modifier_dict['make_single'] = pm(False, lambda r:r.choice([False]), make_single)
+    res.modifier_dict['alter_diversity'] = pm(0, lambda r:r.choice([0,1,2]), alter_diversity)
+    res.modifier_dict['make_single'] = pm(False, lambda r:r.choice([True]), make_single)
 
     #res.modifier_dict['scale_fine_iterations'] = pm(1., lambda r:r.uniform(0.7,1.), scale_fine_iterations)
     #res.modifier_dict['n_selection_size'] = pm(36, lambda r:r.integers(18,36).item(), set_n_selection_size)
