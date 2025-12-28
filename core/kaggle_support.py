@@ -955,8 +955,115 @@ def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
             return False
     return False  # Equal
 
+def compute_genetic_diversity_matrix_shortcut(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None) -> cp.ndarray:
+    import lap_batch
+    assert lap_config.algorithm == 'min_cost_row' or lap_config.algorithm == 'min_cost_col'
 
-def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None) -> cp.ndarray:
+    N_pop, N_trees, _ = population_xyt.shape
+    N_ref, N_trees_ref, _ = reference_xyt.shape
+    
+    # Validate shapes
+    assert N_trees == N_trees_ref, \
+        f"Number of trees mismatch: population has {N_trees}, reference has {N_trees_ref}"
+    
+    # Pre-compute the 8 transformation parameters
+    # Each transformation is (rotation_angle, mirror_x)
+    # rotation_angle: angle to rotate coordinates (0, pi/2, pi, 3pi/2)
+    # mirror_x: whether to mirror across x-axis before rotation
+    transformations = [
+        (0.0,        False),  # Identity
+        (np.pi/2,    False),  # 90° rotation
+        (np.pi,      False),  # 180° rotation
+        (3*np.pi/2,  False),  # 270° rotation
+        (0.0,        True),   # Mirror only
+        (np.pi/2,    True),   # Mirror + 90° rotation
+        (np.pi,      True),   # Mirror + 180° rotation
+        (3*np.pi/2,  True),   # Mirror + 270° rotation
+    ]
+    
+    # Population coordinates (fixed, not transformed)
+    pop_x = population_xyt[:, :, 0]      # (N_pop, N_trees)
+    pop_y = population_xyt[:, :, 1]      # (N_pop, N_trees)
+    pop_theta = population_xyt[:, :, 2]  # (N_pop, N_trees)
+    
+    # Compute cost matrices for all 8 transformations on GPU
+    all_cost_matrices = []
+    if profiling:
+        cp.cuda.Device().synchronize()
+    for rot_angle, do_mirror in transformations:
+        # ---------------------------------------------------------
+        # Step 1: Apply transformation to reference individuals (GPU)
+        # ---------------------------------------------------------
+        ref_x = reference_xyt[:, :, 0].copy()
+        ref_y = reference_xyt[:, :, 1].copy()
+        ref_theta = reference_xyt[:, :, 2].copy()
+        
+        if do_mirror:
+            ref_y = -ref_y
+            ref_theta = cp.pi-ref_theta
+        
+        if rot_angle != 0.0:
+            cos_a = np.cos(rot_angle)
+            sin_a = np.sin(rot_angle)
+            new_x = ref_x * cos_a - ref_y * sin_a
+            new_y = ref_x * sin_a + ref_y * cos_a
+            ref_x = new_x
+            ref_y = new_y
+            ref_theta = ref_theta + rot_angle
+        
+        ref_theta = cp.remainder(ref_theta + np.pi, 2*np.pi) - np.pi
+        
+        # ---------------------------------------------------------
+        # Step 2: Compute pairwise cost matrix (GPU)
+        # ---------------------------------------------------------
+        # Shape calculations:
+        # pop_x[:, :, None, None]: (N_pop, N_trees, 1, 1)
+        # ref_x[None, None, :, :]: (1, 1, N_ref, N_trees)
+        # Result: (N_pop, N_trees, N_ref, N_trees)
+        dx = pop_x[:, :, cp.newaxis, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :, :]
+        dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
+        dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
+        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
+        if profiling:
+            cp.cuda.Device().synchronize()
+        cost_matrices = dx**2 + dy**2 + dtheta**2  # (N_pop, N_trees, N_ref, N_trees)
+        if profiling:
+            cp.cuda.Device().synchronize()
+        
+        all_cost_matrices.append(cost_matrices)
+    
+    # ---------------------------------------------------------
+    # Step 3: Solve assignment problems on GPU using RAFT
+    # ---------------------------------------------------------
+    # Stack all cost matrices on GPU: shape (8, N_pop, N_trees, N_ref, N_trees)
+    # Then reshape to (8*N_pop*N_ref, N_trees, N_trees) for batched solving
+    stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_ref, N_trees)
+    batched = stacked.transpose(0, 1, 3, 2, 4).reshape(-1, N_trees, N_trees)  # (8*N_pop*N_ref, N_trees, N_trees)
+
+    if profiling:
+        cp.cuda.Device().synchronize()
+    
+    # Solve all LAPs on GPU
+    if lap_config.algorithm == 'min_cost_row':
+        min_per_row = cp.amin(batched, axis=2)  # shape (batch_size, N)
+        all_assignment_costs = cp.sum(cp.sqrt(min_per_row), axis=1)
+    elif lap_config.algorithm == 'min_cost_col':
+        # For each column take min over rows, then sum cols -> total cost.
+        min_per_col = cp.amin(batched, axis=1)  # shape (batch_size, N)
+        all_assignment_costs = cp.sum(cp.sqrt(min_per_col), axis=1)
+    if profiling:
+        cp.cuda.Device().synchronize()
+    
+    # Reshape back and take minimum across transformations
+    all_costs_array = all_assignment_costs.reshape(8, N_pop, N_ref)  # (8, N_pop, N_ref)
+    min_distances = all_costs_array.min(axis=0)  # (N_pop, N_ref)
+    
+    if profiling:
+        cp.cuda.Device().synchronize()
+    
+    return min_distances
+    
+def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None, allow_shortcut=True) -> cp.ndarray:
     """
     Compute the minimum-cost assignment distance between each pair of individuals
     from two populations, considering all 8 symmetry transformations
@@ -993,6 +1100,9 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     where angular_dist wraps to [-pi, pi].
     """
     import lap_batch
+
+    if (lap_config.algorithm == 'min_cost_row' or lap_config.algorithm == 'min_cost_col') and allow_shortcut:
+        return compute_genetic_diversity_matrix_shortcut(population_xyt, reference_xyt, lap_config)
     
     N_pop, N_trees, _ = population_xyt.shape
     N_ref, N_trees_ref, _ = reference_xyt.shape
@@ -1023,6 +1133,8 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     
     # Compute cost matrices for all 8 transformations on GPU
     all_cost_matrices = []
+    if profiling:
+        cp.cuda.Device().synchronize()
     for rot_angle, do_mirror in transformations:
         # ---------------------------------------------------------
         # Step 1: Apply transformation to reference individuals (GPU)
@@ -1057,7 +1169,11 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
         dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
         dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
         dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
+        if profiling:
+            cp.cuda.Device().synchronize()
         cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)
+        if profiling:
+            cp.cuda.Device().synchronize()
         
         all_cost_matrices.append(cost_matrices)
     
