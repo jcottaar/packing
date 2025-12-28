@@ -1367,7 +1367,11 @@ class Orchestrator(kgs.BaseClass):
         base_dir = os.path.dirname(save_filename)
         done_dir = os.path.join(base_dir, 'done')
         os.makedirs(done_dir, exist_ok=True)
-        done_path_done = os.path.join(done_dir, f"{self.filename}_done.pickle")
+        # If self.filename contains subdirectories (e.g. a/b/c/xxx) we want
+        # kgs.temp_dir + a/b/c/done/xxx_done.pickle — use basename for the file.
+        basename = os.path.basename(self.filename)
+        done_path_done = os.path.join(done_dir, f"{basename}_done.pickle")
+        self._save_checkpoint(done_path_done)
         self._save_checkpoint(done_path_done)
 
 def baseline():
