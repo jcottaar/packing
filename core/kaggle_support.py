@@ -1106,7 +1106,7 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     """
     import lap_batch
 
-    if (lap_config.algorithm == 'min_cost_row' or lap_config.algorithm == 'min_cost_col') and allow_shortcut:
+    if (lap_config is not None) and (lap_config.algorithm == 'min_cost_row' or lap_config.algorithm == 'min_cost_col') and allow_shortcut:
         return compute_genetic_diversity_matrix_shortcut(population_xyt, reference_xyt, lap_config)
     
     N_pop, N_trees, _ = population_xyt.shape
