@@ -1230,7 +1230,7 @@ class Orchestrator(kgs.BaseClass):
     # Diagnostics
     diagnostic_plot: bool = field(init=True, default=False)
     plot_every: int = field(init=True, default=1)
-    filename: str = field(init=True, default='default')
+    filename: str = field(init=True, default='')
     save_every: int = field(init=True, default=10)
     use_atomic_save: bool = field(init=True, default=True)
 
@@ -1309,6 +1309,8 @@ class Orchestrator(kgs.BaseClass):
     
     def _save_checkpoint(self, filename):
         """Save checkpoint with optional atomic write."""
+        if self.filename == '':
+            return
         if self.use_atomic_save:
             temp_filename = filename + '.tmp'
             kgs.dill_save(temp_filename, self)
@@ -1364,15 +1366,15 @@ class Orchestrator(kgs.BaseClass):
             self.ga.finalize()
             self._is_finalized = True
 
-        base_dir = os.path.dirname(save_filename)
-        done_dir = os.path.join(base_dir, 'done')
-        os.makedirs(done_dir, exist_ok=True)
-        # If self.filename contains subdirectories (e.g. a/b/c/xxx) we want
-        # kgs.temp_dir + a/b/c/done/xxx_done.pickle — use basename for the file.
-        basename = os.path.basename(self.filename)
-        done_path_done = os.path.join(done_dir, f"{basename}_done.pickle")
-        self._save_checkpoint(done_path_done)
-        self._save_checkpoint(done_path_done)
+        if not self.filename == '':
+            base_dir = os.path.dirname(save_filename)
+            done_dir = os.path.join(base_dir, 'done')
+            os.makedirs(done_dir, exist_ok=True)
+            # If self.filename contains subdirectories (e.g. a/b/c/xxx) we want
+            # kgs.temp_dir + a/b/c/done/xxx_done.pickle — use basename for the file.
+            basename = os.path.basename(self.filename)
+            done_path_done = os.path.join(done_dir, f"{basename}_done.pickle")
+            self._save_checkpoint(done_path_done)
 
 def baseline():
     runner = Orchestrator(n_generations=60000)
