@@ -226,7 +226,7 @@ def baseline_runner(fast_mode=False):
     res.modifier_dict['diversity_reset_threshold'] = pm(5./40, lambda r:r.uniform(3./40, 10./40), set_ga_prop)
     res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
     res.modifier_dict['generate_extra'] = pm(0.4, lambda r:r.uniform(0.2,0.6), generate_extra)
-    res.modifier_dict['genotype_at'] = pm(1, lambda r:r.choice([0,1]).item(), set_orchestrator_prop)
+    res.modifier_dict['genotype_at'] = pm(1, lambda r:(r.choice([2,1]).item()), set_orchestrator_prop)
     res.modifier_dict['remove_fine_1'] = pm(False, lambda r:r.choice([False,True]).item(), remove_fine_1)
 
     res.modifier_dict['reduce_h_threshold'] = pm(1e-5/40, lambda r:r.uniform(0.5e-5/40, 1.5e-5/40), set_ga_base_ga_prop)
