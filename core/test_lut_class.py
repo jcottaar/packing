@@ -86,9 +86,9 @@ def test_collision_cost_with_lut():
     print("\nComputing cost with LUT (50x50x50)...")
     cost_lut = pack_cost.CollisionCostOverlappingArea(
         use_lookup_table=True,
-        lut_N_x=50,
-        lut_N_y=50,
-        lut_N_theta=50
+        lut_N_x=10,
+        lut_N_y=10,
+        lut_N_theta=10
     )
 
     cost_vals_lut, grad_lut, _ = cost_lut.compute_cost_allocate(sol, evaluate_gradient=True)
@@ -110,6 +110,11 @@ def test_collision_cost_with_lut():
     print(f"  Mean absolute error: {cost_diff.mean():.6e}")
     print(f"  Max relative error: {rel_error[cost_vals_std.get() > 0.01].max():.4f}")
     print(f"  Mean relative error: {rel_error[cost_vals_std.get() > 0.01].mean():.4f}")
+
+    print(cost_vals_lut[:10].get())
+    print(grad_lut[:2,:5,:].get())
+
+    raise 'stop'
 
     print("\n✓ CollisionCost with LUT works!\n")
 

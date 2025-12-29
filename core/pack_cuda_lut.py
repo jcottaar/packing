@@ -310,7 +310,7 @@ class LookupTable:
         return X_trim, Y_trim, theta_trim, vals_trim
 
 # Module setting to switch between array and texture modes
-USE_TEXTURE: bool = True
+USE_TEXTURE: bool = False
 
 # Cache last LUT to avoid redundant constant memory updates
 _last_lut_id: int | None = None
