@@ -1007,60 +1007,67 @@ def compute_genetic_diversity_matrix_shortcut(
 
     for rot_angle, do_mirror in transformations:
         # ---------------------------------------------------------
-        # Step 1: Apply transformation to reference (no .copy())
+        # Compute transformation + pairwise cost + assignment reduction
         # ---------------------------------------------------------
-        ref_x = ref_x0
-        ref_y = ref_y0
-        ref_theta = ref_theta0
+        cos_a = np.cos(rot_angle)
+        sin_a = np.sin(rot_angle)
+        
+        if lap_config.use_diversity_kernel and lap_config.algorithm == "min_cost_row":
+            # Use fused CUDA kernel (transformation applied inside kernel)
+            # Note: kernel only supports min_cost_row; for min_cost_col, fall through to CuPy path
+            import lap_batch
+            costs_this_transform = lap_batch.compute_diversity_shortcut_kernel(
+                population_xyt, reference_xyt, cos_a, sin_a, do_mirror
+            )
+        else:
+            # Original CuPy implementation
+            # Step 1: Apply transformation to reference (no .copy())
+            ref_x = ref_x0
+            ref_y = ref_y0
+            ref_theta = ref_theta0
 
-        if do_mirror:
-            # creates new arrays; does not mutate the base views
-            ref_y = -ref_y
-            ref_theta = cp.pi - ref_theta
+            if do_mirror:
+                # creates new arrays; does not mutate the base views
+                ref_y = -ref_y
+                ref_theta = cp.pi - ref_theta
 
-        if rot_angle != 0.0:
-            # scalar trig on CPU is fine here (broadcasted over GPU arrays)
-            cos_a = np.cos(rot_angle)
-            sin_a = np.sin(rot_angle)
-            new_x = ref_x * cos_a - ref_y * sin_a
-            new_y = ref_x * sin_a + ref_y * cos_a
-            ref_x = new_x
-            ref_y = new_y
-            ref_theta = ref_theta + rot_angle
+            if rot_angle != 0.0:
+                new_x = ref_x * cos_a - ref_y * sin_a
+                new_y = ref_x * sin_a + ref_y * cos_a
+                ref_x = new_x
+                ref_y = new_y
+                ref_theta = ref_theta + rot_angle
 
-        # Wrap to [-pi, pi]
-        ref_theta = cp.remainder(ref_theta + np.pi, 2 * np.pi) - np.pi
+            # Wrap to [-pi, pi]
+            ref_theta = cp.remainder(ref_theta + np.pi, 2 * np.pi) - np.pi
 
-        # ---------------------------------------------------------
-        # Step 2: Pairwise cost (GPU)
-        # ---------------------------------------------------------
-        dx = pop_x[:, :, cp.newaxis, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :, :]
-        dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
-        dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
-        dtheta = cp.remainder(dtheta + np.pi, 2 * np.pi) - np.pi
+            # Step 2: Pairwise cost
+            dx = pop_x[:, :, cp.newaxis, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :, :]
+            dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
+            dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
+            dtheta = cp.remainder(dtheta + np.pi, 2 * np.pi) - np.pi
 
-        if profiling:
-            cp.cuda.Device().synchronize()
+            if profiling:
+                cp.cuda.Device().synchronize()
 
-        # (N_pop, N_trees, N_ref, N_trees)
-        cost_matrices = dx**2 + dy**2 + dtheta**2
+            # (N_pop, N_trees, N_ref, N_trees)
+            cost_matrices = dx**2 + dy**2 + dtheta**2
 
-        if profiling:
-            cp.cuda.Device().synchronize()
+            if profiling:
+                cp.cuda.Device().synchronize()
 
-        # ---------------------------------------------------------
-        # Step 3: Shortcut assignment reduction for this transform
-        # ---------------------------------------------------------
-        batched = cost_matrices.transpose(0, 2, 1, 3).reshape(-1, N_trees, N_trees)  # (N_pop*N_ref, N, N)
+            # Step 3: Shortcut assignment reduction for this transform
+            batched = cost_matrices.transpose(0, 2, 1, 3).reshape(-1, N_trees, N_trees)  # (N_pop*N_ref, N, N)
 
-        if lap_config.algorithm == "min_cost_row":
-            min_per_row = cp.amin(batched, axis=2)                 # (N_pop*N_ref, N)
-            assignment_costs = cp.sum(cp.sqrt(min_per_row), axis=1) # (N_pop*N_ref,)
-        else:  # "min_cost_col"
-            min_per_col = cp.amin(batched, axis=1)                 # (N_pop*N_ref, N)
-            assignment_costs = cp.sum(cp.sqrt(min_per_col), axis=1) # (N_pop*N_ref,)
+            if lap_config.algorithm == "min_cost_row":
+                min_per_row = cp.amin(batched, axis=2)                 # (N_pop*N_ref, N)
+                assignment_costs = cp.sum(cp.sqrt(min_per_row), axis=1) # (N_pop*N_ref,)
+            else:  # "min_cost_col"
+                min_per_col = cp.amin(batched, axis=1)                 # (N_pop*N_ref, N)
+                assignment_costs = cp.sum(cp.sqrt(min_per_col), axis=1) # (N_pop*N_ref,)
 
-        costs_this_transform = assignment_costs.reshape(N_pop, N_ref)  # (N_pop, N_ref)
+            costs_this_transform = assignment_costs.reshape(N_pop, N_ref)  # (N_pop, N_ref)
+
         min_distances = cp.minimum(min_distances, costs_this_transform)
 
         if profiling:

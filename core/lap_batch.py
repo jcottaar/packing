@@ -14,6 +14,9 @@ Usage:
 import cupy as cp
 from dataclasses import dataclass
 from typing import Literal
+import os
+import subprocess
+import shutil
 
 
 @dataclass
@@ -30,10 +33,20 @@ class LAPConfig:
     auction_max_rounds: int = 1
     auction_max_iters: int = 0  # 0 => choose based on N on the host
 
-# Hungarian algorithm kernel - one block per problem, one thread per block
-# (Hungarian is sequential; parallelism comes from solving all 800 problems simultaneously)
-_hungarian_kernel = cp.RawKernel(r'''
-extern "C" __global__ void hungarian_kernel(
+    # Diversity shortcut kernel option (for min_cost_row/min_cost_col)
+    use_diversity_kernel: bool = True
+
+
+# ---------------------------------------------------------------------------
+# CUDA source code - all kernels in one compilation unit
+# ---------------------------------------------------------------------------
+
+_CUDA_SRC = r'''
+extern "C" {
+
+// Hungarian algorithm kernel - one block per problem, one thread per block
+// (Hungarian is sequential; parallelism comes from solving all problems simultaneously)
+__global__ void hungarian_kernel(
     const float* __restrict__ costs_in,  // (batch_size, N, N)
     float* __restrict__ costs,            // (batch_size, N, N) working copy
     int* __restrict__ row_match,          // (batch_size, N) row->col matching
@@ -130,13 +143,11 @@ extern "C" __global__ void hungarian_kernel(
         }
     }
 }
-''', 'hungarian_kernel')
 
 
-# Auction algorithm kernel - one block per problem, one thread per block
-# Parallelism comes from solving many independent problems in the batch.
-_auction_kernel = cp.RawKernel(r'''
-extern "C" __global__ void auction_kernel(
+// Auction algorithm kernel - one block per problem, one thread per block
+// Parallelism comes from solving many independent problems in the batch.
+__global__ void auction_kernel(
     const float* __restrict__ costs_in,  // (batch_size, N, N)
     int* __restrict__ row_match,         // (batch_size, N) row->col
     int* __restrict__ col_match,         // (batch_size, N) col->row
@@ -227,11 +238,9 @@ extern "C" __global__ void auction_kernel(
         if (eps < epsilon_final) eps = epsilon_final;
     }
 }
-''', 'auction_kernel')
 
 
-_compute_costs_kernel = cp.RawKernel(r'''
-extern "C" __global__ void compute_costs(
+__global__ void compute_costs(
     const float* __restrict__ costs,
     const int* __restrict__ assignments,
     float* __restrict__ total_costs,
@@ -253,7 +262,249 @@ extern "C" __global__ void compute_costs(
     }
     total_costs[bid] = total;
 }
-''', 'compute_costs')
+
+
+// Diversity shortcut kernel - fuses pairwise distance computation with min-cost-row reduction
+// One block per (pop_idx, ref_idx) pair, N_trees threads per block
+// Applies transformation (rotation + mirror) to reference coordinates inside the kernel
+// Only supports min_cost_row (for each pop tree, find min dist to any ref tree)
+//
+// Multithreaded design:
+// Phase 1: Each thread cooperatively transforms one ref tree -> shared memory
+// Phase 2: Each thread handles one pop tree, finds min over all refs
+// Phase 3: Tree reduction to sum partial results
+__global__ void diversity_shortcut_kernel(
+    const float* __restrict__ pop_xyt,    // (N_pop, N_trees, 3) - contiguous
+    const float* __restrict__ ref_xyt,    // (N_ref, N_trees, 3) - contiguous, untransformed
+    float* __restrict__ costs_out,        // (N_pop * N_ref,)
+    const int N_pop,
+    const int N_ref,
+    const int N_trees,
+    const float cos_a,                    // cos(rotation_angle)
+    const float sin_a,                    // sin(rotation_angle)
+    const int do_mirror                   // 1 to mirror across x-axis, 0 otherwise
+) {
+    const int bid = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int total_pairs = N_pop * N_ref;
+    if (bid >= total_pairs) return;
+    
+    const int pop_idx = bid / N_ref;
+    const int ref_idx = bid % N_ref;
+    
+    // Stride is 3 for xyt layout
+    const float* my_pop = pop_xyt + pop_idx * N_trees * 3;
+    const float* my_ref = ref_xyt + ref_idx * N_trees * 3;
+    
+    const float PI = 3.14159265358979323846f;
+    const float TWO_PI = 2.0f * PI;
+    
+    // Compute rotation angle from sin/cos for theta offset
+    float rot_angle = atan2f(sin_a, cos_a);
+    
+    // Shared memory for transformed ref coordinates and partial sums
+    // Layout: ref_x[N_trees], ref_y[N_trees], ref_t[N_trees], partial_sums[N_trees]
+    extern __shared__ float shared_mem[];
+    float* ref_x = shared_mem;
+    float* ref_y = shared_mem + N_trees;
+    float* ref_t = shared_mem + 2 * N_trees;
+    float* partial_sums = shared_mem + 3 * N_trees;
+    
+    // Phase 1: Cooperative transform - each thread transforms one ref tree
+    if (tid < N_trees) {
+        float rx = my_ref[tid * 3 + 0];
+        float ry = my_ref[tid * 3 + 1];
+        float rt = my_ref[tid * 3 + 2];
+        
+        // Mirror if needed
+        if (do_mirror) {
+            ry = -ry;
+            rt = PI - rt;
+        }
+        
+        // Rotate
+        float rx_rot = rx * cos_a - ry * sin_a;
+        float ry_rot = rx * sin_a + ry * cos_a;
+        float rt_rot = rt + rot_angle;
+        
+        // Wrap rt_rot to [-pi, pi]
+        rt_rot = fmodf(rt_rot + PI, TWO_PI);
+        if (rt_rot < 0) rt_rot += TWO_PI;
+        rt_rot -= PI;
+        
+        ref_x[tid] = rx_rot;
+        ref_y[tid] = ry_rot;
+        ref_t[tid] = rt_rot;
+    }
+    
+    __syncthreads();
+    
+    // Phase 2: Each thread handles one pop tree, finds min distance to any ref tree
+    float my_min_dist = 0.0f;
+    if (tid < N_trees) {
+        float px = my_pop[tid * 3 + 0];
+        float py = my_pop[tid * 3 + 1];
+        float pt = my_pop[tid * 3 + 2];
+        
+        float min_sq = 1e30f;
+        
+        for (int j = 0; j < N_trees; j++) {
+            float dx = px - ref_x[j];
+            float dy = py - ref_y[j];
+            float dt = pt - ref_t[j];
+            
+            // Wrap dt to [-pi, pi]
+            dt = fmodf(dt + PI, TWO_PI);
+            if (dt < 0) dt += TWO_PI;
+            dt -= PI;
+            
+            float sq = dx*dx + dy*dy + dt*dt;
+            if (sq < min_sq) min_sq = sq;
+        }
+        
+        my_min_dist = sqrtf(min_sq);
+    }
+    
+    // Store in shared memory for reduction
+    partial_sums[tid] = my_min_dist;
+    
+    __syncthreads();
+    
+    // Phase 3: Sequential sum by thread 0 (simpler and correct for any N_trees)
+    if (tid == 0) {
+        float total = 0.0f;
+        for (int i = 0; i < N_trees; i++) {
+            total += partial_sums[i];
+        }
+        costs_out[bid] = total;
+    }
+}
+
+}  // extern "C"
+'''
+
+# ---------------------------------------------------------------------------
+# Compiled CUDA module and kernels (lazy initialization)
+# ---------------------------------------------------------------------------
+
+_module: cp.RawModule | None = None
+_hungarian_kernel: cp.RawKernel | None = None
+_auction_kernel: cp.RawKernel | None = None
+_compute_costs_kernel: cp.RawKernel | None = None
+_diversity_shortcut_kernel: cp.RawKernel | None = None
+_initialized: bool = False
+
+
+def _ensure_initialized() -> None:
+    """Lazy initialization hook.
+    
+    On first call, this:
+    - Persists the CUDA source to a .cu file for profiler correlation.
+    - Compiles the CUDA source with nvcc using optimized flags.
+    - Loads the compiled CUBIN and extracts kernel functions.
+    
+    Subsequent calls are no-ops, so you can safely call this at the start
+    of public API functions.
+    """
+    global _initialized, _module
+    global _hungarian_kernel, _auction_kernel, _compute_costs_kernel, _diversity_shortcut_kernel
+    
+    if _initialized:
+        return
+    
+    import kaggle_support as kgs
+    
+    print('init LAP CUDA')
+    
+    # Persist the CUDA source to a stable .cu file inside kgs.temp_dir
+    # and compile from that file so profilers can correlate source lines.
+    persist_dir = os.fspath(kgs.temp_dir)
+    persist_path = os.path.join(persist_dir, 'lap_batch_saved.cu')
+    cubin_path = os.path.join(persist_dir, 'lap_batch.cubin')
+    
+    # Overwrite the file each time to ensure it matches the compiled source.
+    with open(persist_path, 'w', encoding='utf-8') as f:
+        f.write(_CUDA_SRC)
+    
+    # Find nvcc
+    os.environ['PATH'] = '/usr/local/cuda/bin:' + os.environ.get('PATH', '')
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path is None:
+        raise RuntimeError("nvcc not found in PATH; please install the CUDA toolkit or add nvcc to PATH")
+    
+    # Detect GPU compute capability
+    device = cp.cuda.Device()
+    compute_capability_str = device.compute_capability  # e.g., "89" or "120"
+    
+    # Parse compute capability string into major.minor
+    if len(compute_capability_str) == 2:
+        major = int(compute_capability_str[0])
+        minor = int(compute_capability_str[1])
+    else:
+        major = int(compute_capability_str[:-1])
+        minor = int(compute_capability_str[-1])
+    
+    sm_arch = f"sm_{compute_capability_str}"
+    max_threads_per_block = device.attributes['MaxThreadsPerBlock']
+    print(f"Detected GPU compute capability: {major}.{minor} (arch={sm_arch})")
+    print(f"GPU max threads per block: {max_threads_per_block}")
+    
+    # Compile with nvcc
+    # Performance flags:
+    # -O3: Maximum optimization
+    # -use_fast_math: Aggressive math optimizations
+    # --extra-device-vectorization: Enable additional vectorization passes
+    # --ptxas-options=-v: Verbose register/memory usage output
+    # --ptxas-options=--warn-on-spills: Warn if registers spill to local memory
+    cmd_cubin = [
+        nvcc_path,
+        "-O3",
+        "-use_fast_math",
+        "--extra-device-vectorization",
+        "--ptxas-options=-v,--warn-on-spills",
+        f"-arch={sm_arch}",
+        "-cubin", persist_path,
+        "-o", cubin_path
+    ]
+    
+    print(f"=== Compiling LAP kernels ===")
+    print(f"Command: {' '.join(cmd_cubin)}")
+    proc = subprocess.run(cmd_cubin, text=True, capture_output=True)
+    
+    if proc.returncode != 0:
+        raise RuntimeError(f"nvcc cubin compilation failed (exit {proc.returncode})\n{proc.stderr}")
+    
+    # Print ptxas register usage info (goes to stderr with --ptxas-options=-v)
+    if proc.stderr:
+        print(proc.stderr)
+    if proc.stdout:
+        print(proc.stdout)
+    
+    # Load compiled CUBIN into a CuPy RawModule
+    _module = cp.RawModule(path=cubin_path)
+    
+    # Extract kernel functions
+    _hungarian_kernel = _module.get_function("hungarian_kernel")
+    _auction_kernel = _module.get_function("auction_kernel")
+    _compute_costs_kernel = _module.get_function("compute_costs")
+    _diversity_shortcut_kernel = _module.get_function("diversity_shortcut_kernel")
+    
+    # Print kernel attributes
+    def print_kernel_attributes(kernel: cp.RawKernel, name: str):
+        """Print diagnostic information about a compiled kernel."""
+        print(f"\n--- Kernel: {name} ---")
+        print(f"  Max threads per block (kernel): {kernel.max_threads_per_block}")
+        print(f"  Num registers: {kernel.num_regs}")
+        print(f"  Shared memory (bytes): {kernel.shared_size_bytes}")
+        print(f"  Const memory (bytes): {kernel.const_size_bytes}")
+        print(f"  Local memory (bytes): {kernel.local_size_bytes}")
+    
+    print_kernel_attributes(_hungarian_kernel, "hungarian_kernel")
+    print_kernel_attributes(_auction_kernel, "auction_kernel")
+    print_kernel_attributes(_compute_costs_kernel, "compute_costs")
+    print_kernel_attributes(_diversity_shortcut_kernel, "diversity_shortcut_kernel")
+    
+    _initialized = True
 
 
 def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = None) -> tuple[cp.ndarray, cp.ndarray]:
@@ -276,6 +527,7 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = No
     costs : cp.ndarray
         Shape (batch_size,). Total assignment cost for each problem.
     """
+    _ensure_initialized()
     import kaggle_support as kgs
     if config is None:
         config = LAPConfig()
@@ -351,3 +603,85 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = No
         )
 
     return row_match, total_costs
+
+
+def compute_diversity_shortcut_kernel(
+    pop_xyt: cp.ndarray,
+    ref_xyt: cp.ndarray,
+    cos_a: float,
+    sin_a: float,
+    do_mirror: bool
+) -> cp.ndarray:
+    """
+    Compute pairwise diversity costs using fused CUDA kernel (min_cost_row only).
+    
+    Applies transformation (rotation + mirror) to reference coordinates
+    inside the kernel. Uses min_cost_row algorithm: for each pop tree,
+    finds minimum distance to any ref tree, then sums.
+    
+    For min_cost_col, use a different approach (this kernel does not support it).
+    
+    Parameters
+    ----------
+    pop_xyt : cp.ndarray
+        Shape (N_pop, N_trees, 3) - population coordinates (x, y, theta), must be contiguous
+    ref_xyt : cp.ndarray
+        Shape (N_ref, N_trees, 3) - reference coordinates (untransformed), must be contiguous
+    cos_a : float
+        Cosine of the rotation angle
+    sin_a : float
+        Sine of the rotation angle
+    do_mirror : bool
+        If True, mirror reference across x-axis before rotation
+        
+    Returns
+    -------
+    cp.ndarray
+        Shape (N_pop, N_ref) - assignment costs (min_cost_row metric)
+    """
+    _ensure_initialized()
+    N_pop, N_trees, _ = pop_xyt.shape
+    N_ref = ref_xyt.shape[0]
+    
+    # Store original dtype for output
+    orig_dtype = pop_xyt.dtype
+    
+    # Only convert if float64, otherwise assume float32 and contiguous
+    if orig_dtype == cp.float64:
+        pop_xyt_f32 = cp.ascontiguousarray(pop_xyt.astype(cp.float32))
+        ref_xyt_f32 = cp.ascontiguousarray(ref_xyt.astype(cp.float32))
+    else:
+        # Assume already float32 and contiguous
+        pop_xyt_f32 = pop_xyt
+        ref_xyt_f32 = ref_xyt
+    
+    # Output array
+    total_pairs = N_pop * N_ref
+    costs_out = cp.empty(total_pairs, dtype=cp.float32)
+
+    import kaggle_support as kgs
+    if kgs.profiling:
+        cp.cuda.Device().synchronize()
+    
+    # Launch kernel: 1 block per pair, N_trees threads per block
+    # Shared memory: 4 * N_trees floats (ref_x, ref_y, ref_t, partial_sums)
+    shared_mem_bytes = 4 * N_trees * 4  # 4 arrays * N_trees * sizeof(float)
+    
+    _diversity_shortcut_kernel(
+        (total_pairs,), (N_trees,),
+        (pop_xyt_f32, ref_xyt_f32, costs_out,
+         N_pop, N_ref, N_trees, 
+         cp.float32(cos_a), cp.float32(sin_a),
+         1 if do_mirror else 0),
+        shared_mem=shared_mem_bytes
+    )
+
+    if kgs.profiling:
+        cp.cuda.Device().synchronize()
+    
+    # Reshape and cast back to original dtype
+    result = costs_out.reshape(N_pop, N_ref)
+    if orig_dtype == cp.float64:
+        result = result.astype(orig_dtype)
+    
+    return result
