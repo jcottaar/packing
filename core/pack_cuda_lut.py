@@ -7,8 +7,10 @@ to compute overlap between tree pairs, replacing expensive polygon intersection.
 Two modes are available:
 - Array mode (USE_TEXTURE=False): Manual trilinear interpolation from global memory.
   Uses full float32/float64 precision for interpolation weights.
+  Gradients computed analytically from trilinear interpolation formula.
 - Texture mode (USE_TEXTURE=True): Hardware trilinear interpolation via 3D texture.
   Faster but uses 9-bit fixed-point for interpolation weights (~0.2% precision).
+  Gradients computed via 1-sided finite differences (step = grid_size/4).
   Results will differ slightly from array mode due to hardware precision limits.
 """
 from __future__ import annotations
@@ -59,6 +61,11 @@ extern "C" {
 #define LUT_THETA_MIN $LUT_THETA_MIN$
 #define LUT_THETA_MAX $LUT_THETA_MAX$
 
+// Grid spacing (world coordinates)
+#define GRID_DX ((LUT_X_MAX - LUT_X_MIN) / (LUT_N_X - 1))
+#define GRID_DY ((LUT_Y_MAX - LUT_Y_MIN) / (LUT_N_Y - 1))
+#define GRID_DT ((LUT_THETA_MAX - LUT_THETA_MIN) / (LUT_N_THETA - 1))
+
 // Texture mode switch (0 = array, 1 = texture)
 #define USE_TEXTURE $USE_TEXTURE$
 
@@ -74,6 +81,7 @@ __device__ __forceinline__ double wrap_angle(double theta) {
 }
 
 // LUT lookup - uses global g_tex or g_lut depending on mode
+// Returns value only (for texture path or when gradients not needed)
 __device__ double lut_lookup(double x, double y, double theta)
 {
 #if USE_TEXTURE
@@ -89,7 +97,8 @@ __device__ double lut_lookup(double x, double y, double theta)
     //   width = N_x -> x = gx
     //   height = N_y -> y = gy
     //   depth = N_theta -> z = gt
-    return (double)tex3D<float>(g_tex, (float)gx, (float)gy, (float)gt);
+    double result = tex3D<float>(g_tex, (float)gx, (float)gy, (float)gt);
+    return result;
 #else
     // Array-based trilinear interpolation with 8-point manual fetch
     // Normalize to grid coordinates [0, N-1]
@@ -147,15 +156,179 @@ __device__ double lut_lookup(double x, double y, double theta)
 #endif
 }
 
+#if USE_TEXTURE
+// LUT lookup with finite-difference gradient (texture mode)
+// Uses 1-sided finite difference with step = GRID_SIZE/4
+// Direction chosen to stay within current cell (toward cell center)
+// Returns value, and if d_out != NULL, also computes gradient w.r.t. (x, y, theta)
+__device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out)
+{
+    // Early exit if outside LUT range - return 0 cost and gradient
+    if (x < LUT_X_MIN || x > LUT_X_MAX ||
+        y < LUT_Y_MIN || y > LUT_Y_MAX ||
+        theta < LUT_THETA_MIN || theta > LUT_THETA_MAX) {
+        if (d_out != NULL) {
+            d_out->x = 0.0;
+            d_out->y = 0.0;
+            d_out->z = 0.0;
+        }
+        return 0.0;
+    }
+    
+    // Finite difference step sizes (1/4 of grid cell)
+    const double h_x = GRID_DX * 0.25;
+    const double h_y = GRID_DY * 0.25;
+    const double h_t = GRID_DT * 0.25;
+    
+    // Get base value
+    double v0 = lut_lookup(x, y, theta);
+    
+    // Compute gradients if requested
+    if (d_out != NULL) {
+        // Compute fractional positions within cell to determine FD direction
+        // We want to step toward cell center to stay within the cell
+        double gx = (x - LUT_X_MIN) / (LUT_X_MAX - LUT_X_MIN) * (LUT_N_X - 1);
+        double gy = (y - LUT_Y_MIN) / (LUT_Y_MAX - LUT_Y_MIN) * (LUT_N_Y - 1);
+        double gt = (theta - LUT_THETA_MIN) / (LUT_THETA_MAX - LUT_THETA_MIN) * (LUT_N_THETA - 1);
+        
+        // Fractional parts (0 to 1 within cell)
+        double fx = gx - floor(gx);
+        double fy = gy - floor(gy);
+        double ft = gt - floor(gt);
+        
+        // Choose step direction: if f >= 0.5, step backward; else step forward
+        // This keeps us within the current cell
+        double sign_x = (fx >= 0.5) ? -1.0 : 1.0;
+        double sign_y = (fy >= 0.5) ? -1.0 : 1.0;
+        double sign_t = (ft >= 0.5) ? -1.0 : 1.0;
+        
+        // One-sided finite difference: df/dx ≈ (f(x+h) - f(x)) / h  or  (f(x) - f(x-h)) / h
+        double vx = lut_lookup(x + sign_x * h_x, y, theta);
+        double vy = lut_lookup(x, y + sign_y * h_y, theta);
+        double vt = lut_lookup(x, y, theta + sign_t * h_t);
+        
+        d_out->x = (vx - v0) / (sign_x * h_x);
+        d_out->y = (vy - v0) / (sign_y * h_y);
+        d_out->z = (vt - v0) / (sign_t * h_t);
+    }
+    
+    return v0;
+}
+#endif
+
+#if !USE_TEXTURE
+// LUT lookup with analytical gradient (array mode only)
+// Returns value, and if d_out != NULL, also computes gradient w.r.t. (x, y, theta)
+__device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out)
+{
+    // Early exit if outside LUT range - return 0 cost and gradient
+    if (x < LUT_X_MIN || x > LUT_X_MAX ||
+        y < LUT_Y_MIN || y > LUT_Y_MAX ||
+        theta < LUT_THETA_MIN || theta > LUT_THETA_MAX) {
+        if (d_out != NULL) {
+            d_out->x = 0.0;
+            d_out->y = 0.0;
+            d_out->z = 0.0;
+        }
+        return 0.0;
+    }
+    
+    // Normalize to grid coordinates [0, N-1]
+    double gx = (x - LUT_X_MIN) / (LUT_X_MAX - LUT_X_MIN) * (LUT_N_X - 1);
+    double gy = (y - LUT_Y_MIN) / (LUT_Y_MAX - LUT_Y_MIN) * (LUT_N_Y - 1);
+    double gt = (theta - LUT_THETA_MIN) / (LUT_THETA_MAX - LUT_THETA_MIN) * (LUT_N_THETA - 1);
+    
+    // Integer indices
+    int ix0 = (int)floor(gx);
+    int iy0 = (int)floor(gy);
+    int it0 = (int)floor(gt);
+    
+    int ix1 = min(ix0 + 1, LUT_N_X - 1);
+    int iy1 = min(iy0 + 1, LUT_N_Y - 1);
+    int it1 = min(it0 + 1, LUT_N_THETA - 1);
+    
+    // Fractional parts
+    double fx = gx - ix0;
+    double fy = gy - iy0;
+    double ft = gt - it0;
+    
+    // Fetch 8 corner values
+    #define LUT_IDX(ix, iy, it) ((ix) * (LUT_N_Y * LUT_N_THETA) + (iy) * LUT_N_THETA + (it))
+    
+    double v000 = g_lut[LUT_IDX(ix0, iy0, it0)];
+    double v001 = g_lut[LUT_IDX(ix0, iy0, it1)];
+    double v010 = g_lut[LUT_IDX(ix0, iy1, it0)];
+    double v011 = g_lut[LUT_IDX(ix0, iy1, it1)];
+    double v100 = g_lut[LUT_IDX(ix1, iy0, it0)];
+    double v101 = g_lut[LUT_IDX(ix1, iy0, it1)];
+    double v110 = g_lut[LUT_IDX(ix1, iy1, it0)];
+    double v111 = g_lut[LUT_IDX(ix1, iy1, it1)];
+    
+    #undef LUT_IDX
+    
+    // Trilinear interpolation for value
+    double v00 = v000 * (1.0 - ft) + v001 * ft;
+    double v01 = v010 * (1.0 - ft) + v011 * ft;
+    double v10 = v100 * (1.0 - ft) + v101 * ft;
+    double v11 = v110 * (1.0 - ft) + v111 * ft;
+    
+    double v0 = v00 * (1.0 - fy) + v01 * fy;
+    double v1 = v10 * (1.0 - fy) + v11 * fy;
+    
+    double value = v0 * (1.0 - fx) + v1 * fx;
+    
+    // Compute gradients if requested
+    if (d_out != NULL) {
+        // Gradient w.r.t. fractional coordinates (fx, fy, ft)
+        // df/dfx = v1 - v0 = bilinear(v1**) - bilinear(v0**)
+        double df_dfx = v1 - v0;
+        
+        // df/dfy at current fx:
+        // = (1-fx) * (v01 - v00) + fx * (v11 - v10)
+        double df_dfy = (1.0 - fx) * (v01 - v00) + fx * (v11 - v10);
+        
+        // df/dft at current fx, fy:
+        // Need to compute partial w.r.t. ft through the trilinear formula
+        // v00 = v000*(1-ft) + v001*ft  => dv00/dft = v001 - v000
+        double dv00_dft = v001 - v000;
+        double dv01_dft = v011 - v010;
+        double dv10_dft = v101 - v100;
+        double dv11_dft = v111 - v110;
+        
+        double dv0_dft = dv00_dft * (1.0 - fy) + dv01_dft * fy;
+        double dv1_dft = dv10_dft * (1.0 - fy) + dv11_dft * fy;
+        double df_dft = dv0_dft * (1.0 - fx) + dv1_dft * fx;
+        
+        // Convert to world coordinates
+        // gx = (x - X_MIN) / (X_MAX - X_MIN) * (N_X - 1)
+        // dgx/dx = (N_X - 1) / (X_MAX - X_MIN)
+        // df/dx = df/dfx * dfx/dgx * dgx/dx = df/dfx * 1 * dgx/dx
+        double scale_x = (double)(LUT_N_X - 1) / (LUT_X_MAX - LUT_X_MIN);
+        double scale_y = (double)(LUT_N_Y - 1) / (LUT_Y_MAX - LUT_Y_MIN);
+        double scale_t = (double)(LUT_N_THETA - 1) / (LUT_THETA_MAX - LUT_THETA_MIN);
+        
+        d_out->x = df_dfx * scale_x;
+        d_out->y = df_dfy * scale_y;
+        d_out->z = df_dft * scale_t;
+    }
+    
+    return value;
+}
+#endif
+
 // Compute total overlap of ref tree with all trees in xyt list using LUT
-// Returns sum of overlaps; gradients not implemented yet
+// Returns sum of overlaps
+// If compute_grads is non-zero, accumulates gradients:
+//   - d_ref: gradient w.r.t. ref pose (accumulated directly)
+//   - out_grads: gradient w.r.t. all other poses (accumulated via atomicAdd)
 __device__ double overlap_ref_with_list(
     const double3 ref,
-    const double* __restrict__ xyt_Nx3,  // [n, 3] C-contiguous
+    const double3* __restrict__ s_trees,  // shared memory: [n] tree poses
     const int n,
     const int skip_index,                 // index to skip (self), use -1 to skip none
     double3* d_ref,                        // output: gradient w.r.t. ref (accumulated), can be NULL
-    const int compute_grads)               // if non-zero, compute gradients (NOT IMPLEMENTED)
+    double* __restrict__ out_grads,        // output: gradients for all trees [n*3], can be NULL
+    const int compute_grads)               // if non-zero, compute gradients
 {
     double sum = 0.0;
     
@@ -170,10 +343,11 @@ __device__ double overlap_ref_with_list(
         // Skip self
         if (i == skip_index) continue;
         
-        // Read other tree pose
-        double other_x = xyt_Nx3[i * 3 + 0];
-        double other_y = xyt_Nx3[i * 3 + 1];
-        double other_theta = xyt_Nx3[i * 3 + 2];
+        // Read other tree pose from shared memory
+        double3 other = s_trees[i];
+        double other_x = other.x;
+        double other_y = other.y;
+        double other_theta = other.z;
         
         // World-space displacement
         double dx_world = other_x - ref.x;
@@ -190,41 +364,89 @@ __device__ double overlap_ref_with_list(
         // Relative angle
         double dtheta = wrap_angle(other_theta - ref.z);
         
-        // LUT lookup (uses global g_lut or g_tex)
-        double overlap = lut_lookup(dx_local, dy_local, dtheta);
-        sum += overlap;
-        
-        // Gradients not implemented yet
-        // TODO: compute gradients via trilinear derivative
+        // Compute value and optionally gradients (both texture and array paths use lut_lookup_with_grad)
+        if (compute_grads && d_ref != NULL && out_grads != NULL) {
+            // Get value and gradient w.r.t. local coords
+            double3 d_local;  // gradient w.r.t. (dx_local, dy_local, dtheta)
+            double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, &d_local);
+            sum += overlap;
+            
+            // ===== Gradient w.r.t. ref =====
+            // dx_world = other_x - ref.x => d(dx_world)/d(ref.x) = -1
+            // dy_world = other_y - ref.y => d(dy_world)/d(ref.y) = -1
+            // dx_local = c_ref * dx_world + s_ref * dy_world
+            // dy_local = -s_ref * dx_world + c_ref * dy_world
+            //
+            // d(overlap)/d(ref.x) = d_local.x * c_ref * (-1) + d_local.y * (-s_ref) * (-1)
+            //                     = -d_local.x * c_ref + d_local.y * s_ref
+            // d(overlap)/d(ref.y) = d_local.x * s_ref * (-1) + d_local.y * c_ref * (-1)
+            //                     = -d_local.x * s_ref - d_local.y * c_ref
+            // d(overlap)/d(ref.theta):
+            //   d(dx_local)/d(ref.theta) = -s_ref * dx_world + c_ref * dy_world = dy_local
+            //   d(dy_local)/d(ref.theta) = -c_ref * dx_world - s_ref * dy_world = -dx_local
+            //   d(dtheta)/d(ref.theta) = -1
+            //   => d_local.x * dy_local - d_local.y * dx_local - d_local.z
+            
+            d_ref->x += -d_local.x * c_ref + d_local.y * s_ref;
+            d_ref->y += -d_local.x * s_ref - d_local.y * c_ref;
+            d_ref->z += d_local.x * dy_local - d_local.y * dx_local - d_local.z;
+            
+            // ===== Gradient w.r.t. other =====
+            // dx_world = other_x - ref.x => d(dx_world)/d(other.x) = +1
+            // dy_world = other_y - ref.y => d(dy_world)/d(other.y) = +1
+            // dtheta = other_theta - ref.z => d(dtheta)/d(other.theta) = +1
+            //
+            // d(overlap)/d(other.x) = d_local.x * c_ref * (+1) + d_local.y * (-s_ref) * (+1)
+            //                       = d_local.x * c_ref - d_local.y * s_ref
+            // d(overlap)/d(other.y) = d_local.x * s_ref * (+1) + d_local.y * c_ref * (+1)
+            //                       = d_local.x * s_ref + d_local.y * c_ref
+            // d(overlap)/d(other.theta) = d_local.z
+            
+            double d_other_x = d_local.x * c_ref - d_local.y * s_ref;
+            double d_other_y = d_local.x * s_ref + d_local.y * c_ref;
+            double d_other_theta = d_local.z;
+            
+            // Accumulate to other's gradient using atomicAdd
+            atomicAdd(&out_grads[i * 3 + 0], d_other_x/2.0);
+            atomicAdd(&out_grads[i * 3 + 1], d_other_y/2.0);
+            atomicAdd(&out_grads[i * 3 + 2], d_other_theta/2.0);
+        } else {
+            double overlap = lut_lookup(dx_local, dy_local, dtheta);
+            sum += overlap;
+        }
     }
     
     return sum;
 }
 
-// Sum overlaps between trees in xyt1 and trees in xyt2.
-// Each tree in xyt1 is compared against all trees in xyt2.
-// Identical poses are automatically skipped (when xyt1 == xyt2).
-// Result is divided by 2 since each pair is counted twice.
+// Sum overlaps between all tree pairs in xyt.
+// Each tree is compared against all other trees.
+// Self-overlap is skipped. Result is divided by 2 since each pair is counted twice.
 //
 // Thread organization: 1 thread per tree
+// s_trees: shared memory array of size n (passed from kernel)
 __device__ void overlap_list_total(
-    const double* __restrict__ xyt1_Nx3,
-    const int n1,
-    const double* __restrict__ xyt2_Nx3,
-    const int n2,
+    const double* __restrict__ xyt_Nx3,
+    double3* __restrict__ s_trees,  // shared memory for tree poses
+    const int n,
     double* __restrict__ out_total,
-    double* __restrict__ out_grads)  // if non-NULL, write gradients [n1*3]
+    double* __restrict__ out_grads)  // if non-NULL, write gradients [n*3]
 {
     int tid = threadIdx.x;
+    
+    // Cooperatively load all trees into shared memory (coalesced reads)
+    for (int i = tid; i < n; i += blockDim.x) {
+        s_trees[i].x = xyt_Nx3[i * 3 + 0];
+        s_trees[i].y = xyt_Nx3[i * 3 + 1];
+        s_trees[i].z = xyt_Nx3[i * 3 + 2];
+    }
+    __syncthreads();
+    
     int tree_idx = tid;
+    if (tree_idx >= n) return;
     
-    if (tree_idx >= n1) return;
-    
-    // Read ref pose
-    double3 ref;
-    ref.x = xyt1_Nx3[tree_idx * 3 + 0];
-    ref.y = xyt1_Nx3[tree_idx * 3 + 1];
-    ref.z = xyt1_Nx3[tree_idx * 3 + 2];
+    // Read ref pose from shared memory
+    double3 ref = s_trees[tree_idx];
     
     // Determine if we need gradients
     int compute_grads = (out_grads != NULL) ? 1 : 0;
@@ -233,27 +455,31 @@ __device__ void overlap_list_total(
     double3 d_ref_local = {0.0, 0.0, 0.0};
     
     // Compute overlap sum for this ref tree against all others
-    // Skip self (tree_idx) when xyt1 == xyt2 (assumed same pointer)
+    // Skip self (tree_idx)
+    // This also accumulates gradients to both ref (via d_ref_local) and
+    // to other trees (via atomicAdd to out_grads)
     double local_sum = overlap_ref_with_list(
-        ref, xyt2_Nx3, n2, tree_idx,
-        compute_grads ? &d_ref_local : NULL, compute_grads);
+        ref, s_trees, n, tree_idx,
+        compute_grads ? &d_ref_local : NULL,
+        out_grads,
+        compute_grads);
     
     // Divide by 2 since each pair counted twice
     atomicAdd(out_total, local_sum / 2.0);
     
-    // Accumulate gradients
-    if (compute_grads) {
-        atomicAdd(&out_grads[tree_idx * 3 + 0], d_ref_local.x);
-        atomicAdd(&out_grads[tree_idx * 3 + 1], d_ref_local.y);
-        atomicAdd(&out_grads[tree_idx * 3 + 2], d_ref_local.z);
+    // Write ref's gradient using atomicAdd (other threads may also contribute)
+    if (compute_grads && out_grads != NULL) {
+        atomicAdd(&out_grads[tree_idx * 3 + 0], d_ref_local.x/2.0);
+        atomicAdd(&out_grads[tree_idx * 3 + 1], d_ref_local.y/2.0);
+        atomicAdd(&out_grads[tree_idx * 3 + 2], d_ref_local.z/2.0);
     }
 }
 
 // Multi-ensemble kernel: one block per ensemble
 // Thread organization: 1 thread per tree (not 4 like pack_cuda.py)
+// Uses dynamic shared memory for tree poses: extern __shared__ double3 s_trees[]
 __global__ void multi_overlap_lut_total(
-    const double* __restrict__ xyt1_base,      // [num_ensembles, n_trees, 3]
-    const double* __restrict__ xyt2_base,      // [num_ensembles, n_trees, 3]
+    const double* __restrict__ xyt_base,       // [num_ensembles, n_trees, 3]
     const int n_trees,
     cudaTextureObject_t tex,                   // texture object (used in texture mode)
     const double* __restrict__ lut,            // LUT array (used in array mode)
@@ -261,6 +487,9 @@ __global__ void multi_overlap_lut_total(
     double* __restrict__ out_grads_base,       // [num_ensembles, n_trees, 3] or NULL
     const int num_ensembles)
 {
+    // Dynamic shared memory for tree poses
+    extern __shared__ double3 s_trees[];
+    
     int ensemble_id = blockIdx.x;
     
     if (ensemble_id >= num_ensembles) return;
@@ -276,8 +505,7 @@ __global__ void multi_overlap_lut_total(
     
     // Calculate offsets for this ensemble
     int ensemble_stride = n_trees * 3;
-    const double* xyt1_ensemble = xyt1_base + ensemble_id * ensemble_stride;
-    const double* xyt2_ensemble = xyt2_base + ensemble_id * ensemble_stride;
+    const double* xyt_ensemble = xyt_base + ensemble_id * ensemble_stride;
     double* out_total = &out_totals[ensemble_id];
     double* out_grads = (out_grads_base != NULL) 
         ? (out_grads_base + ensemble_id * ensemble_stride) : NULL;
@@ -286,6 +514,7 @@ __global__ void multi_overlap_lut_total(
     if (threadIdx.x == 0) {
         *out_total = 0.0;
     }
+    // Zero gradients (needed since we use atomicAdd)
     if (out_grads != NULL) {
         for (int idx = threadIdx.x; idx < n_trees * 3; idx += blockDim.x) {
             out_grads[idx] = 0.0;
@@ -293,9 +522,8 @@ __global__ void multi_overlap_lut_total(
     }
     __syncthreads();
     
-    // Each thread processes one tree
-    overlap_list_total(xyt1_ensemble, n_trees, xyt2_ensemble, n_trees,
-                       out_total, out_grads);
+    // Each thread processes one tree (shared mem loading happens inside)
+    overlap_list_total(xyt_ensemble, s_trees, n_trees, out_total, out_grads);
 }
 
 } // extern "C"
@@ -453,8 +681,7 @@ def _ensure_initialized() -> None:
 
 
 def overlap_multi_ensemble(
-    xyt1: cp.ndarray, 
-    xyt2: cp.ndarray, 
+    xyt: cp.ndarray, 
     out_cost: cp.ndarray,
     out_grads: cp.ndarray | None = None,
     stream: cp.cuda.Stream | None = None
@@ -463,42 +690,35 @@ def overlap_multi_ensemble(
 
     Parameters
     ----------
-    xyt1 : cp.ndarray, shape (n_ensembles, n_trees, 3)
-        Pose arrays for first set of trees. Must be C-contiguous.
-    xyt2 : cp.ndarray, shape (n_ensembles, n_trees, 3)
-        Pose arrays for second set of trees. Must be C-contiguous.
+    xyt : cp.ndarray, shape (n_ensembles, n_trees, 3)
+        Pose arrays for trees. Must be C-contiguous.
     out_cost : cp.ndarray, shape (n_ensembles,)
         Preallocated array for output costs.
     out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
         Preallocated array for gradients. If None, gradients are not computed.
-        NOTE: Gradient computation is not yet implemented.
+        Gradients are computed analytically (non-texture mode only).
     stream : cp.cuda.Stream, optional
         CUDA stream for kernel execution.
     """
     _ensure_initialized()
     
-    num_ensembles = xyt1.shape[0]
-    n_trees = xyt1.shape[1]
-    dtype = xyt1.dtype
+    num_ensembles = xyt.shape[0]
+    n_trees = xyt.shape[1]
     
     if num_ensembles == 0:
         return
     
     # Validation
-    assert xyt1.ndim == 3 and xyt1.shape[2] == 3, f"xyt1 shape: {xyt1.shape}"
-    assert xyt2.ndim == 3 and xyt2.shape[2] == 3, f"xyt2 shape: {xyt2.shape}"
-    assert xyt1.shape == xyt2.shape, "xyt1 and xyt2 must have same shape"
+    assert xyt.ndim == 3 and xyt.shape[2] == 3, f"xyt shape: {xyt.shape}"
     assert out_cost.shape == (num_ensembles,), f"out_cost shape: {out_cost.shape}"
-    assert xyt1.flags.c_contiguous and xyt2.flags.c_contiguous
+    assert xyt.flags.c_contiguous
     
     if out_grads is not None:
         assert out_grads.shape == (num_ensembles, n_trees, 3)
         assert out_grads.flags.c_contiguous
     
-    # Zero outputs
+    # Zero cost output (grads are written directly per-tree, no need to zero)
     out_cost[:] = 0
-    if out_grads is not None:
-        out_grads[:] = 0
     
     # Launch kernel: 1 block per ensemble, 1 thread per tree
     blocks = num_ensembles
@@ -509,12 +729,16 @@ def overlap_multi_ensemble(
     # Get texture handle (0 if not using texture mode)
     tex_handle = _texture.ptr if USE_TEXTURE and _texture is not None else np.uint64(0)
     
+    # Dynamic shared memory: n_trees * sizeof(double3) or float3
+    # double3 = 24 bytes, float3 = 12 bytes
+    elem_size = 12 if kgs.USE_FLOAT32 else 24
+    shared_mem_bytes = n_trees * elem_size
+    
     _multi_overlap_lut_kernel(
         (blocks,),
         (threads_per_block,),
         (
-            xyt1,
-            xyt2,
+            xyt,
             np.int32(n_trees),
             np.uint64(tex_handle),
             _lut_d,
@@ -523,4 +747,5 @@ def overlap_multi_ensemble(
             np.int32(num_ensembles),
         ),
         stream=stream,
+        shared_mem=shared_mem_bytes,
     )

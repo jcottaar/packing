@@ -45,7 +45,7 @@ xyt = cp.stack([x, y, t], axis=1)
 
 sol = kgs.SolutionCollectionSquare()
 sol.xyt = cp.tile(xyt, (N_individuals, 1, 1))
-sol.xyt[:, :, 2] += cp.random.default_rng(seed=43).uniform(0, 2*np.pi, size=(N_individuals, sol.N_trees))
+sol.xyt[:, :, :] += cp.random.default_rng(seed=43).uniform(0, 0.1, size=(N_individuals, sol.N_trees, 3))
 sol.h = cp.tile(cp.array([[5.,0.,0.]], dtype=cp.float32), (N_individuals, 1))
 sol.xyt = sol.xyt.astype(cp.float32)
 sol.h = sol.h.astype(cp.float32)
@@ -56,7 +56,7 @@ print(f"Solution: {sol.N_solutions} ensembles x {sol.N_trees} trees")
 N_X, N_Y, N_THETA = 200, 200, 200
 MAX_R = kgs.tree_max_radius
 
-pack_cuda_lut.USE_TEXTURE = True  # Change to False to profile array mode
+pack_cuda_lut.USE_TEXTURE = False  # Change to False to profile array mode
 pack_cuda_lut.LUT_X = np.linspace(-2*MAX_R, 2*MAX_R, N_X)
 pack_cuda_lut.LUT_Y = np.linspace(-2*MAX_R, 2*MAX_R, N_Y)
 pack_cuda_lut.LUT_theta = np.linspace(-np.pi, np.pi, N_THETA)
@@ -83,17 +83,18 @@ cost_fn = pack_cost.CollisionCostSeparation()
 cost_fn.compute_cost_allocate(sol)
 
 
-# lut_costs, _, _ = cost_fn.compute_cost_allocate(sol_lut)
+lut_costs, _, _ = cost_fn.compute_cost_allocate(sol_lut)
 
 
-# pack_cuda_lut.LUT_vals = lut_costs.get().reshape(N_X, N_Y, N_THETA).astype(np.float32)
+pack_cuda_lut.LUT_vals = lut_costs.get().reshape(N_X, N_Y, N_THETA).astype(np.float32)
 
-# pack_cuda_lut._ensure_initialized()
+pack_cuda_lut._ensure_initialized()
 
-# # Allocate output
-# cost_out = cp.empty(sol.N_solutions, dtype=cp.float32)
+# Allocate output
+cost_out = cp.empty(sol.N_solutions, dtype=cp.float32)
 
-# pack_cuda_lut.overlap_multi_ensemble(sol.xyt, sol.xyt, cost_out)
+grad = cp.empty((sol.N_solutions, sol.N_trees, 3), dtype=cp.float32)
+pack_cuda_lut.overlap_multi_ensemble(sol.xyt, cost_out, grad)
 # # # Warmup
 # # print("Warming up...")
 # # for _ in range(3):
