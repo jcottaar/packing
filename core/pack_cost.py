@@ -117,8 +117,30 @@ class CostDummy(Cost):
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
         return cp.array(0.0), cp.zeros_like(sol.xyt[0]), cp.zeros_like(sol.h[0])
 
-@dataclass    
+@dataclass
 class CollisionCost(Cost):
+    use_lookup_table: bool = field(init=True, default=False)
+    lut_N_x: int = field(init=True, default=400)
+    lut_N_y: int = field(init=True, default=400)
+    lut_N_theta: int = field(init=True, default=400)
+    lut_trim_zeros: bool = field(init=True, default=True)
+    _lut: 'pack_cuda_lut.LookupTable' = field(init=False, default=None, repr=False)
+
+    def _ensure_lut_initialized(self):
+        """Initialize lookup table if use_lookup_table is True and not yet initialized."""
+        if self.use_lookup_table and self._lut is None:
+            import pack_cuda_lut
+            print(f"Building lookup table for {self.__class__.__name__}...")
+            self._lut = pack_cuda_lut.LookupTable.build_from_cost_function(
+                cost_fn=self,
+                N_x=self.lut_N_x,
+                N_y=self.lut_N_y,
+                N_theta=self.lut_N_theta,
+                trim_zeros=self.lut_trim_zeros,
+                verbose=True
+            )
+            # Set the lookup table in pack_cuda_lut module
+            pack_cuda_lut.set_lookup_table(self._lut)
 
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
         # Compute collision cost for all pairs of trees
@@ -320,7 +342,17 @@ class CollisionCost(Cost):
   
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         if not sol.periodic:
-            self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
+            # Use lookup table if enabled
+            if self.use_lookup_table:
+                self._ensure_lut_initialized()
+                import pack_cuda_lut
+                if evaluate_gradient:
+                    pack_cuda_lut.overlap_multi_ensemble(sol.xyt, cost, grad_xyt)
+                    grad_bound[:] = 0
+                else:
+                    pack_cuda_lut.overlap_multi_ensemble(sol.xyt, cost)
+            else:
+                self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         else:
             crystal_axes = sol.get_crystal_axes_allocate().reshape(-1,4)
             self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient, crystal_axes=crystal_axes)

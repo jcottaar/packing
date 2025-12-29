@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 import cupy as cp
+from dataclasses import dataclass
+from typing import Optional
 
 import kaggle_support as kgs
 import os
@@ -26,16 +28,293 @@ import math
 
 MAX_RADIUS = kgs.tree_max_radius
 
+
+@dataclass
+class LookupTable:
+    """Container for 3D lookup table data with precomputed utilities.
+
+    Stores the grid coordinates and values for trilinear interpolation,
+    along with precomputed grid parameters to avoid repeated calculations
+    in kernels.
+
+    Attributes
+    ----------
+    X : np.ndarray, shape (N_x,)
+        X coordinates of grid points (relative displacement)
+    Y : np.ndarray, shape (N_y,)
+        Y coordinates of grid points (relative displacement)
+    theta : np.ndarray, shape (N_theta,)
+        Theta coordinates of grid points (relative rotation, radians)
+    vals : np.ndarray, shape (N_x, N_y, N_theta)
+        Overlap values at grid points
+    use_texture : bool
+        Whether to use texture mode (must match module USE_TEXTURE setting)
+    """
+
+    X: np.ndarray
+    Y: np.ndarray
+    theta: np.ndarray
+    vals: np.ndarray
+    use_texture: bool = True
+
+    # GPU resources (created in __post_init__)
+    lut_d: cp.ndarray = None
+    texture: cp.cuda.texture.TextureObject = None
+    texture_array: cp.cuda.texture.CUDAarray = None
+
+    def __post_init__(self):
+        """Validate shapes and precompute grid parameters + GPU resources."""
+        n_x, n_y, n_theta = self.vals.shape
+        if len(self.X) != n_x or len(self.Y) != n_y or len(self.theta) != n_theta:
+            raise ValueError(f"LUT shape mismatch: vals={self.vals.shape}, "
+                           f"X={len(self.X)}, Y={len(self.Y)}, theta={len(self.theta)}")
+
+        # Precompute grid parameters (used in kernel via constant memory)
+        self.N_x = n_x
+        self.N_y = n_y
+        self.N_theta = n_theta
+
+        self.X_min = float(self.X[0])
+        self.X_max = float(self.X[-1])
+        self.Y_min = float(self.Y[0])
+        self.Y_max = float(self.Y[-1])
+        self.theta_min = float(self.theta[0])
+        self.theta_max = float(self.theta[-1])
+
+        # Grid spacing (world coordinates)
+        self.grid_dx = (self.X_max - self.X_min) / (self.N_x - 1) if self.N_x > 1 else 0.0
+        self.grid_dy = (self.Y_max - self.Y_min) / (self.N_y - 1) if self.N_y > 1 else 0.0
+        self.grid_dtheta = (self.theta_max - self.theta_min) / (self.N_theta - 1) if self.N_theta > 1 else 0.0
+
+        # Create GPU resources immediately
+        self._prepare_gpu_resources()
+
+    def _prepare_gpu_resources(self):
+        """Prepare device arrays and textures for GPU use."""
+        # Upload LUT to device (always needed for array mode)
+        self.lut_d = cp.asarray(self.vals, dtype=kgs.dtype_cp)
+
+        # Create texture if texture mode enabled
+        if self.use_texture:
+            # Create 3D CUDA array for texture
+            # Shape must be (depth, height, width) = (N_theta, N_y, N_x)
+            lut_f32 = self.vals.astype(np.float32)
+            # CuPy texture requires (depth, height, width) ordering
+            # Our vals is (N_x, N_y, N_theta), so transpose to (N_theta, N_y, N_x)
+            lut_for_tex = np.transpose(lut_f32, (2, 1, 0)).copy()
+
+            # Create CUDA array
+            self.texture_array = cp.cuda.texture.CUDAarray(
+                cp.cuda.texture.ChannelFormatDescriptor(32, 0, 0, 0, cp.cuda.runtime.cudaChannelFormatKindFloat),
+                lut_for_tex.shape[2], lut_for_tex.shape[1], lut_for_tex.shape[0]
+            )
+            self.texture_array.copy_from(lut_for_tex)
+
+            # Create texture object with trilinear filtering
+            res_desc = cp.cuda.texture.ResourceDescriptor(
+                cp.cuda.runtime.cudaResourceTypeArray, cuArr=self.texture_array
+            )
+            tex_desc = cp.cuda.texture.TextureDescriptor(
+                addressModes=(cp.cuda.runtime.cudaAddressModeClamp,
+                             cp.cuda.runtime.cudaAddressModeClamp,
+                             cp.cuda.runtime.cudaAddressModeClamp),
+                filterMode=cp.cuda.runtime.cudaFilterModeLinear,
+                readMode=cp.cuda.runtime.cudaReadModeElementType,
+                normalizedCoords=0  # Use unnormalized coordinates
+            )
+            self.texture = cp.cuda.texture.TextureObject(res_desc, tex_desc)
+
+    @classmethod
+    def build_from_cost_function(
+        cls,
+        cost_fn,
+        X: Optional[np.ndarray] = None,
+        Y: Optional[np.ndarray] = None,
+        theta: Optional[np.ndarray] = None,
+        N_x: int = 400,
+        N_y: int = 400,
+        N_theta: int = 400,
+        trim_zeros: bool = True,
+        verbose: bool = True
+    ) -> 'LookupTable':
+        """Build lookup table by evaluating cost function on grid.
+
+        Parameters
+        ----------
+        cost_fn : Cost
+            Cost function to evaluate (e.g., CollisionCostOverlappingArea)
+            Note: If cost_fn has use_lookup_table=True, it will be temporarily
+            disabled during LUT building to avoid infinite recursion.
+        X, Y, theta : np.ndarray, optional
+            Grid coordinates. If None, reasonable defaults based on tree size.
+        N_x, N_y, N_theta : int
+            Grid dimensions (used if X/Y/theta not provided)
+        trim_zeros : bool
+            If True, remove edge rows/columns that are all zeros
+            (keeping at least one zero row/column for proper interpolation)
+        verbose : bool
+            If True, print progress messages
+
+        Returns
+        -------
+        LookupTable
+            Built lookup table
+        """
+        # Temporarily disable LUT usage to avoid infinite recursion
+        saved_use_lut = getattr(cost_fn, 'use_lookup_table', False)
+        if hasattr(cost_fn, 'use_lookup_table'):
+            cost_fn.use_lookup_table = False
+
+        try:
+            # Set default grids if not provided
+            if X is None:
+                X = np.linspace(-2*MAX_RADIUS, 2*MAX_RADIUS, N_x, dtype=np.float32)
+            if Y is None:
+                Y = np.linspace(-2*MAX_RADIUS, 2*MAX_RADIUS, N_y, dtype=np.float32)
+            if theta is None:
+                theta = np.linspace(-np.pi, np.pi, N_theta, dtype=np.float32)
+
+            N_x, N_y, N_theta = len(X), len(Y), len(theta)
+
+            if verbose:
+                print(f"Building LUT: {N_x} x {N_y} x {N_theta} = {N_x*N_y*N_theta:,} grid points")
+
+            # Build LUT by looping over theta values to save memory
+            vals = np.zeros((N_x, N_y, N_theta), dtype=np.float32)
+
+            for t_idx, t_val in enumerate(theta):
+                if verbose and t_idx % 50 == 0:
+                    print(f"  Processing theta {t_idx+1}/{N_theta}")
+
+                # Create meshgrid for this theta slice
+                dx_grid, dy_grid = np.meshgrid(X, Y, indexing='ij')
+                N_individuals = N_x * N_y
+
+                # Create solution with 2 trees:
+                # Tree 0: at origin (0, 0, 0)
+                # Tree 1: at (dx, dy, t_val)
+                xyt_slice = np.zeros((N_individuals, 2, 3), dtype=np.float32)
+                xyt_slice[:, 1, 0] = dx_grid.ravel()
+                xyt_slice[:, 1, 1] = dy_grid.ravel()
+                xyt_slice[:, 1, 2] = t_val
+
+                xyt_slice_cp = cp.asarray(xyt_slice)
+
+                # Create solution collection
+                sol_slice = kgs.SolutionCollectionSquare()
+                sol_slice.xyt = xyt_slice_cp
+                # Large boundary to avoid clipping
+                sol_slice.h = cp.tile(cp.array([[10., 0., 0.]], dtype=cp.float32), (N_individuals, 1))
+                sol_slice.check_constraints()
+
+                # Compute costs
+                costs, _, _ = cost_fn.compute_cost_allocate(sol_slice, evaluate_gradient=False)
+                costs_np = costs.get()
+
+                # Store in LUT (reshape from flat to (N_x, N_y))
+                vals[:, :, t_idx] = costs_np.reshape(N_x, N_y)
+
+            if verbose:
+                print(f"Cost range: [{vals.min():.6f}, {vals.max():.6f}]")
+
+            # Trim zeros if requested
+            if trim_zeros:
+                X, Y, theta, vals = cls._trim_zero_edges(X, Y, theta, vals, verbose=verbose)
+
+            return cls(X=X, Y=Y, theta=theta, vals=vals, use_texture=USE_TEXTURE)
+        finally:
+            # Restore original setting
+            if hasattr(cost_fn, 'use_lookup_table'):
+                cost_fn.use_lookup_table = saved_use_lut
+
+    @staticmethod
+    def _trim_zero_edges(
+        X: np.ndarray,
+        Y: np.ndarray,
+        theta: np.ndarray,
+        vals: np.ndarray,
+        verbose: bool = True
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Trim edge rows/columns that are all zeros.
+
+        Removes leading/trailing rows and columns along X and Y axes that
+        contain only zeros, while ensuring at least one zero row/column
+        remains for proper interpolation at the grid boundaries.
+
+        Parameters
+        ----------
+        X, Y, theta : np.ndarray
+            Grid coordinates
+        vals : np.ndarray, shape (N_x, N_y, N_theta)
+            Table values
+        verbose : bool
+            Print trimming info
+
+        Returns
+        -------
+        X_trim, Y_trim, theta_trim, vals_trim
+            Trimmed arrays
+        """
+        N_x, N_y, N_theta = vals.shape
+
+        # Find non-zero ranges along X axis (collapse over Y and theta)
+        x_sums = np.sum(np.abs(vals), axis=(1, 2))  # (N_x,)
+        x_nonzero = np.where(x_sums > 0)[0]
+
+        if len(x_nonzero) > 0:
+            x_start = max(0, x_nonzero[0] - 1)  # Keep one zero row before
+            x_end = min(N_x - 1, x_nonzero[-1] + 1)  # Keep one zero row after
+        else:
+            # All zeros - keep everything
+            x_start, x_end = 0, N_x - 1
+
+        # Find non-zero ranges along Y axis (collapse over X and theta)
+        y_sums = np.sum(np.abs(vals), axis=(0, 2))  # (N_y,)
+        y_nonzero = np.where(y_sums > 0)[0]
+
+        if len(y_nonzero) > 0:
+            y_start = max(0, y_nonzero[0] - 1)
+            y_end = min(N_y - 1, y_nonzero[-1] + 1)
+        else:
+            y_start, y_end = 0, N_y - 1
+
+        # Theta is typically non-zero throughout, but check anyway
+        theta_sums = np.sum(np.abs(vals), axis=(0, 1))  # (N_theta,)
+        theta_nonzero = np.where(theta_sums > 0)[0]
+
+        if len(theta_nonzero) > 0:
+            theta_start = theta_nonzero[0]  # Don't keep extra zeros for theta
+            theta_end = theta_nonzero[-1]
+        else:
+            theta_start, theta_end = 0, N_theta - 1
+
+        # Trim
+        X_trim = X[x_start:x_end+1]
+        Y_trim = Y[y_start:y_end+1]
+        theta_trim = theta[theta_start:theta_end+1]
+        vals_trim = vals[x_start:x_end+1, y_start:y_end+1, theta_start:theta_end+1]
+
+        if verbose:
+            removed_x = N_x - len(X_trim)
+            removed_y = N_y - len(Y_trim)
+            removed_theta = N_theta - len(theta_trim)
+            total_removed = (N_x * N_y * N_theta) - (len(X_trim) * len(Y_trim) * len(theta_trim))
+            pct = 100 * total_removed / (N_x * N_y * N_theta)
+
+            print(f"Trimming zero edges:")
+            print(f"  X: {N_x} -> {len(X_trim)} (removed {removed_x})")
+            print(f"  Y: {N_y} -> {len(Y_trim)} (removed {removed_y})")
+            print(f"  Theta: {N_theta} -> {len(theta_trim)} (removed {removed_theta})")
+            print(f"  Total reduction: {pct:.1f}% ({total_removed:,} points)")
+
+        return X_trim, Y_trim, theta_trim, vals_trim
+
 # Module setting to switch between array and texture modes
-# Set this before calling _ensure_initialized() or reinitialize()
+# Set this before calling set_lookup_table() or reinitialize()
 USE_TEXTURE: bool = True
 
-# LUT arrays - must be set before calling _ensure_initialized()
-# These define the grid and values for trilinear interpolation
-LUT_X: np.ndarray | None = None      # shape (N_x,) - x coordinates of grid points
-LUT_Y: np.ndarray | None = None      # shape (N_y,) - y coordinates of grid points  
-LUT_theta: np.ndarray | None = None  # shape (N_theta,) - theta coordinates of grid points
-LUT_vals: np.ndarray | None = None   # shape (N_x, N_y, N_theta) - overlap values at grid points
+# Active lookup table (set via set_lookup_table())
+_active_lut: LookupTable | None = None
 
 # Device-side LUT array (used in array mode)
 _lut_d: cp.ndarray | None = None
@@ -44,30 +323,37 @@ _lut_d: cp.ndarray | None = None
 _texture: cp.cuda.texture.TextureObject | None = None
 _texture_array: cp.cuda.texture.CUDAarray | None = None
 
+# Legacy module-level arrays for backward compatibility
+# These are now deprecated in favor of set_lookup_table()
+LUT_X: np.ndarray | None = None
+LUT_Y: np.ndarray | None = None
+LUT_theta: np.ndarray | None = None
+LUT_vals: np.ndarray | None = None
+
 _CUDA_SRC = r"""
 extern "C" {
 
 #define MAX_RADIUS $MAX_RADIUS$
 #define M_PI 3.14159265358979323846
 
-// LUT grid parameters (set at compile time via string substitution)
-#define LUT_N_X $LUT_N_X$
-#define LUT_N_Y $LUT_N_Y$
-#define LUT_N_THETA $LUT_N_THETA$
-#define LUT_X_MIN $LUT_X_MIN$
-#define LUT_X_MAX $LUT_X_MAX$
-#define LUT_Y_MIN $LUT_Y_MIN$
-#define LUT_Y_MAX $LUT_Y_MAX$
-#define LUT_THETA_MIN $LUT_THETA_MIN$
-#define LUT_THETA_MAX $LUT_THETA_MAX$
-
-// Grid spacing (world coordinates)
-#define GRID_DX ((LUT_X_MAX - LUT_X_MIN) / (LUT_N_X - 1))
-#define GRID_DY ((LUT_Y_MAX - LUT_Y_MIN) / (LUT_N_Y - 1))
-#define GRID_DT ((LUT_THETA_MAX - LUT_THETA_MIN) / (LUT_N_THETA - 1))
-
-// Texture mode switch (0 = array, 1 = texture)
+// Texture mode switch (0 = array, 1 = texture) - compile-time constant
 #define USE_TEXTURE $USE_TEXTURE$
+
+// LUT grid parameters in constant memory (can be updated without recompilation)
+__constant__ int c_N_x;
+__constant__ int c_N_y;
+__constant__ int c_N_theta;
+__constant__ double c_X_min;
+__constant__ double c_X_max;
+__constant__ double c_Y_min;
+__constant__ double c_Y_max;
+__constant__ double c_theta_min;
+__constant__ double c_theta_max;
+
+// Computed grid spacing (updated when constants are set)
+__constant__ double c_grid_dx;
+__constant__ double c_grid_dy;
+__constant__ double c_grid_dtheta;
 
 // Global device state - set once by the kernel, used by all device functions
 __device__ const double* g_lut;           // LUT array pointer (array mode)
@@ -87,9 +373,9 @@ __device__ double lut_lookup(double x, double y, double theta)
 #if USE_TEXTURE
     // Texture-based lookup with hardware trilinear interpolation
     // Normalize to grid coordinates [0.5, N-0.5] for texel centers
-    double gx = (x - LUT_X_MIN) / (LUT_X_MAX - LUT_X_MIN) * (LUT_N_X - 1) + 0.5;
-    double gy = (y - LUT_Y_MIN) / (LUT_Y_MAX - LUT_Y_MIN) * (LUT_N_Y - 1) + 0.5;
-    double gt = (theta - LUT_THETA_MIN) / (LUT_THETA_MAX - LUT_THETA_MIN) * (LUT_N_THETA - 1) + 0.5;
+    double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1) + 0.5;
+    double gy = (y - c_Y_min) / (c_Y_max - c_Y_min) * (c_N_y - 1) + 0.5;
+    double gt = (theta - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1) + 0.5;
     
     // tex3D(tex, x, y, z) for array shape (depth, height, width):
     //   x -> width index, y -> height index, z -> depth index
@@ -102,26 +388,26 @@ __device__ double lut_lookup(double x, double y, double theta)
 #else
     // Array-based trilinear interpolation with 8-point manual fetch
     // Normalize to grid coordinates [0, N-1]
-    double gx = (x - LUT_X_MIN) / (LUT_X_MAX - LUT_X_MIN) * (LUT_N_X - 1);
-    double gy = (y - LUT_Y_MIN) / (LUT_Y_MAX - LUT_Y_MIN) * (LUT_N_Y - 1);
-    double gt = (theta - LUT_THETA_MIN) / (LUT_THETA_MAX - LUT_THETA_MIN) * (LUT_N_THETA - 1);
+    double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1);
+    double gy = (y - c_Y_min) / (c_Y_max - c_Y_min) * (c_N_y - 1);
+    double gt = (theta - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1);
     
     // Clamp to valid range
     if (gx < 0.0) gx = 0.0;
-    if (gx > LUT_N_X - 1.0) gx = LUT_N_X - 1.0;
+    if (gx > c_N_x - 1.0) gx = c_N_x - 1.0;
     if (gy < 0.0) gy = 0.0;
-    if (gy > LUT_N_Y - 1.0) gy = LUT_N_Y - 1.0;
+    if (gy > c_N_y - 1.0) gy = c_N_y - 1.0;
     if (gt < 0.0) gt = 0.0;
-    if (gt > LUT_N_THETA - 1.0) gt = LUT_N_THETA - 1.0;
+    if (gt > c_N_theta - 1.0) gt = c_N_theta - 1.0;
     
     // Integer indices
     int ix0 = (int)floor(gx);
     int iy0 = (int)floor(gy);
     int it0 = (int)floor(gt);
     
-    int ix1 = min(ix0 + 1, LUT_N_X - 1);
-    int iy1 = min(iy0 + 1, LUT_N_Y - 1);
-    int it1 = min(it0 + 1, LUT_N_THETA - 1);
+    int ix1 = min(ix0 + 1, c_N_x - 1);
+    int iy1 = min(iy0 + 1, c_N_y - 1);
+    int it1 = min(it0 + 1, c_N_theta - 1);
     
     // Fractional parts
     double fx = gx - ix0;
@@ -130,7 +416,7 @@ __device__ double lut_lookup(double x, double y, double theta)
     
     // Fetch 8 corner values
     // Index: ix * (N_y * N_theta) + iy * N_theta + it
-    #define LUT_IDX(ix, iy, it) ((ix) * (LUT_N_Y * LUT_N_THETA) + (iy) * LUT_N_THETA + (it))
+    #define LUT_IDX(ix, iy, it) ((ix) * (c_N_y * c_N_theta) + (iy) * c_N_theta + (it))
     
     double v000 = g_lut[LUT_IDX(ix0, iy0, it0)];
     double v001 = g_lut[LUT_IDX(ix0, iy0, it1)];
@@ -164,9 +450,9 @@ __device__ double lut_lookup(double x, double y, double theta)
 __device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out)
 {
     // Early exit if outside LUT range - return 0 cost and gradient
-    if (x < LUT_X_MIN || x > LUT_X_MAX ||
-        y < LUT_Y_MIN || y > LUT_Y_MAX ||
-        theta < LUT_THETA_MIN || theta > LUT_THETA_MAX) {
+    if (x < c_X_min || x > c_X_max ||
+        y < c_Y_min || y > c_Y_max ||
+        theta < c_theta_min || theta > c_theta_max) {
         if (d_out != NULL) {
             d_out->x = 0.0;
             d_out->y = 0.0;
@@ -176,9 +462,9 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
     }
     
     // Finite difference step sizes (1/4 of grid cell)
-    const double h_x = GRID_DX * 0.25;
-    const double h_y = GRID_DY * 0.25;
-    const double h_t = GRID_DT * 0.25;
+    const double h_x = c_grid_dx * 0.25;
+    const double h_y = c_grid_dy * 0.25;
+    const double h_t = c_grid_dtheta * 0.25;
     
     // Get base value
     double v0 = lut_lookup(x, y, theta);
@@ -187,9 +473,9 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
     if (d_out != NULL) {
         // Compute fractional positions within cell to determine FD direction
         // We want to step toward cell center to stay within the cell
-        double gx = (x - LUT_X_MIN) / (LUT_X_MAX - LUT_X_MIN) * (LUT_N_X - 1);
-        double gy = (y - LUT_Y_MIN) / (LUT_Y_MAX - LUT_Y_MIN) * (LUT_N_Y - 1);
-        double gt = (theta - LUT_THETA_MIN) / (LUT_THETA_MAX - LUT_THETA_MIN) * (LUT_N_THETA - 1);
+        double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1);
+        double gy = (y - c_Y_min) / (c_Y_max - c_Y_min) * (c_N_y - 1);
+        double gt = (theta - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1);
         
         // Fractional parts (0 to 1 within cell)
         double fx = gx - floor(gx);
@@ -222,9 +508,9 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
 __device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out)
 {
     // Early exit if outside LUT range - return 0 cost and gradient
-    if (x < LUT_X_MIN || x > LUT_X_MAX ||
-        y < LUT_Y_MIN || y > LUT_Y_MAX ||
-        theta < LUT_THETA_MIN || theta > LUT_THETA_MAX) {
+    if (x < c_X_min || x > c_X_max ||
+        y < c_Y_min || y > c_Y_max ||
+        theta < c_theta_min || theta > c_theta_max) {
         if (d_out != NULL) {
             d_out->x = 0.0;
             d_out->y = 0.0;
@@ -234,18 +520,18 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
     }
     
     // Normalize to grid coordinates [0, N-1]
-    double gx = (x - LUT_X_MIN) / (LUT_X_MAX - LUT_X_MIN) * (LUT_N_X - 1);
-    double gy = (y - LUT_Y_MIN) / (LUT_Y_MAX - LUT_Y_MIN) * (LUT_N_Y - 1);
-    double gt = (theta - LUT_THETA_MIN) / (LUT_THETA_MAX - LUT_THETA_MIN) * (LUT_N_THETA - 1);
+    double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1);
+    double gy = (y - c_Y_min) / (c_Y_max - c_Y_min) * (c_N_y - 1);
+    double gt = (theta - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1);
     
     // Integer indices
     int ix0 = (int)floor(gx);
     int iy0 = (int)floor(gy);
     int it0 = (int)floor(gt);
     
-    int ix1 = min(ix0 + 1, LUT_N_X - 1);
-    int iy1 = min(iy0 + 1, LUT_N_Y - 1);
-    int it1 = min(it0 + 1, LUT_N_THETA - 1);
+    int ix1 = min(ix0 + 1, c_N_x - 1);
+    int iy1 = min(iy0 + 1, c_N_y - 1);
+    int it1 = min(it0 + 1, c_N_theta - 1);
     
     // Fractional parts
     double fx = gx - ix0;
@@ -253,7 +539,7 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
     double ft = gt - it0;
     
     // Fetch 8 corner values
-    #define LUT_IDX(ix, iy, it) ((ix) * (LUT_N_Y * LUT_N_THETA) + (iy) * LUT_N_THETA + (it))
+    #define LUT_IDX(ix, iy, it) ((ix) * (c_N_y * c_N_theta) + (iy) * c_N_theta + (it))
     
     double v000 = g_lut[LUT_IDX(ix0, iy0, it0)];
     double v001 = g_lut[LUT_IDX(ix0, iy0, it1)];
@@ -303,9 +589,9 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
         // gx = (x - X_MIN) / (X_MAX - X_MIN) * (N_X - 1)
         // dgx/dx = (N_X - 1) / (X_MAX - X_MIN)
         // df/dx = df/dfx * dfx/dgx * dgx/dx = df/dfx * 1 * dgx/dx
-        double scale_x = (double)(LUT_N_X - 1) / (LUT_X_MAX - LUT_X_MIN);
-        double scale_y = (double)(LUT_N_Y - 1) / (LUT_Y_MAX - LUT_Y_MIN);
-        double scale_t = (double)(LUT_N_THETA - 1) / (LUT_THETA_MAX - LUT_THETA_MIN);
+        double scale_x = (double)(c_N_x - 1) / (c_X_max - c_X_min);
+        double scale_y = (double)(c_N_y - 1) / (c_Y_max - c_Y_min);
+        double scale_t = (double)(c_N_theta - 1) / (c_theta_max - c_theta_min);
         
         d_out->x = df_dfx * scale_x;
         d_out->y = df_dfy * scale_y;
@@ -537,80 +823,87 @@ _multi_overlap_lut_kernel: cp.RawKernel | None = None
 _initialized: bool = False
 
 
-def _ensure_initialized() -> None:
-    """Lazy initialization hook.
+def set_lookup_table(lut: LookupTable) -> None:
+    """Set the active lookup table (fast - just updates pointers and constants).
 
-    On first call, this:
-    - Validates LUT arrays are set
-    - Uploads LUT to device (and creates texture if USE_TEXTURE=True)
-    - Compiles CUDA kernel with LUT parameters
-    
-    LUT_X, LUT_Y, LUT_theta, LUT_vals must be set before calling this.
+    Parameters
+    ----------
+    lut : LookupTable
+        Lookup table to use for overlap computation.
+        Must have GPU resources already prepared (done automatically in __post_init__).
     """
-    global _initialized, _raw_module, _multi_overlap_lut_kernel, _lut_d
-    global _texture, _texture_array
-    
+    global _active_lut, _raw_module
+
+    # Ensure kernel is compiled (one-time only)
+    _ensure_initialized()
+
+    # Set active LUT
+    _active_lut = lut
+
+    # Update constant memory with new grid parameters
+    # This is fast - no kernel recompilation needed
+    _update_lut_constants(lut)
+
+
+def _update_lut_constants(lut: LookupTable) -> None:
+    """Update constant memory with LUT grid parameters (fast, no recompilation).
+
+    Parameters
+    ----------
+    lut : LookupTable
+        Lookup table with grid parameters to copy to device constant memory
+    """
+    global _raw_module
+
+    if _raw_module is None:
+        raise RuntimeError("Kernel not compiled yet - call _ensure_initialized() first")
+
+    # Use proper type for constant memory (int32 for ints, float64/float32 for doubles)
+    dtype = np.float32 if kgs.USE_FLOAT32 else np.float64
+
+    # Helper to copy data to constant memory symbol
+    def set_constant(name, value, dtype_val):
+        ptr = _raw_module.get_global(name)
+        src = cp.array([value], dtype=dtype_val)
+        # Copy from device to device (constant memory is device memory)
+        ptr.copy_from_device(src.data, src.nbytes)
+
+    # Update grid dimensions
+    set_constant('c_N_x', lut.N_x, np.int32)
+    set_constant('c_N_y', lut.N_y, np.int32)
+    set_constant('c_N_theta', lut.N_theta, np.int32)
+
+    # Update grid bounds
+    set_constant('c_X_min', lut.X_min, dtype)
+    set_constant('c_X_max', lut.X_max, dtype)
+    set_constant('c_Y_min', lut.Y_min, dtype)
+    set_constant('c_Y_max', lut.Y_max, dtype)
+    set_constant('c_theta_min', lut.theta_min, dtype)
+    set_constant('c_theta_max', lut.theta_max, dtype)
+
+    # Update grid spacing
+    set_constant('c_grid_dx', lut.grid_dx, dtype)
+    set_constant('c_grid_dy', lut.grid_dy, dtype)
+    set_constant('c_grid_dtheta', lut.grid_dtheta, dtype)
+
+
+def _ensure_initialized() -> None:
+    """Lazy initialization hook - compiles kernel once.
+
+    On first call, this compiles the CUDA kernel with USE_TEXTURE setting.
+    Grid parameters are set dynamically via constant memory, so no recompilation
+    needed when switching between LUTs.
+    """
+    global _initialized, _raw_module, _multi_overlap_lut_kernel
+
     if _initialized:
         return
-    
-    # Validate LUT arrays are set
-    if LUT_X is None or LUT_Y is None or LUT_theta is None or LUT_vals is None:
-        raise RuntimeError("LUT arrays must be set before calling _ensure_initialized()")
-    
-    print(f'init CUDA LUT (USE_TEXTURE={USE_TEXTURE})')
-    
-    # Validate LUT shapes
-    n_x, n_y, n_theta = LUT_vals.shape
-    if len(LUT_X) != n_x or len(LUT_Y) != n_y or len(LUT_theta) != n_theta:
-        raise ValueError(f"LUT shape mismatch: vals={LUT_vals.shape}, "
-                        f"X={len(LUT_X)}, Y={len(LUT_Y)}, theta={len(LUT_theta)}")
-    
-    # Upload LUT to device (array mode always needs this)
-    _lut_d = cp.asarray(LUT_vals, dtype=kgs.dtype_cp)
-    
-    # Create texture if texture mode enabled
-    if USE_TEXTURE:
-        # Create 3D CUDA array for texture
-        # Shape must be (depth, height, width) = (N_theta, N_y, N_x)
-        lut_f32 = LUT_vals.astype(np.float32)
-        # CuPy texture requires (depth, height, width) ordering
-        # Our LUT_vals is (N_x, N_y, N_theta), so transpose to (N_theta, N_y, N_x)
-        lut_for_tex = np.transpose(lut_f32, (2, 1, 0)).copy()
-        
-        # Create CUDA array
-        _texture_array = cp.cuda.texture.CUDAarray(
-            cp.cuda.texture.ChannelFormatDescriptor(32, 0, 0, 0, cp.cuda.runtime.cudaChannelFormatKindFloat),
-            lut_for_tex.shape[2], lut_for_tex.shape[1], lut_for_tex.shape[0]
-        )
-        _texture_array.copy_from(lut_for_tex)
-        
-        # Create texture object with trilinear filtering
-        res_desc = cp.cuda.texture.ResourceDescriptor(
-            cp.cuda.runtime.cudaResourceTypeArray, cuArr=_texture_array
-        )
-        tex_desc = cp.cuda.texture.TextureDescriptor(
-            addressModes=(cp.cuda.runtime.cudaAddressModeClamp,
-                         cp.cuda.runtime.cudaAddressModeClamp,
-                         cp.cuda.runtime.cudaAddressModeClamp),
-            filterMode=cp.cuda.runtime.cudaFilterModeLinear,
-            readMode=cp.cuda.runtime.cudaReadModeElementType,
-            normalizedCoords=0  # Use unnormalized coordinates
-        )
-        _texture = cp.cuda.texture.TextureObject(res_desc, tex_desc)
-        print(f"  Created 3D texture: {lut_for_tex.shape}")
-    
-    # Prepare CUDA source with LUT parameters
+
+    print(f'Compiling CUDA LUT kernel (USE_TEXTURE={USE_TEXTURE}, one-time only)')
+
+    # Prepare CUDA source (only MAX_RADIUS and USE_TEXTURE are compile-time constants)
     cuda_src = _CUDA_SRC
     cuda_src = cuda_src.replace('$MAX_RADIUS$', str(MAX_RADIUS))
-    cuda_src = cuda_src.replace('$LUT_N_X$', str(n_x))
-    cuda_src = cuda_src.replace('$LUT_N_Y$', str(n_y))
-    cuda_src = cuda_src.replace('$LUT_N_THETA$', str(n_theta))
-    cuda_src = cuda_src.replace('$LUT_X_MIN$', str(float(LUT_X[0])))
-    cuda_src = cuda_src.replace('$LUT_X_MAX$', str(float(LUT_X[-1])))
-    cuda_src = cuda_src.replace('$LUT_Y_MIN$', str(float(LUT_Y[0])))
-    cuda_src = cuda_src.replace('$LUT_Y_MAX$', str(float(LUT_Y[-1])))
-    cuda_src = cuda_src.replace('$LUT_THETA_MIN$', str(float(LUT_theta[0])))
-    cuda_src = cuda_src.replace('$LUT_THETA_MAX$', str(float(LUT_theta[-1])))
     cuda_src = cuda_src.replace('$USE_TEXTURE$', '1' if USE_TEXTURE else '0')
     
     # Handle float32 mode
@@ -681,7 +974,7 @@ def _ensure_initialized() -> None:
 
 
 def overlap_multi_ensemble(
-    xyt: cp.ndarray, 
+    xyt: cp.ndarray,
     out_cost: cp.ndarray,
     out_grads: cp.ndarray | None = None,
     stream: cp.cuda.Stream | None = None
@@ -701,39 +994,44 @@ def overlap_multi_ensemble(
         CUDA stream for kernel execution.
     """
     _ensure_initialized()
-    
+
+    # Check that LUT is set
+    if _active_lut is None:
+        raise RuntimeError("No lookup table set. Call set_lookup_table() first.")
+
     num_ensembles = xyt.shape[0]
     n_trees = xyt.shape[1]
-    
+
     if num_ensembles == 0:
         return
-    
+
     # Validation
     assert xyt.ndim == 3 and xyt.shape[2] == 3, f"xyt shape: {xyt.shape}"
     assert out_cost.shape == (num_ensembles,), f"out_cost shape: {out_cost.shape}"
     assert xyt.flags.c_contiguous
-    
+
     if out_grads is not None:
         assert out_grads.shape == (num_ensembles, n_trees, 3)
         assert out_grads.flags.c_contiguous
-    
+
     # Zero cost output (grads are written directly per-tree, no need to zero)
     out_cost[:] = 0
-    
+
     # Launch kernel: 1 block per ensemble, 1 thread per tree
     blocks = num_ensembles
     threads_per_block = n_trees
-    
+
     out_grads_ptr = out_grads if out_grads is not None else np.intp(0)
-    
-    # Get texture handle (0 if not using texture mode)
-    tex_handle = _texture.ptr if USE_TEXTURE and _texture is not None else np.uint64(0)
-    
+
+    # Get texture and LUT from active table
+    tex_handle = _active_lut.texture.ptr if USE_TEXTURE and _active_lut.texture is not None else np.uint64(0)
+    lut_d = _active_lut.lut_d
+
     # Dynamic shared memory: n_trees * sizeof(double3) or float3
     # double3 = 24 bytes, float3 = 12 bytes
     elem_size = 12 if kgs.USE_FLOAT32 else 24
     shared_mem_bytes = n_trees * elem_size
-    
+
     _multi_overlap_lut_kernel(
         (blocks,),
         (threads_per_block,),
@@ -741,7 +1039,7 @@ def overlap_multi_ensemble(
             xyt,
             np.int32(n_trees),
             np.uint64(tex_handle),
-            _lut_d,
+            lut_d,
             out_cost,
             out_grads_ptr,
             np.int32(num_ensembles),

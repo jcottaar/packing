@@ -190,7 +190,7 @@ class InitializerRandomJiggled(Initializer):
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array
-    use_fixed_h_for_size_setup: bool = field(init=True, default=False)
+    use_fixed_h_for_size_setup: bool = field(init=True, default=True)
 
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
@@ -976,7 +976,7 @@ class GASinglePopulationOld(GASinglePopulation):
     alternative_selection: bool = field(init=True, default=True) 
     diversity_criterion: float = field(init=True, default=0.2)  # will scale with N_trees
     diversity_criterion_scaling: float = field(init=True, default=0.) # will scale with N_trees
-    lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='auction'))
+    lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='min_cost_row'))
 
     def _initialize(self):
         # Generate selection_size from parameters if not provided
@@ -1380,7 +1380,7 @@ def baseline():
     runner = Orchestrator(n_generations=60000)
     runner.ga = GAMultiRing(N=16)
     runner.ga.diversity_reset_threshold = 5./40
-    runner.ga.mate_distance=6
+    runner.ga.mate_distance=8
 
     ga_base = GASinglePopulationOld(N_trees_to_do=-1)
     #value = 0.125
