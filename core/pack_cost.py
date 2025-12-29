@@ -144,6 +144,18 @@ class CollisionCost(Cost):
                 verbose=True
             )
 
+    def __getstate__(self):
+        """Exclude lookup table from pickle serialization (contains GPU resources)."""
+        state = self.__dict__.copy()
+        # Remove the unpicklable lookup table
+        state['_lut'] = None
+        return state
+
+    def __setstate__(self, state):
+        """Restore object state from pickle, lookup table will be lazily rebuilt if needed."""
+        self.__dict__.update(state)
+        # _lut is already None from __getstate__, will be rebuilt by _ensure_lut_initialized() if needed
+
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
         # Compute collision cost for all pairs of trees
         assert(sol.N_solutions==1)
