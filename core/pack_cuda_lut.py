@@ -51,8 +51,6 @@ import shutil
 
 CONVEX_PIECES: list[Polygon] = kgs.convex_breakdown
 MAX_RADIUS = kgs.tree_max_radius
-# Precompute (2*MAX_RADIUS)^2 for distance checks - trees farther apart than this cannot overlap
-MAX_OVERLAP_DIST_SQ = (2.0 * MAX_RADIUS) ** 2
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +71,7 @@ extern "C" {
 #define MAX_PIECES 4
 #define MAX_VERTS_PER_PIECE 4
 #define MAX_INTERSECTION_VERTS 8
-#define MAX_OVERLAP_DIST_SQ """ + str(MAX_OVERLAP_DIST_SQ) + r"""
+#define MAX_RADIUS """ + str(MAX_RADIUS) + r"""
 
 // Compiler directives to specialize kernel variants (reduce register pressure)
 // ENABLE_CRYSTAL_AXES: Allow use_crystal branch in overlap_ref_with_list_piece
@@ -163,13 +161,12 @@ __device__ double process_tree_pair_piece(
     double3* d_ref_local)  // output: accumulated gradient (modified in-place)
 {
     // Early exit: check if tree centers are too far apart
-    // Note: For non-crystal case, this is redundant with the check in overlap_ref_with_list_piece,
-    // but for crystal case (shifted positions), this check is still needed.
     double dx = other.x - ref.x;
     double dy = other.y - ref.y;
     double dist_sq = dx*dx + dy*dy;
+    double max_overlap_dist = 2.0 * MAX_RADIUS;
 
-    if (dist_sq > MAX_OVERLAP_DIST_SQ) {
+    if (dist_sq > max_overlap_dist * max_overlap_dist) {
         return 0.0;  // Trees too far apart to overlap
     }
 
@@ -321,17 +318,6 @@ __device__ double overlap_ref_with_list_piece(
         // If only_self_interactions is set, skip non-self interactions
         if (only_self_interactions && !is_self) {
             continue;
-        }
-
-        // Early exit: check if tree centers are too far apart (at tree level, not piece level)
-        // This check is done once per (ref, other) pair instead of once per piece pair
-        if (!use_crystal) {
-            double dx = other_base.x - ref.x;
-            double dy = other_base.y - ref.y;
-            double dist_sq = dx*dx + dy*dy;
-            if (dist_sq > MAX_OVERLAP_DIST_SQ) {
-                continue;  // Trees too far apart to overlap, skip all pieces
-            }
         }
 
         if (use_crystal) {
