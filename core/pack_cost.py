@@ -50,13 +50,17 @@ class Cost(kgs.BaseClass):
     def compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool=True):
         # Subclass can implement faster version with preallocated gradients
         self._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
-        cost *= self.scaling
-        if evaluate_gradient:
-            grad_xyt *= self.scaling
+        if self.scaling != 1.0:
+            cost *= self.scaling
+            if evaluate_gradient:
+                grad_xyt *= self.scaling
+                if sol.use_fixed_h:
+                    grad_bound[:] = 0
+                else:
+                    grad_bound *= self.scaling
+        else:
             if sol.use_fixed_h:
                 grad_bound[:] = 0
-            else:
-                grad_bound *= self.scaling
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
         # Subclass can implement faster version with preallocated gradients
@@ -120,9 +124,9 @@ class CostDummy(Cost):
 @dataclass
 class CollisionCost(Cost):
     use_lookup_table: bool = field(init=True, default=False)
-    lut_N_x: int = field(init=True, default=400)
-    lut_N_y: int = field(init=True, default=400)
-    lut_N_theta: int = field(init=True, default=400)
+    lut_N_x: int = field(init=True, default=700)
+    lut_N_y: int = field(init=True, default=700)
+    lut_N_theta: int = field(init=True, default=700)
     lut_trim_zeros: bool = field(init=True, default=True)
     _lut: 'pack_cuda_lut.LookupTable' = field(init=False, default=None, repr=False)
 
@@ -139,8 +143,6 @@ class CollisionCost(Cost):
                 trim_zeros=self.lut_trim_zeros,
                 verbose=True
             )
-            # Set the lookup table in pack_cuda_lut module
-            pack_cuda_lut.set_lookup_table(self._lut)
 
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
         # Compute collision cost for all pairs of trees
@@ -346,11 +348,12 @@ class CollisionCost(Cost):
             if self.use_lookup_table:
                 self._ensure_lut_initialized()
                 import pack_cuda_lut
+                # Pass LUT directly (fast - updates constants only if changed)
                 if evaluate_gradient:
-                    pack_cuda_lut.overlap_multi_ensemble(sol.xyt, cost, grad_xyt)
+                    pack_cuda_lut.overlap_multi_ensemble(sol.xyt, cost, self._lut, grad_xyt)
                     grad_bound[:] = 0
                 else:
-                    pack_cuda_lut.overlap_multi_ensemble(sol.xyt, cost)
+                    pack_cuda_lut.overlap_multi_ensemble(sol.xyt, cost, self._lut)
             else:
                 self._compute_cost_internal(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         else:

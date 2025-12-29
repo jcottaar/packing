@@ -195,6 +195,10 @@ def alter_diversity(ga, name, value):
 def set_size_setup(ga, name, value):
     ga.ga.ga_base.initializer.use_fixed_h_for_size_setup = value
 
+def use_lookup_table_rough(ga, name, value):
+    if value:
+        ga.rough_relaxers[0].cost.costs[2].use_lookup_table = True
+
 
 
 
@@ -224,27 +228,8 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
     
-    res.modifier_dict['use_fixed_h_for_size_setup'] = pm(False, lambda r:True, set_size_setup)
-    res.modifier_dict['always_allow_mate_with_better'] = pm(False, lambda r:False, set_ga_prop)
-    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.3,0.7), set_ga_prop)
-    res.modifier_dict['diversity_reset_threshold'] = pm(5./40, lambda r:r.uniform(3./40, 10./40), set_ga_prop)
-    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
-    res.modifier_dict['generate_extra'] = pm(0.4, lambda r:r.uniform(0.2,0.7), generate_extra)
-    res.modifier_dict['genotype_at'] = pm(1, lambda r:1, set_orchestrator_prop)
-    res.modifier_dict['remove_fine_1'] = pm(False, lambda r:False, remove_fine_1)
-    res.modifier_dict['remove_fine_2'] = pm(False, lambda r:False, remove_fine_2)
-
-    res.modifier_dict['reduce_h_threshold'] = pm(1e-5/40, lambda r:r.uniform(0.5e-5/40, 1.5e-5/40), set_ga_base_ga_prop)
-    res.modifier_dict['reduce_h_amount'] = pm(2e-3/np.sqrt(40), lambda r:r.uniform(1e-3/np.sqrt(40), 4e-3/np.sqrt(40)), set_ga_base_ga_prop)
-    res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:False, set_ga_base_ga_prop)
-
-    res.modifier_dict['population_size'] = pm(1., lambda r:r.uniform(0.75,1.25), scale_population_size)    
-    res.modifier_dict['prob_mate_own'] = pm(1., lambda r:r.uniform(0.5,0.9), set_ga_base_ga_prop)
-    res.modifier_dict['survival_rate'] = pm(0.074, lambda r:r.uniform(0.07,0.15), set_ga_base_ga_prop)
-    res.modifier_dict['elitism_fraction'] = pm(0.25, lambda r:r.uniform(0.1,0.4), set_ga_base_ga_prop)
-    res.modifier_dict['search_depth'] = pm(1., lambda r:r.uniform(0.5,1.), set_ga_base_ga_prop)
-    res.modifier_dict['diversity_criterion'] = pm(0.2, lambda r:r.uniform(0.1,0.3), set_ga_base_ga_prop)
-    res.modifier_dict['alter_diversity'] = pm(0, lambda r:1, alter_diversity)
+    res.modifier_dict['make_single'] = pm(False, lambda r:True, make_single)
+    res.modifier_dict['use_lookup_table_rough'] = pm(False, lambda r:r.choice([False,True]).item(), use_lookup_table_rough)
 
 
     return res

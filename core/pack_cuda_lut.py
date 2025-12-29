@@ -91,9 +91,6 @@ class LookupTable:
 
     def _prepare_gpu_resources(self):
         """Prepare device arrays and textures for GPU use."""
-        # Upload LUT to device (always needed for array mode)
-        self.lut_d = cp.asarray(self.vals, dtype=kgs.dtype_cp)
-
         # Create texture if texture mode enabled
         if self.use_texture:
             # Create 3D CUDA array for texture
@@ -123,6 +120,9 @@ class LookupTable:
                 normalizedCoords=0  # Use unnormalized coordinates
             )
             self.texture = cp.cuda.texture.TextureObject(res_desc, tex_desc)
+        else:
+            # Only create device array if not using texture
+            self.lut_d = cp.asarray(self.vals, dtype=kgs.dtype_cp)
 
     @classmethod
     def build_from_cost_function(
@@ -310,25 +310,10 @@ class LookupTable:
         return X_trim, Y_trim, theta_trim, vals_trim
 
 # Module setting to switch between array and texture modes
-# Set this before calling set_lookup_table() or reinitialize()
 USE_TEXTURE: bool = True
 
-# Active lookup table (set via set_lookup_table())
-_active_lut: LookupTable | None = None
-
-# Device-side LUT array (used in array mode)
-_lut_d: cp.ndarray | None = None
-
-# Texture object (used in texture mode)
-_texture: cp.cuda.texture.TextureObject | None = None
-_texture_array: cp.cuda.texture.CUDAarray | None = None
-
-# Legacy module-level arrays for backward compatibility
-# These are now deprecated in favor of set_lookup_table()
-LUT_X: np.ndarray | None = None
-LUT_Y: np.ndarray | None = None
-LUT_theta: np.ndarray | None = None
-LUT_vals: np.ndarray | None = None
+# Cache last LUT to avoid redundant constant memory updates
+_last_lut_id: int | None = None
 
 _CUDA_SRC = r"""
 extern "C" {
@@ -823,28 +808,6 @@ _multi_overlap_lut_kernel: cp.RawKernel | None = None
 _initialized: bool = False
 
 
-def set_lookup_table(lut: LookupTable) -> None:
-    """Set the active lookup table (fast - just updates pointers and constants).
-
-    Parameters
-    ----------
-    lut : LookupTable
-        Lookup table to use for overlap computation.
-        Must have GPU resources already prepared (done automatically in __post_init__).
-    """
-    global _active_lut, _raw_module
-
-    # Ensure kernel is compiled (one-time only)
-    _ensure_initialized()
-
-    # Set active LUT
-    _active_lut = lut
-
-    # Update constant memory with new grid parameters
-    # This is fast - no kernel recompilation needed
-    _update_lut_constants(lut)
-
-
 def _update_lut_constants(lut: LookupTable) -> None:
     """Update constant memory with LUT grid parameters (fast, no recompilation).
 
@@ -976,6 +939,7 @@ def _ensure_initialized() -> None:
 def overlap_multi_ensemble(
     xyt: cp.ndarray,
     out_cost: cp.ndarray,
+    lut: LookupTable,
     out_grads: cp.ndarray | None = None,
     stream: cp.cuda.Stream | None = None
 ) -> None:
@@ -987,17 +951,24 @@ def overlap_multi_ensemble(
         Pose arrays for trees. Must be C-contiguous.
     out_cost : cp.ndarray, shape (n_ensembles,)
         Preallocated array for output costs.
+    lut : LookupTable
+        Lookup table to use for overlap computation.
+        Must have GPU resources already prepared (done automatically in __post_init__).
     out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
         Preallocated array for gradients. If None, gradients are not computed.
         Gradients are computed analytically (non-texture mode only).
     stream : cp.cuda.Stream, optional
         CUDA stream for kernel execution.
     """
+    global _last_lut_id
+
     _ensure_initialized()
 
-    # Check that LUT is set
-    if _active_lut is None:
-        raise RuntimeError("No lookup table set. Call set_lookup_table() first.")
+    # Update constant memory only if LUT changed (cache by object ID)
+    lut_id = id(lut)
+    if _last_lut_id != lut_id:
+        _update_lut_constants(lut)
+        _last_lut_id = lut_id
 
     num_ensembles = xyt.shape[0]
     n_trees = xyt.shape[1]
@@ -1023,9 +994,9 @@ def overlap_multi_ensemble(
 
     out_grads_ptr = out_grads if out_grads is not None else np.intp(0)
 
-    # Get texture and LUT from active table
-    tex_handle = _active_lut.texture.ptr if USE_TEXTURE and _active_lut.texture is not None else np.uint64(0)
-    lut_d = _active_lut.lut_d
+    # Get texture and LUT from passed table
+    tex_handle = lut.texture.ptr if USE_TEXTURE and lut.texture is not None else np.uint64(0)
+    lut_d = lut.lut_d
 
     # Dynamic shared memory: n_trees * sizeof(double3) or float3
     # double3 = 24 bytes, float3 = 12 bytes
