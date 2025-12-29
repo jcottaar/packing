@@ -1259,15 +1259,16 @@ class Orchestrator(kgs.BaseClass):
         # relaxer.n_iterations = 30
         # relaxer.max_step = 1e-2
         # self.fine_relaxers.append(relaxer)
+
+        cost_fine =  copy.deepcopy(self.fitness_cost)
+        cost_fine.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
         relaxer = pack_dynamics.OptimizerBFGS()
-        relaxer.cost = copy.deepcopy(self.fitness_cost)
-        relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        relaxer.cost = cost_fine
         relaxer.n_iterations = 30
         relaxer.max_step = 1e-3 * np.sqrt(10)
         self.fine_relaxers.append(relaxer)
         relaxer = pack_dynamics.OptimizerBFGS()
-        relaxer.cost = copy.deepcopy(self.fitness_cost)
-        relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        relaxer.cost = cost_fine
         relaxer.n_iterations = 30
         relaxer.max_step = 1e-3
         self.fine_relaxers.append(relaxer)
