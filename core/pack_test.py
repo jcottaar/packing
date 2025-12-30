@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import pack_vis_sol
 import copy
 
-CUDA_float32 = False
+CUDA_float32 = True
 kgs.set_float32(CUDA_float32)
 pack_cuda._ensure_initialized()
 
@@ -34,6 +34,7 @@ def test_ga(regenerate_reference, do_resume):
     ga.ga = pack_ga3.GASinglePopulationOld()
     ga.n_generations = 5       
     ga.ga.N_trees_to_do = 10
+    ga.rough_relaxers[0].cost.costs[2].lut_N_theta = 50
     ga.ga.population_size = 100
     ga.ga.search_depth = 0.8
     ga.ga.elitism_fraction = 0.5

@@ -1248,6 +1248,7 @@ class Orchestrator(kgs.BaseClass):
         relaxer = pack_dynamics.OptimizerBFGS()
         relaxer.cost = copy.deepcopy(self.fitness_cost)
         relaxer.cost.costs[2] = pack_cost.CollisionCostOverlappingArea(scaling=1.)
+        relaxer.cost.costs[2].use_lookup_table = True
         relaxer.n_iterations = 80
         self.rough_relaxers.append(relaxer)
 
