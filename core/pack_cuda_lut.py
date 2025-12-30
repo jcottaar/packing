@@ -180,11 +180,13 @@ class LookupTable:
         vals: np.ndarray,
         verbose: bool = True
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Trim edge rows/columns that are all zeros.
+        """Trim edge rows/columns that are all zeros or negative.
 
-        Removes leading/trailing rows and columns along X and Y axes that
-        contain only zeros, while ensuring at least one zero row/column
-        remains for proper interpolation at the grid boundaries.
+        Since negative values get clamped to zero via max(0, val)^2 transform,
+        we can trim more aggressively. Removes leading/trailing rows and columns
+        along X and Y axes that contain only non-positive values, while ensuring
+        at least one row/column with non-positive values remains for proper
+        interpolation at the grid boundaries.
 
         Parameters
         ----------
@@ -202,34 +204,35 @@ class LookupTable:
         """
         N_x, N_y, N_theta = vals.shape
 
-        # Find non-zero ranges along X axis (collapse over Y and theta)
-        x_sums = np.sum(np.abs(vals), axis=(1, 2))  # (N_x,)
-        x_nonzero = np.where(x_sums > 0)[0]
+        # Find positive ranges along X axis (collapse over Y and theta)
+        # Trim tiles that only have non-positive values
+        x_max_vals = np.max(vals, axis=(1, 2))  # (N_x,) - max value in each X slice
+        x_positive = np.where(x_max_vals > 0)[0]
 
-        if len(x_nonzero) > 0:
-            x_start = max(0, x_nonzero[0] - 1)  # Keep one zero row before
-            x_end = min(N_x - 1, x_nonzero[-1] + 1)  # Keep one zero row after
+        if len(x_positive) > 0:
+            x_start = max(0, x_positive[0] - 1)  # Keep one non-positive row before
+            x_end = min(N_x - 1, x_positive[-1] + 1)  # Keep one non-positive row after
         else:
-            # All zeros - keep everything
+            # All non-positive - keep everything
             x_start, x_end = 0, N_x - 1
 
-        # Find non-zero ranges along Y axis (collapse over X and theta)
-        y_sums = np.sum(np.abs(vals), axis=(0, 2))  # (N_y,)
-        y_nonzero = np.where(y_sums > 0)[0]
+        # Find positive ranges along Y axis (collapse over X and theta)
+        y_max_vals = np.max(vals, axis=(0, 2))  # (N_y,) - max value in each Y slice
+        y_positive = np.where(y_max_vals > 0)[0]
 
-        if len(y_nonzero) > 0:
-            y_start = max(0, y_nonzero[0] - 1)
-            y_end = min(N_y - 1, y_nonzero[-1] + 1)
+        if len(y_positive) > 0:
+            y_start = max(0, y_positive[0] - 1)
+            y_end = min(N_y - 1, y_positive[-1] + 1)
         else:
             y_start, y_end = 0, N_y - 1
 
         # Theta is typically non-zero throughout, but check anyway
-        theta_sums = np.sum(np.abs(vals), axis=(0, 1))  # (N_theta,)
-        theta_nonzero = np.where(theta_sums > 0)[0]
+        theta_max_vals = np.max(vals, axis=(0, 1))  # (N_theta,)
+        theta_positive = np.where(theta_max_vals > 0)[0]
 
-        if len(theta_nonzero) > 0:
-            theta_start = theta_nonzero[0]  # Don't keep extra zeros for theta
-            theta_end = theta_nonzero[-1]
+        if len(theta_positive) > 0:
+            theta_start = theta_positive[0]  # Don't keep extra for theta
+            theta_end = theta_positive[-1]
         else:
             theta_start, theta_end = 0, N_theta - 1
 
@@ -246,7 +249,7 @@ class LookupTable:
             total_removed = (N_x * N_y * N_theta) - (len(X_trim) * len(Y_trim) * len(theta_trim))
             pct = 100 * total_removed / (N_x * N_y * N_theta)
 
-            print(f"Trimming zero edges:")
+            print(f"Trimming non-positive edges:")
             print(f"  X: {N_x} -> {len(X_trim)} (removed {removed_x})")
             print(f"  Y: {N_y} -> {len(Y_trim)} (removed {removed_y})")
             print(f"  Theta: {N_theta} -> {len(theta_trim)} (removed {removed_theta})")
