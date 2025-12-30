@@ -312,66 +312,6 @@ __device__ __forceinline__ double wrap_angle(double theta) {
     return theta;
 }
 
-// LUT lookup - uses global g_tex or g_lut depending on mode
-// Returns value only (for texture path or when gradients not needed)
-__device__ double lut_lookup(double x, double y, double theta)
-{
-
-    // Array-based trilinear interpolation with 8-point manual fetch
-    // Normalize to grid coordinates [0, N-1]
-    double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1);
-    double gy = (y - c_Y_min) / (c_Y_max - c_Y_min) * (c_N_y - 1);
-    double gt = (theta - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1);
-    
-    // Clamp to valid range
-    if (gx < 0.0) gx = 0.0;
-    if (gx > c_N_x - 1.0) gx = c_N_x - 1.0;
-    if (gy < 0.0) gy = 0.0;
-    if (gy > c_N_y - 1.0) gy = c_N_y - 1.0;
-    if (gt < 0.0) gt = 0.0;
-    if (gt > c_N_theta - 1.0) gt = c_N_theta - 1.0;
-    
-    // Integer indices
-    int ix0 = (int)floor(gx);
-    int iy0 = (int)floor(gy);
-    int it0 = (int)floor(gt);
-    
-    int ix1 = min(ix0 + 1, c_N_x - 1);
-    int iy1 = min(iy0 + 1, c_N_y - 1);
-    int it1 = min(it0 + 1, c_N_theta - 1);
-    
-    // Fractional parts
-    double fx = gx - ix0;
-    double fy = gy - iy0;
-    double ft = gt - it0;
-    
-    // Fetch 8 corner values
-    // Index: ix * (N_y * N_theta) + iy * N_theta + it
-    #define LUT_IDX(ix, iy, it) ((ix) * (c_N_y * c_N_theta) + (iy) * c_N_theta + (it))
-    
-    double v000 = g_lut[LUT_IDX(ix0, iy0, it0)];
-    double v001 = g_lut[LUT_IDX(ix0, iy0, it1)];
-    double v010 = g_lut[LUT_IDX(ix0, iy1, it0)];
-    double v011 = g_lut[LUT_IDX(ix0, iy1, it1)];
-    double v100 = g_lut[LUT_IDX(ix1, iy0, it0)];
-    double v101 = g_lut[LUT_IDX(ix1, iy0, it1)];
-    double v110 = g_lut[LUT_IDX(ix1, iy1, it0)];
-    double v111 = g_lut[LUT_IDX(ix1, iy1, it1)];
-    
-    #undef LUT_IDX
-    
-    // Trilinear interpolation
-    double v00 = v000 * (1.0 - ft) + v001 * ft;
-    double v01 = v010 * (1.0 - ft) + v011 * ft;
-    double v10 = v100 * (1.0 - ft) + v101 * ft;
-    double v11 = v110 * (1.0 - ft) + v111 * ft;
-    
-    double v0 = v00 * (1.0 - fy) + v01 * fy;
-    double v1 = v10 * (1.0 - fy) + v11 * fy;
-    
-    return v0 * (1.0 - fx) + v1 * fx;
-}
-
 
 // LUT lookup with analytical gradient (array mode only)
 // Returns value, and if d_out != NULL, also computes gradient w.r.t. (x, y, theta)
@@ -388,11 +328,21 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
         }
         return 0.0;
     }
+
+    double x_t;
+    double theta_t;
+    if (x >= 0.) {
+        x_t = x;
+        theta_t = theta;
+    } else {
+        x_t = -x;
+        theta_t = - theta;
+    }
     
     // Normalize to grid coordinates [0, N-1]
-    double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1);
+    double gx = (x_t - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1);
     double gy = (y - c_Y_min) / (c_Y_max - c_Y_min) * (c_N_y - 1);
-    double gt = (theta - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1);
+    double gt = (theta_t - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1);
     
     // Integer indices
     int ix0 = (int)floor(gx);
@@ -463,9 +413,22 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
         double scale_y = (double)(c_N_y - 1) / (c_Y_max - c_Y_min);
         double scale_t = (double)(c_N_theta - 1) / (c_theta_max - c_theta_min);
         
-        d_out->x = df_dfx * scale_x;
-        d_out->y = df_dfy * scale_y;
-        d_out->z = df_dft * scale_t;
+        double grad_x = df_dfx * scale_x;
+        double grad_y = df_dfy * scale_y;
+        double grad_z = df_dft * scale_t;
+        
+        // Apply symmetry transform to gradients
+        // If x < 0, we used (x_t = -x, theta_t = -theta)
+        // Chain rule: df/dx = df/dx_t * dx_t/dx = df/dx_t * (-1)
+        //             df/dtheta = df/dtheta_t * dtheta_t/dtheta = df/dtheta_t * (-1)
+        if (x < 0.0) {
+            grad_x = -grad_x;
+            grad_z = -grad_z;
+        }
+        
+        d_out->x = grad_x;
+        d_out->y = grad_y;
+        d_out->z = grad_z;
     }
     
     return value;
@@ -568,7 +531,7 @@ __device__ double overlap_ref_with_list(
             atomicAdd(&out_grads[i * 3 + 1], d_other_y);
             atomicAdd(&out_grads[i * 3 + 2], d_other_theta);
         } else {
-            double overlap = lut_lookup(dx_local, dy_local, dtheta);
+            double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, NULL);
             sum += overlap;
         }
     }
