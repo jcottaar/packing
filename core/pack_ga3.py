@@ -238,7 +238,8 @@ class GA(kgs.BaseClass):
 
     allow_reset: bool = field(init=True, default=True)
     allow_freeze: bool = field(init=True, default=False)
-    stop_check_generations: int = field(init=True, default=1000)
+    stop_check_generations: int = field(init=True, default=0)
+    stop_check_generations_scale: int = field(init=True, default=50) # scale with N_trees
     reset_check_generations: int = field(init=True, default=None)
     reset_check_generations_ratio: float = field(init=True, default=0.1)
     reset_check_threshold: float = field(init=True, default=0.1)
@@ -299,9 +300,9 @@ class GA(kgs.BaseClass):
         self._score(register_best)
         if register_best:
             assert(len(self.champions) == len(self.best_costs_per_generation))        
-            if not self.stop_check_generations is None:
+            if not self.stop_check_generations is None and len(self.champions)>0:
                 assert len(self.best_costs_per_generation)==1
-                effective_stop_check_generations = self.stop_check_generations
+                effective_stop_check_generations = self.stop_check_generations + self.champions[0].phenotype.N_trees * self.stop_check_generations_scale 
                 costs = self.best_costs_per_generation[0]          
                 if len(costs)>effective_stop_check_generations+2 and \
                         costs[-1][0]==costs[-effective_stop_check_generations][0] and \
