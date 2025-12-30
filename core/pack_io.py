@@ -24,6 +24,7 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
     import pack_ga3
     ga = pack_ga3.baseline()
     cost = copy.deepcopy(ga.fitness_cost)
+    cost.costs[2] = pack_cost.CollisionCostSeparation()
     #cost.costs[0].scaling*=0.1
     cost_overlap = copy.deepcopy(cost)
     cost_overlap.costs.pop(0)
