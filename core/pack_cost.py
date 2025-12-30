@@ -893,6 +893,19 @@ class CollisionCostExactSeparation(CollisionCost):
     Tree 1 is always at rotation 0 (never rotated).
     """
     
+    def _get_cache_filename(self):
+        """Generate cache filename based on LUT parameters."""
+        import hashlib
+        
+        # Create a string with all relevant parameters
+        param_str = f"exact_sep_Nx{self.lut_N_x}_Ny{self.lut_N_y}_Nt{self.lut_N_theta}_trim{self.lut_trim_zeros}"
+        
+        # Add a hash of the tree geometry (from kgs.tree_vertices) to ensure cache validity
+        tree_hash = hashlib.md5(kgs.tree_vertices.get().tobytes()).hexdigest()[:8]
+        param_str += f"_tree{tree_hash}"
+        
+        return f"{param_str}.lut_cache"
+    
     def _ensure_lut_initialized(self):
         """Initialize lookup table using pack_minkowski for exact separation computation."""
         if not self.use_lookup_table:
@@ -901,6 +914,25 @@ class CollisionCostExactSeparation(CollisionCost):
         if self._lut is None:
             import pack_cuda_lut
             import pack_minkowski as mink
+            import os
+            import pickle
+            
+            # Set up cache directory and filename
+            cache_dir = kgs.temp_dir + '/lut_cache/'
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_path = cache_dir + self._get_cache_filename()
+            
+            # Try to load from cache
+            if os.path.exists(cache_path):
+                try:
+                    print(f"Loading cached lookup table from {cache_path}...")
+                    with open(cache_path, 'rb') as f:
+                        self._lut = pickle.load(f)
+                    print(f"Successfully loaded cached lookup table")
+                    return
+                except Exception as e:
+                    print(f"Warning: Failed to load cache ({e}), rebuilding...")
+            
             print(f"Building lookup table for {self.__class__.__name__} using Minkowski difference...")
             
             # Create wrapper function using pack_minkowski
@@ -942,6 +974,12 @@ class CollisionCostExactSeparation(CollisionCost):
             # Enable per-pair quadratic transform in kernel
             lut.apply_quadratic_transform = True
             self._lut = lut
+            
+            # Save to cache
+            print(f"Saving lookup table to cache: {cache_path}...")
+            with open(cache_path, 'wb') as f:
+                pickle.dump(lut, f)
+            print(f"Successfully cached lookup table")
     
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
         """Not implemented - this class requires lookup table."""
