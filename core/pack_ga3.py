@@ -678,7 +678,7 @@ class GASinglePopulation(GA):
     fixed_h: float = field(init=True, default=-1.)
     reduce_h_threshold: float = field(init=True, default=1e-5/40) # scaled by N_trees
     reduce_h_amount: float = field(init=True, default=2e-3/np.sqrt(40)) # scaled by sqrt(N_trees)
-    reduce_h_per_individual: bool = field(init=True, default=True)
+    reduce_h_per_individual: bool = field(init=True, default=False)
 
     plot_diversity_ax = None
     plot_diversity_alt_ax = None
@@ -1243,27 +1243,16 @@ class Orchestrator(kgs.BaseClass):
     def __post_init__(self):        
         self.fitness_cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-2), 
                             pack_cost.BoundaryDistanceCost(scaling=1.), 
-                            pack_cost.CollisionCostSeparation(scaling=1.)])
+                            pack_cost.CollisionCostExactSeparation(scaling=1., use_lookup_table=True)])
         
         self.rough_relaxers = []
         relaxer = pack_dynamics.OptimizerBFGS()
-        relaxer.cost = copy.deepcopy(self.fitness_cost)
-        relaxer.cost.costs[2] = pack_cost.CollisionCostOverlappingArea(scaling=1.)
-        relaxer.cost.costs[2].use_lookup_table = True
+        relaxer.cost = self.fitness_cost
         relaxer.n_iterations = 80
         self.rough_relaxers.append(relaxer)
 
-
         self.fine_relaxers = []
-        # relaxer = pack_dynamics.OptimizerBFGS()
-        # relaxer.cost = copy.deepcopy(self.fitness_cost)
-        # relaxer.cost.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
-        # relaxer.n_iterations = 30
-        # relaxer.max_step = 1e-2
-        # self.fine_relaxers.append(relaxer)
-
-        cost_fine =  copy.deepcopy(self.fitness_cost)
-        cost_fine.costs[2] = pack_cost.CollisionCostSeparation(scaling=1.)
+        cost_fine =  self.fitness_cost
         relaxer = pack_dynamics.OptimizerBFGS()
         relaxer.cost = cost_fine
         relaxer.n_iterations = 30
@@ -1273,6 +1262,11 @@ class Orchestrator(kgs.BaseClass):
         relaxer.cost = cost_fine
         relaxer.n_iterations = 30
         relaxer.max_step = 1e-3
+        self.fine_relaxers.append(relaxer)
+        relaxer = pack_dynamics.OptimizerBFGS()
+        relaxer.cost = cost_fine
+        relaxer.n_iterations = 30 
+        relaxer.max_step = 1e-3 / np.sqrt(10)
         self.fine_relaxers.append(relaxer)
 
         super().__post_init__()

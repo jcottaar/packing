@@ -240,8 +240,8 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
     
-    res.modifier_dict['make_single'] = pm(False, lambda r:True, make_single)
-    res.modifier_dict['use_minkowski_rough'] = pm(False, lambda r:r.choice([False,True]).item(), use_minkowski_rough)
+    res.modifier_dict['make_single'] = pm(False, lambda r:False, make_single)
+    #res.modifier_dict['use_minkowski_rough'] = pm(False, lambda r:r.choice([False,True]).item(), use_minkowski_rough)
     #res.modifier_dict['use_lookup_table_fine'] = pm(False, lambda r:r.choice([False,True]).item(), use_lookup_table_fine)
 
 
