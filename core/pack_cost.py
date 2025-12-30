@@ -135,8 +135,42 @@ class CollisionCost(Cost):
         if self.use_lookup_table and self._lut is None:
             import pack_cuda_lut
             print(f"Building lookup table for {self.__class__.__name__}...")
-            self._lut = pack_cuda_lut.LookupTable.build_from_cost_function(
-                cost_fn=self,
+            
+            # Create wrapper function that matches the expected signature
+            def eval_fn(dx: np.ndarray, dy: np.ndarray, theta: float) -> np.ndarray:
+                """Evaluate cost for array of (dx, dy) positions at given theta."""
+                N = len(dx)
+                
+                # Create solution with 2 trees:
+                # Tree 0: at origin (0, 0, 0)
+                # Tree 1: at (dx, dy, theta)
+                xyt = np.zeros((N, 2, 3), dtype=np.float32)
+                xyt[:, 1, 0] = dx
+                xyt[:, 1, 1] = dy
+                xyt[:, 1, 2] = theta
+                
+                xyt_cp = cp.asarray(xyt)
+                
+                # Create solution collection
+                sol = kgs.SolutionCollectionSquare()
+                sol.xyt = xyt_cp
+                # Large boundary to avoid clipping
+                sol.h = cp.tile(cp.array([[10., 0., 0.]], dtype=cp.float32), (N, 1))
+                sol.check_constraints()
+                
+                # Temporarily disable LUT to avoid infinite recursion
+                saved_use_lut = self.use_lookup_table
+                self.use_lookup_table = False
+                
+                try:
+                    # Compute costs
+                    costs, _, _ = self.compute_cost_allocate(sol, evaluate_gradient=False)
+                    return costs.get()
+                finally:
+                    self.use_lookup_table = saved_use_lut
+            
+            self._lut = pack_cuda_lut.LookupTable.build_from_function(
+                eval_fn=eval_fn,
                 N_x=self.lut_N_x,
                 N_y=self.lut_N_y,
                 N_theta=self.lut_N_theta,

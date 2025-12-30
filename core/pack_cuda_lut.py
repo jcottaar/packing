@@ -91,9 +91,9 @@ class LookupTable:
         self.lut_d = cp.asarray(self.vals, dtype=kgs.dtype_cp)
 
     @classmethod
-    def build_from_cost_function(
+    def build_from_function(
         cls,
-        cost_fn,
+        eval_fn,
         X: Optional[np.ndarray] = None,
         Y: Optional[np.ndarray] = None,
         theta: Optional[np.ndarray] = None,
@@ -103,14 +103,15 @@ class LookupTable:
         trim_zeros: bool = True,
         verbose: bool = True
     ) -> 'LookupTable':
-        """Build lookup table by evaluating cost function on grid.
+        """Build lookup table by evaluating a function on grid.
 
         Parameters
         ----------
-        cost_fn : Cost
-            Cost function to evaluate (e.g., CollisionCostOverlappingArea)
-            Note: If cost_fn has use_lookup_table=True, it will be temporarily
-            disabled during LUT building to avoid infinite recursion.
+        eval_fn : callable
+            Function with signature: eval_fn(dx: np.ndarray, dy: np.ndarray, theta: float) -> np.ndarray
+            - dx, dy: (N,) arrays of relative positions
+            - theta: scalar rotation angle
+            - Returns: (N,) array of cost values
         X, Y, theta : np.ndarray, optional
             Grid coordinates. If None, reasonable defaults based on tree size.
         N_x, N_y, N_theta : int
@@ -126,74 +127,49 @@ class LookupTable:
         LookupTable
             Built lookup table
         """
-        # Temporarily disable LUT usage to avoid infinite recursion
-        saved_use_lut = getattr(cost_fn, 'use_lookup_table', False)
-        if hasattr(cost_fn, 'use_lookup_table'):
-            cost_fn.use_lookup_table = False
+        # Set default grids if not provided
+        if X is None:
+            X = np.linspace(-2*MAX_RADIUS, 2*MAX_RADIUS, N_x, dtype=np.float32)
+            X = X[N_x//2-1:]  # Use only non-negative X due to symmetry
+            assert(X[0]<0) # Take one negative one to avoid edge issues
+        if Y is None:
+            Y = np.linspace(-2*MAX_RADIUS, 2*MAX_RADIUS, N_y, dtype=np.float32)
+        if theta is None:
+            theta = np.linspace(-np.pi, np.pi, N_theta, dtype=np.float32)
 
-        try:
-            # Set default grids if not provided
-            if X is None:
-                X = np.linspace(-2*MAX_RADIUS, 2*MAX_RADIUS, N_x, dtype=np.float32)
-                X = X[N_x//2-1:]  # Use only non-negative X due to symmetry
-                assert(X[0]<0) # Take one negative one to avoid edge issues
-            if Y is None:
-                Y = np.linspace(-2*MAX_RADIUS, 2*MAX_RADIUS, N_y, dtype=np.float32)
-            if theta is None:
-                theta = np.linspace(-np.pi, np.pi, N_theta, dtype=np.float32)
+        N_x, N_y, N_theta = len(X), len(Y), len(theta)
 
-            N_x, N_y, N_theta = len(X), len(Y), len(theta)
+        if verbose:
+            print(f"Building LUT: {N_x} x {N_y} x {N_theta} = {N_x*N_y*N_theta:,} grid points")
 
-            if verbose:
-                print(f"Building LUT: {N_x} x {N_y} x {N_theta} = {N_x*N_y*N_theta:,} grid points")
+        # Build LUT by looping over theta values to save memory
+        vals = np.zeros((N_x, N_y, N_theta), dtype=np.float32)
 
-            # Build LUT by looping over theta values to save memory
-            vals = np.zeros((N_x, N_y, N_theta), dtype=np.float32)
+        for t_idx, t_val in enumerate(theta):
+            if verbose and t_idx % 50 == 0:
+                print(f"  Processing theta {t_idx+1}/{N_theta}")
 
-            for t_idx, t_val in enumerate(theta):
-                if verbose and t_idx % 50 == 0:
-                    print(f"  Processing theta {t_idx+1}/{N_theta}")
+            # Create meshgrid for this theta slice
+            dx_grid, dy_grid = np.meshgrid(X, Y, indexing='ij')
+            
+            # Flatten to 1D arrays
+            dx_flat = dx_grid.ravel()
+            dy_flat = dy_grid.ravel()
+            
+            # Call the evaluation function
+            costs = eval_fn(dx_flat, dy_flat, t_val)
+            
+            # Store in LUT (reshape from flat to (N_x, N_y))
+            vals[:, :, t_idx] = costs.reshape(N_x, N_y)
 
-                # Create meshgrid for this theta slice
-                dx_grid, dy_grid = np.meshgrid(X, Y, indexing='ij')
-                N_individuals = N_x * N_y
+        if verbose:
+            print(f"Cost range: [{vals.min():.6f}, {vals.max():.6f}]")
 
-                # Create solution with 2 trees:
-                # Tree 0: at origin (0, 0, 0)
-                # Tree 1: at (dx, dy, t_val)
-                xyt_slice = np.zeros((N_individuals, 2, 3), dtype=np.float32)
-                xyt_slice[:, 1, 0] = dx_grid.ravel()
-                xyt_slice[:, 1, 1] = dy_grid.ravel()
-                xyt_slice[:, 1, 2] = t_val
+        # Trim zeros if requested
+        if trim_zeros:
+            X, Y, theta, vals = cls._trim_zero_edges(X, Y, theta, vals, verbose=verbose)
 
-                xyt_slice_cp = cp.asarray(xyt_slice)
-
-                # Create solution collection
-                sol_slice = kgs.SolutionCollectionSquare()
-                sol_slice.xyt = xyt_slice_cp
-                # Large boundary to avoid clipping
-                sol_slice.h = cp.tile(cp.array([[10., 0., 0.]], dtype=cp.float32), (N_individuals, 1))
-                sol_slice.check_constraints()
-
-                # Compute costs
-                costs, _, _ = cost_fn.compute_cost_allocate(sol_slice, evaluate_gradient=False)
-                costs_np = costs.get()
-
-                # Store in LUT (reshape from flat to (N_x, N_y))
-                vals[:, :, t_idx] = costs_np.reshape(N_x, N_y)
-
-            if verbose:
-                print(f"Cost range: [{vals.min():.6f}, {vals.max():.6f}]")
-
-            # Trim zeros if requested
-            if trim_zeros:
-                X, Y, theta, vals = cls._trim_zero_edges(X, Y, theta, vals, verbose=verbose)
-
-            return cls(X=X, Y=Y, theta=theta, vals=vals)
-        finally:
-            # Restore original setting
-            if hasattr(cost_fn, 'use_lookup_table'):
-                cost_fn.use_lookup_table = saved_use_lut
+        return cls(X=X, Y=Y, theta=theta, vals=vals)
 
     @staticmethod
     def _trim_zero_edges(
