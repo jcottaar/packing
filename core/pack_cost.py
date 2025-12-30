@@ -931,7 +931,7 @@ class CollisionCostExactSeparation(CollisionCost):
                 # _compute_cost() will apply the max(0, sep)^2 transform
                 return sep_distances.astype(np.float32)
             
-            self._lut = pack_cuda_lut.LookupTable.build_from_function(
+            lut = pack_cuda_lut.LookupTable.build_from_function(
                 eval_fn=eval_fn,
                 N_x=self.lut_N_x,
                 N_y=self.lut_N_y,
@@ -939,6 +939,9 @@ class CollisionCostExactSeparation(CollisionCost):
                 trim_zeros=self.lut_trim_zeros,
                 verbose=True
             )
+            # Enable per-pair quadratic transform in kernel
+            lut.apply_quadratic_transform = True
+            self._lut = lut
     
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
         """Not implemented - this class requires lookup table."""
@@ -961,36 +964,16 @@ class CollisionCostExactSeparation(CollisionCost):
         """
         Compute cost from exact Minkowski separation with quadratic penalty for overlap.
         
-        Cost = max(0, separation)^2 where separation > 0 means overlap (penetration depth).
-        The LUT stores raw separation distances, this method applies the quadratic transform.
+        Cost = sum over pairs of max(0, separation)^2 where separation > 0 means overlap.
+        The LUT stores raw separation distances, and the kernel applies max(0, sep)^2 per-pair.
         """
         # Assert we're using lookup table
         assert self.use_lookup_table, f"{self.__class__.__name__} requires use_lookup_table=True"
         assert not sol.periodic, f"{self.__class__.__name__} does not support periodic boundaries yet"
         
-        # Get raw separation distances from LUT directly into output buffers
+        # Kernel applies quadratic transform per-pair (controlled by LUT.apply_quadratic_transform)
+        # No post-processing needed - cost and gradients are already transformed
         super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
-        
-        # Now cost contains raw separation distances (sep)
-        # Transform: cost_new = max(0, sep)^2
-        overlapping = cost > 0
-        
-        if evaluate_gradient:
-            # Compute scale factor before modifying cost
-            # Gradient: d/dx[max(0, sep)^2] = 2 * max(0, sep) * d/dx[sep]
-            # scale_factor = 2 * sep for overlapping, 0 otherwise
-            scale_factor = cp.where(overlapping, 2.0 * cost, 0.0)
-            
-            # Transform gradients in place
-            # grad_xyt has shape (N_solutions, N_trees, 3)
-            # scale_factor has shape (N_solutions,)
-            grad_xyt *= scale_factor[:, None, None]
-            
-            # grad_bound has shape (N_solutions, N_h_DOF)
-            grad_bound *= scale_factor[:, None]
-        
-        # Transform cost in place (do this last since we needed raw cost for scale_factor)
-        cost[:] = cp.where(overlapping, cost * cost, 0.0)
         
     
 

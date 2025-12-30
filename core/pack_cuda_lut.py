@@ -54,6 +54,7 @@ class LookupTable:
     Y: np.ndarray
     theta: np.ndarray
     vals: np.ndarray
+    apply_quadratic_transform: bool = False  # If True, apply max(0, val)^2 per-pair
 
     # GPU resources (created in __post_init__)
     lut_d: cp.ndarray = None
@@ -279,6 +280,9 @@ __constant__ double c_grid_dx;
 __constant__ double c_grid_dy;
 __constant__ double c_grid_dtheta;
 
+// Transform flag (updated when LUT changes)
+__constant__ int c_apply_quadratic_transform;  // If non-zero, apply max(0, val)^2 per-pair
+
 // Global device state - set once by the kernel, used by all device functions
 __device__ const double* g_lut;           // LUT array pointer (array mode)
 __device__ cudaTextureObject_t g_tex;     // texture object (texture mode)
@@ -462,6 +466,23 @@ __device__ double overlap_ref_with_list(
             // Get value and gradient w.r.t. local coords
             double3 d_local;  // gradient w.r.t. (dx_local, dy_local, dtheta)
             double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, &d_local);
+            
+            // Apply quadratic transform if enabled: overlap_transformed = max(0, overlap)^2
+            if (c_apply_quadratic_transform) {
+                if (overlap > 0.0) {
+                    // Transform gradients: d[overlap^2]/dx = 2*overlap * d[overlap]/dx
+                    d_local.x *= 2.0 * overlap;
+                    d_local.y *= 2.0 * overlap;
+                    d_local.z *= 2.0 * overlap;
+                    overlap = overlap * overlap;
+                } else {
+                    overlap = 0.0;
+                    d_local.x = 0.0;
+                    d_local.y = 0.0;
+                    d_local.z = 0.0;
+                }
+            }
+            
             sum += overlap;
             
             // ===== Gradient w.r.t. ref =====
@@ -510,6 +531,16 @@ __device__ double overlap_ref_with_list(
             atomicAdd(&out_grads[i * 3 + 2], d_other_theta);
         } else {
             double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, NULL);
+            
+            // Apply quadratic transform if enabled: overlap_transformed = max(0, overlap)^2
+            if (c_apply_quadratic_transform) {
+                if (overlap > 0.0) {
+                    overlap = overlap * overlap;
+                } else {
+                    overlap = 0.0;
+                }
+            }
+            
             sum += overlap;
         }
     }
@@ -661,6 +692,9 @@ def _update_lut_constants(lut: LookupTable) -> None:
     set_constant('c_grid_dx', lut.grid_dx, dtype)
     set_constant('c_grid_dy', lut.grid_dy, dtype)
     set_constant('c_grid_dtheta', lut.grid_dtheta, dtype)
+    
+    # Update transform flag
+    set_constant('c_apply_quadratic_transform', 1 if lut.apply_quadratic_transform else 0, np.int32)
 
 
 def _ensure_initialized() -> None:
