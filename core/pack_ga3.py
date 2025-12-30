@@ -1232,7 +1232,7 @@ class Orchestrator(kgs.BaseClass):
     diagnostic_plot: bool = field(init=True, default=False)
     plot_every: int = field(init=True, default=1)
     filename: str = field(init=True, default='')
-    save_every: int = field(init=True, default=10)
+    save_every: int = field(init=True, default=50)
     use_atomic_save: bool = field(init=True, default=True)
 
     # Intermediate
