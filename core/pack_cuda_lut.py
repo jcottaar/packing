@@ -135,6 +135,8 @@ class LookupTable:
             # Set default grids if not provided
             if X is None:
                 X = np.linspace(-2*MAX_RADIUS, 2*MAX_RADIUS, N_x, dtype=np.float32)
+                X = X[N_x//2-1:]  # Use only non-negative X due to symmetry
+                assert(X[0]<0) # Take one negative one to avoid edge issues
             if Y is None:
                 Y = np.linspace(-2*MAX_RADIUS, 2*MAX_RADIUS, N_y, dtype=np.float32)
             if theta is None:
@@ -318,7 +320,7 @@ __device__ __forceinline__ double wrap_angle(double theta) {
 __device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out)
 {
     // Early exit if outside LUT range - return 0 cost and gradient
-    if (x < c_X_min || x > c_X_max ||
+    if (x < -c_X_max || x > c_X_max ||
         y < c_Y_min || y > c_Y_max ||
         theta < c_theta_min || theta > c_theta_max) {
         if (d_out != NULL) {

@@ -124,9 +124,9 @@ class CostDummy(Cost):
 @dataclass
 class CollisionCost(Cost):
     use_lookup_table: bool = field(init=True, default=False)
-    lut_N_x: int = field(init=True, default=700)
-    lut_N_y: int = field(init=True, default=700)
-    lut_N_theta: int = field(init=True, default=700)
+    lut_N_x: int = field(init=True, default=900)
+    lut_N_y: int = field(init=True, default=900)
+    lut_N_theta: int = field(init=True, default=900)
     lut_trim_zeros: bool = field(init=True, default=True)
     _lut: 'pack_cuda_lut.LookupTable' = field(init=False, default=None, repr=False)
 
