@@ -196,12 +196,15 @@ def set_size_setup(ga, name, value):
     ga.ga.ga_base.initializer.use_fixed_h_for_size_setup = value
 
 def use_lookup_table_rough(ga, name, value):
-    if value:
-        ga.rough_relaxers[0].cost.costs[2].use_lookup_table = True
+    ga.rough_relaxers[0].cost.costs[2].use_lookup_table = value
 def use_lookup_table_fine(ga, name, value):
+    for r in ga.fine_relaxers:
+        r.cost.costs[2].use_lookup_table = value
+
+def use_minkowski(ga, name, value):
     if value:
-        for r in ga.fine_relaxers:
-            r.cost.costs[2].use_lookup_table = True
+        ga.rough_relaxers[0].cost.costs[2] = pack_cost.CollisionCostExactSeparation()
+        ga.rough_relaxers[0].cost.costs[2].use_lookup_table = True
 
 
 
@@ -232,8 +235,8 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
     
-    #res.modifier_dict['make_single'] = pm(False, lambda r:True, make_single)
-    #res.modifier_dict['use_lookup_table_rough'] = pm(False, lambda r:r.choice([False,True]).item(), use_lookup_table_rough)
+    res.modifier_dict['make_single'] = pm(False, lambda r:True, make_single)
+    res.modifier_dict['use_minkowski_rough'] = pm(False, lambda r:r.choice([False,True]).item(), use_minkowski)
     #res.modifier_dict['use_lookup_table_fine'] = pm(False, lambda r:r.choice([False,True]).item(), use_lookup_table_fine)
 
 

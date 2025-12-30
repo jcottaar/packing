@@ -244,23 +244,20 @@ def separation_distance(tree1_pos: tuple, tree2_pos: np.ndarray, theta2: float) 
     else:
         boundary = forbidden_zone.exterior
     
-    # Use shapely's prepared geometry for faster contains checks
-    from shapely.prepared import prep
-    prepared_zone = prep(forbidden_zone)
+    # Vectorized computation using shapely's array operations
+    from shapely import points, contains, distance as shapely_distance
     
-    # Vectorized computation using shapely
-    results = np.empty(N, dtype=np.float64)
+    # Create array of points (vectorized)
+    point_array = points(dx, dy)
     
-    for i in range(N):
-        rel_point = Point(dx[i], dy[i])
-        dist_to_boundary = rel_point.distance(boundary)
-        
-        if prepared_zone.contains(rel_point):
-            # Overlapping - penetration depth (positive)
-            results[i] = dist_to_boundary
-        else:
-            # Not overlapping - clearance (negative)
-            results[i] = -dist_to_boundary
+    # Vectorized contains check
+    inside = contains(forbidden_zone, point_array)
+    
+    # Vectorized distance computation to boundary
+    distances = shapely_distance(point_array, boundary)
+    
+    # Apply sign: positive if inside (overlap), negative if outside (clearance)
+    results = np.where(inside, distances, -distances)
     
     return results if N > 1 else results[0]
 
