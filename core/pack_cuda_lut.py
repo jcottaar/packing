@@ -589,15 +589,12 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
 
 // Compute total overlap of ref tree with all trees in xyt list using LUT
 // Returns sum of overlaps
-// If compute_grads is non-zero, accumulates gradients:
-//   - d_ref: gradient w.r.t. ref pose (accumulated directly)
-//   - out_grads: gradient w.r.t. all other poses (accumulated via atomicAdd)
+// If compute_grads is non-zero, accumulates gradients to out_grads via atomicAdd for all trees
 __device__ double overlap_ref_with_list(
     const double3 ref,
     const double3* __restrict__ s_trees,  // shared memory: [n] tree poses
     const int n,
-    const int skip_index,                 // index to skip (self), use -1 to skip none
-    double3* d_ref,                        // output: gradient w.r.t. ref (accumulated), can be NULL
+    const int ref_index,                  // index of ref tree (skips self, accumulates gradients here)
     double* __restrict__ out_grads,        // output: gradients for all trees [n*3], can be NULL
     const int compute_grads)               // if non-zero, compute gradients
 {
@@ -610,9 +607,9 @@ __device__ double overlap_ref_with_list(
     // Max distance for overlap check
     double max_dist_sq = 4.0 * MAX_RADIUS * MAX_RADIUS;
     
-    for (int i = 0; i < n; ++i) {
+    for (int i = ref_index; i < n; ++i) {
         // Skip self
-        if (i == skip_index) continue;
+        if (i == ref_index) continue;
         
         // Read other tree pose from shared memory
         double3 other = s_trees[i];
@@ -636,7 +633,7 @@ __device__ double overlap_ref_with_list(
         double dtheta = wrap_angle(other_theta - ref.z);
         
         // Compute value and optionally gradients (both texture and array paths use lut_lookup_with_grad)
-        if (compute_grads && d_ref != NULL && out_grads != NULL) {
+        if (compute_grads && out_grads != NULL) {
             // Get value and gradient w.r.t. local coords
             double3 d_local;  // gradient w.r.t. (dx_local, dy_local, dtheta)
             double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, &d_local);
@@ -658,9 +655,14 @@ __device__ double overlap_ref_with_list(
             //   d(dtheta)/d(ref.theta) = -1
             //   => d_local.x * dy_local - d_local.y * dx_local - d_local.z
             
-            d_ref->x += -d_local.x * c_ref + d_local.y * s_ref;
-            d_ref->y += -d_local.x * s_ref - d_local.y * c_ref;
-            d_ref->z += d_local.x * dy_local - d_local.y * dx_local - d_local.z;
+            double d_ref_x = -d_local.x * c_ref + d_local.y * s_ref;
+            double d_ref_y = -d_local.x * s_ref - d_local.y * c_ref;
+            double d_ref_z = d_local.x * dy_local - d_local.y * dx_local - d_local.z;
+            
+            // Accumulate to ref's gradient using atomicAdd
+            atomicAdd(&out_grads[ref_index * 3 + 0], d_ref_x);
+            atomicAdd(&out_grads[ref_index * 3 + 1], d_ref_y);
+            atomicAdd(&out_grads[ref_index * 3 + 2], d_ref_z);
             
             // ===== Gradient w.r.t. other =====
             // dx_world = other_x - ref.x => d(dx_world)/d(other.x) = +1
@@ -678,9 +680,9 @@ __device__ double overlap_ref_with_list(
             double d_other_theta = d_local.z;
             
             // Accumulate to other's gradient using atomicAdd
-            atomicAdd(&out_grads[i * 3 + 0], d_other_x/2.0);
-            atomicAdd(&out_grads[i * 3 + 1], d_other_y/2.0);
-            atomicAdd(&out_grads[i * 3 + 2], d_other_theta/2.0);
+            atomicAdd(&out_grads[i * 3 + 0], d_other_x);
+            atomicAdd(&out_grads[i * 3 + 1], d_other_y);
+            atomicAdd(&out_grads[i * 3 + 2], d_other_theta);
         } else {
             double overlap = lut_lookup(dx_local, dy_local, dtheta);
             sum += overlap;
@@ -722,28 +724,16 @@ __device__ void overlap_list_total(
     // Determine if we need gradients
     int compute_grads = (out_grads != NULL) ? 1 : 0;
     
-    // Initialize gradient for this tree
-    double3 d_ref_local = {0.0, 0.0, 0.0};
-    
     // Compute overlap sum for this ref tree against all others
     // Skip self (tree_idx)
-    // This also accumulates gradients to both ref (via d_ref_local) and
-    // to other trees (via atomicAdd to out_grads)
+    // This also accumulates gradients to all trees (including ref) via atomicAdd to out_grads
     double local_sum = overlap_ref_with_list(
         ref, s_trees, n, tree_idx,
-        compute_grads ? &d_ref_local : NULL,
         out_grads,
         compute_grads);
     
     // Divide by 2 since each pair counted twice
-    atomicAdd(out_total, local_sum / 2.0);
-    
-    // Write ref's gradient using atomicAdd (other threads may also contribute)
-    if (compute_grads && out_grads != NULL) {
-        atomicAdd(&out_grads[tree_idx * 3 + 0], d_ref_local.x/2.0);
-        atomicAdd(&out_grads[tree_idx * 3 + 1], d_ref_local.y/2.0);
-        atomicAdd(&out_grads[tree_idx * 3 + 2], d_ref_local.z/2.0);
-    }
+    atomicAdd(out_total, local_sum);
 }
 
 // Multi-ensemble kernel: one block per ensemble
