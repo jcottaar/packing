@@ -12,6 +12,7 @@ Two modes are available:
   Faster but uses 9-bit fixed-point for interpolation weights (~0.2% precision).
   Gradients computed via 1-sided finite differences (step = grid_size/4).
   Results will differ slightly from array mode due to hardware precision limits.
+  (REMOVED FOR NOW)
 """
 from __future__ import annotations
 
@@ -47,20 +48,15 @@ class LookupTable:
         Theta coordinates of grid points (relative rotation, radians)
     vals : np.ndarray, shape (N_x, N_y, N_theta)
         Overlap values at grid points
-    use_texture : bool
-        Whether to use texture mode (must match module USE_TEXTURE setting)
     """
 
     X: np.ndarray
     Y: np.ndarray
     theta: np.ndarray
     vals: np.ndarray
-    use_texture: bool = True
 
     # GPU resources (created in __post_init__)
     lut_d: cp.ndarray = None
-    texture: cp.cuda.texture.TextureObject = None
-    texture_array: cp.cuda.texture.CUDAarray = None
 
     def __post_init__(self):
         """Validate shapes and precompute grid parameters + GPU resources."""
@@ -91,38 +87,8 @@ class LookupTable:
 
     def _prepare_gpu_resources(self):
         """Prepare device arrays and textures for GPU use."""
-        # Create texture if texture mode enabled
-        if self.use_texture:
-            # Create 3D CUDA array for texture
-            # Shape must be (depth, height, width) = (N_theta, N_y, N_x)
-            lut_f32 = self.vals.astype(np.float32)
-            # CuPy texture requires (depth, height, width) ordering
-            # Our vals is (N_x, N_y, N_theta), so transpose to (N_theta, N_y, N_x)
-            lut_for_tex = np.transpose(lut_f32, (2, 1, 0)).copy()
-
-            # Create CUDA array
-            self.texture_array = cp.cuda.texture.CUDAarray(
-                cp.cuda.texture.ChannelFormatDescriptor(32, 0, 0, 0, cp.cuda.runtime.cudaChannelFormatKindFloat),
-                lut_for_tex.shape[2], lut_for_tex.shape[1], lut_for_tex.shape[0]
-            )
-            self.texture_array.copy_from(lut_for_tex)
-
-            # Create texture object with trilinear filtering
-            res_desc = cp.cuda.texture.ResourceDescriptor(
-                cp.cuda.runtime.cudaResourceTypeArray, cuArr=self.texture_array
-            )
-            tex_desc = cp.cuda.texture.TextureDescriptor(
-                addressModes=(cp.cuda.runtime.cudaAddressModeClamp,
-                             cp.cuda.runtime.cudaAddressModeClamp,
-                             cp.cuda.runtime.cudaAddressModeClamp),
-                filterMode=cp.cuda.runtime.cudaFilterModeLinear,
-                readMode=cp.cuda.runtime.cudaReadModeElementType,
-                normalizedCoords=0  # Use unnormalized coordinates
-            )
-            self.texture = cp.cuda.texture.TextureObject(res_desc, tex_desc)
-        else:
-            # Only create device array if not using texture
-            self.lut_d = cp.asarray(self.vals, dtype=kgs.dtype_cp)
+        # Only create device array if not using texture
+        self.lut_d = cp.asarray(self.vals, dtype=kgs.dtype_cp)
 
     @classmethod
     def build_from_cost_function(
@@ -221,7 +187,7 @@ class LookupTable:
             if trim_zeros:
                 X, Y, theta, vals = cls._trim_zero_edges(X, Y, theta, vals, verbose=verbose)
 
-            return cls(X=X, Y=Y, theta=theta, vals=vals, use_texture=USE_TEXTURE)
+            return cls(X=X, Y=Y, theta=theta, vals=vals)
         finally:
             # Restore original setting
             if hasattr(cost_fn, 'use_lookup_table'):
@@ -309,8 +275,6 @@ class LookupTable:
 
         return X_trim, Y_trim, theta_trim, vals_trim
 
-# Module setting to switch between array and texture modes
-USE_TEXTURE: bool = False
 
 # Cache last LUT to avoid redundant constant memory updates
 _last_lut_id: int | None = None
@@ -320,9 +284,6 @@ extern "C" {
 
 #define MAX_RADIUS $MAX_RADIUS$
 #define M_PI 3.14159265358979323846
-
-// Texture mode switch (0 = array, 1 = texture) - compile-time constant
-#define USE_TEXTURE $USE_TEXTURE$
 
 // LUT grid parameters in constant memory (can be updated without recompilation)
 __constant__ int c_N_x;
@@ -355,22 +316,7 @@ __device__ __forceinline__ double wrap_angle(double theta) {
 // Returns value only (for texture path or when gradients not needed)
 __device__ double lut_lookup(double x, double y, double theta)
 {
-#if USE_TEXTURE
-    // Texture-based lookup with hardware trilinear interpolation
-    // Normalize to grid coordinates [0.5, N-0.5] for texel centers
-    double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1) + 0.5;
-    double gy = (y - c_Y_min) / (c_Y_max - c_Y_min) * (c_N_y - 1) + 0.5;
-    double gt = (theta - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1) + 0.5;
-    
-    // tex3D(tex, x, y, z) for array shape (depth, height, width):
-    //   x -> width index, y -> height index, z -> depth index
-    // Texture shape is (N_theta, N_y, N_x) after transpose, so:
-    //   width = N_x -> x = gx
-    //   height = N_y -> y = gy
-    //   depth = N_theta -> z = gt
-    double result = tex3D<float>(g_tex, (float)gx, (float)gy, (float)gt);
-    return result;
-#else
+
     // Array-based trilinear interpolation with 8-point manual fetch
     // Normalize to grid coordinates [0, N-1]
     double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1);
@@ -424,70 +370,9 @@ __device__ double lut_lookup(double x, double y, double theta)
     double v1 = v10 * (1.0 - fy) + v11 * fy;
     
     return v0 * (1.0 - fx) + v1 * fx;
-#endif
 }
 
-#if USE_TEXTURE
-// LUT lookup with finite-difference gradient (texture mode)
-// Uses 1-sided finite difference with step = GRID_SIZE/4
-// Direction chosen to stay within current cell (toward cell center)
-// Returns value, and if d_out != NULL, also computes gradient w.r.t. (x, y, theta)
-__device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out)
-{
-    // Early exit if outside LUT range - return 0 cost and gradient
-    if (x < c_X_min || x > c_X_max ||
-        y < c_Y_min || y > c_Y_max ||
-        theta < c_theta_min || theta > c_theta_max) {
-        if (d_out != NULL) {
-            d_out->x = 0.0;
-            d_out->y = 0.0;
-            d_out->z = 0.0;
-        }
-        return 0.0;
-    }
-    
-    // Finite difference step sizes (1/4 of grid cell)
-    const double h_x = c_grid_dx * 0.25;
-    const double h_y = c_grid_dy * 0.25;
-    const double h_t = c_grid_dtheta * 0.25;
-    
-    // Get base value
-    double v0 = lut_lookup(x, y, theta);
-    
-    // Compute gradients if requested
-    if (d_out != NULL) {
-        // Compute fractional positions within cell to determine FD direction
-        // We want to step toward cell center to stay within the cell
-        double gx = (x - c_X_min) / (c_X_max - c_X_min) * (c_N_x - 1);
-        double gy = (y - c_Y_min) / (c_Y_max - c_Y_min) * (c_N_y - 1);
-        double gt = (theta - c_theta_min) / (c_theta_max - c_theta_min) * (c_N_theta - 1);
-        
-        // Fractional parts (0 to 1 within cell)
-        double fx = gx - floor(gx);
-        double fy = gy - floor(gy);
-        double ft = gt - floor(gt);
-        
-        // Choose step direction: if f >= 0.5, step backward; else step forward
-        // This keeps us within the current cell
-        double sign_x = (fx >= 0.5) ? -1.0 : 1.0;
-        double sign_y = (fy >= 0.5) ? -1.0 : 1.0;
-        double sign_t = (ft >= 0.5) ? -1.0 : 1.0;
-        
-        // One-sided finite difference: df/dx ≈ (f(x+h) - f(x)) / h  or  (f(x) - f(x-h)) / h
-        double vx = lut_lookup(x + sign_x * h_x, y, theta);
-        double vy = lut_lookup(x, y + sign_y * h_y, theta);
-        double vt = lut_lookup(x, y, theta + sign_t * h_t);
-        
-        d_out->x = (vx - v0) / (sign_x * h_x);
-        d_out->y = (vy - v0) / (sign_y * h_y);
-        d_out->z = (vt - v0) / (sign_t * h_t);
-    }
-    
-    return v0;
-}
-#endif
 
-#if !USE_TEXTURE
 // LUT lookup with analytical gradient (array mode only)
 // Returns value, and if d_out != NULL, also computes gradient w.r.t. (x, y, theta)
 __device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out)
@@ -585,7 +470,6 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
     
     return value;
 }
-#endif
 
 // Compute total overlap of ref tree with all trees in xyt list using LUT
 // Returns sum of overlaps
@@ -742,7 +626,6 @@ __device__ void overlap_list_total(
 __global__ void multi_overlap_lut_total(
     const double* __restrict__ xyt_base,       // [num_ensembles, n_trees, 3]
     const int n_trees,
-    cudaTextureObject_t tex,                   // texture object (used in texture mode)
     const double* __restrict__ lut,            // LUT array (used in array mode)
     double* __restrict__ out_totals,           // [num_ensembles]
     double* __restrict__ out_grads_base,       // [num_ensembles, n_trees, 3] or NULL
@@ -758,7 +641,6 @@ __global__ void multi_overlap_lut_total(
     // First thread of first block sets up global state
     if (threadIdx.x == 0 && ensemble_id == 0) {
         g_lut = lut;
-        g_tex = tex;
     }
     // All threads must wait for global state to be set
     __threadfence();
@@ -852,12 +734,11 @@ def _ensure_initialized() -> None:
     if _initialized:
         return
 
-    print(f'Compiling CUDA LUT kernel (USE_TEXTURE={USE_TEXTURE}, one-time only)')
+    print(f'Compiling CUDA LUT kernel one-time only)')
 
     # Prepare CUDA source (only MAX_RADIUS and USE_TEXTURE are compile-time constants)
     cuda_src = _CUDA_SRC
     cuda_src = cuda_src.replace('$MAX_RADIUS$', str(MAX_RADIUS))
-    cuda_src = cuda_src.replace('$USE_TEXTURE$', '1' if USE_TEXTURE else '0')
     
     # Handle float32 mode
     if kgs.USE_FLOAT32:
@@ -985,7 +866,6 @@ def overlap_multi_ensemble(
     out_grads_ptr = out_grads if out_grads is not None else np.intp(0)
 
     # Get texture and LUT from passed table
-    tex_handle = lut.texture.ptr if USE_TEXTURE and lut.texture is not None else np.uint64(0)
     lut_d = lut.lut_d
 
     # Dynamic shared memory: n_trees * sizeof(double3) or float3
@@ -999,7 +879,6 @@ def overlap_multi_ensemble(
         (
             xyt,
             np.int32(n_trees),
-            np.uint64(tex_handle),
             lut_d,
             out_cost,
             out_grads_ptr,
