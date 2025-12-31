@@ -302,7 +302,7 @@ class Crossover(Move):
     """
     min_N_trees_ratio: float = field(init=True, default=4/np.sqrt(40)) # to be multiplied by sqrt(N_trees)
     max_N_trees_ratio: float = field(init=True, default=0.5) # to be multiplied by N_trees
-    simple_mate_location: bool = field(init=True, default=False)
+    simple_mate_location: bool = field(init=True, default=True)
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
