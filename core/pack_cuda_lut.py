@@ -286,6 +286,11 @@ __constant__ double c_grid_dtheta;
 // Transform flag (updated when LUT changes)
 __constant__ int c_apply_quadratic_transform;  // If non-zero, apply max(0, val)^2 per-pair
 
+// Debug configuration (updated via constant memory)
+__constant__ int c_debug_enabled;         // If non-zero, write debug output
+__constant__ int c_debug_solution_idx;   // Target solution index for debug
+__constant__ int c_debug_pair_idx;       // Target pair index for debug (tree index)
+
 // Global device state - set once by the kernel, used by all device functions
 __device__ const double* g_lut;           // LUT array pointer (array mode)
 __device__ cudaTextureObject_t g_tex;     // texture object (texture mode)
@@ -300,7 +305,8 @@ __device__ __forceinline__ double wrap_angle(double theta) {
 
 // LUT lookup with analytical gradient (array mode only)
 // Returns value, and if d_out != NULL, also computes gradient w.r.t. (x, y, theta)
-__device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out)
+// If debug_buf != NULL, writes debug information
+__device__ double lut_lookup_with_grad(double x, double y, double theta, double3* d_out, double* debug_buf)
 {
     // Early exit if outside LUT range - return 0 cost and gradient
     if (x < -c_X_max || x > c_X_max ||
@@ -368,6 +374,32 @@ __device__ double lut_lookup_with_grad(double x, double y, double theta, double3
     
     double value = v0 * (1.0 - fx) + v1 * fx;
     
+    // Write debug data if requested
+    if (debug_buf != NULL) {
+        int idx = 0;
+        debug_buf[idx++] = x;    // Query x
+        debug_buf[idx++] = y;    // Query y  
+        debug_buf[idx++] = theta; // Query theta
+        debug_buf[idx++] = (double)ix0; // Grid ix_low
+        debug_buf[idx++] = (double)ix1; // Grid ix_high
+        debug_buf[idx++] = (double)iy0; // Grid iy_low
+        debug_buf[idx++] = (double)iy1; // Grid iy_high
+        debug_buf[idx++] = (double)it0; // Grid itheta_low
+        debug_buf[idx++] = (double)it1; // Grid itheta_high
+        debug_buf[idx++] = fx;    // Weight wx
+        debug_buf[idx++] = fy;    // Weight wy
+        debug_buf[idx++] = ft;    // Weight wtheta
+        debug_buf[idx++] = v000;  // Corner (0,0,0)
+        debug_buf[idx++] = v001;  // Corner (0,0,1)
+        debug_buf[idx++] = v010;  // Corner (0,1,0)
+        debug_buf[idx++] = v011;  // Corner (0,1,1)
+        debug_buf[idx++] = v100;  // Corner (1,0,0)
+        debug_buf[idx++] = v101;  // Corner (1,0,1)
+        debug_buf[idx++] = v110;  // Corner (1,1,0)
+        debug_buf[idx++] = v111;  // Corner (1,1,1)
+        debug_buf[idx++] = value; // Interpolated raw value
+    }
+    
     // Compute gradients if requested
     if (d_out != NULL) {
         // Gradient w.r.t. fractional coordinates (fx, fy, ft)
@@ -428,7 +460,9 @@ __device__ double overlap_ref_with_list(
     const int n,
     const int ref_index,                  // index of ref tree (skips self, accumulates gradients here)
     double* __restrict__ out_grads,        // output: gradients for all trees [n*3], can be NULL
-    const int compute_grads)               // if non-zero, compute gradients
+    const int compute_grads,               // if non-zero, compute gradients
+    const int solution_idx,                // current solution index (for debug)
+    double* __restrict__ debug_buf)        // debug buffer, can be NULL
 {
     double sum = 0.0;
     
@@ -464,11 +498,18 @@ __device__ double overlap_ref_with_list(
         // Relative angle
         double dtheta = wrap_angle(other_theta - ref.z);
         
+        // Check if this is the target pair for debug output
+        double* pair_debug_buf = NULL;
+        if (c_debug_enabled && debug_buf != NULL && 
+            solution_idx == c_debug_solution_idx && i == c_debug_pair_idx) {
+            pair_debug_buf = debug_buf;
+        }
+        
         // Compute value and optionally gradients (both texture and array paths use lut_lookup_with_grad)
         if (compute_grads && out_grads != NULL) {
             // Get value and gradient w.r.t. local coords
             double3 d_local;  // gradient w.r.t. (dx_local, dy_local, dtheta)
-            double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, &d_local);
+            double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, &d_local, pair_debug_buf);
             
             // Apply quadratic transform if enabled: overlap_transformed = max(0, overlap)^2
             if (c_apply_quadratic_transform) {
@@ -533,7 +574,7 @@ __device__ double overlap_ref_with_list(
             atomicAdd(&out_grads[i * 3 + 1], d_other_y);
             atomicAdd(&out_grads[i * 3 + 2], d_other_theta);
         } else {
-            double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, NULL);
+            double overlap = lut_lookup_with_grad(dx_local, dy_local, dtheta, NULL, pair_debug_buf);
             
             // Apply quadratic transform if enabled: overlap_transformed = max(0, overlap)^2
             if (c_apply_quadratic_transform) {
@@ -542,6 +583,11 @@ __device__ double overlap_ref_with_list(
                 } else {
                     overlap = 0.0;
                 }
+            }
+            
+            // Write transformed value to debug buffer if active
+            if (pair_debug_buf != NULL) {
+                pair_debug_buf[21] = overlap;  // Final transformed cost
             }
             
             sum += overlap;
@@ -562,7 +608,9 @@ __device__ void overlap_list_total(
     double3* __restrict__ s_trees,  // shared memory for tree poses
     const int n,
     double* __restrict__ out_total,
-    double* __restrict__ out_grads)  // if non-NULL, write gradients [n*3]
+    double* __restrict__ out_grads,  // if non-NULL, write gradients [n*3]
+    const int solution_idx,          // current solution index
+    double* __restrict__ debug_buf)  // debug buffer, can be NULL
 {
     int tid = threadIdx.x;
     
@@ -589,7 +637,9 @@ __device__ void overlap_list_total(
     double local_sum = overlap_ref_with_list(
         ref, s_trees, n, tree_idx,
         out_grads,
-        compute_grads);
+        compute_grads,
+        solution_idx,
+        debug_buf);
     
     // Divide by 2 since each pair counted twice
     atomicAdd(out_total, local_sum);
@@ -604,7 +654,8 @@ __global__ void multi_overlap_lut_total(
     const double* __restrict__ lut,            // LUT array (used in array mode)
     double* __restrict__ out_totals,           // [num_ensembles]
     double* __restrict__ out_grads_base,       // [num_ensembles, n_trees, 3] or NULL
-    const int num_ensembles)
+    const int num_ensembles,
+    double* __restrict__ debug_buf)            // debug buffer or NULL
 {
     // Dynamic shared memory for tree poses
     extern __shared__ double3 s_trees[];
@@ -641,7 +692,7 @@ __global__ void multi_overlap_lut_total(
     __syncthreads();
     
     // Each thread processes one tree (shared mem loading happens inside)
-    overlap_list_total(xyt_ensemble, s_trees, n_trees, out_total, out_grads);
+    overlap_list_total(xyt_ensemble, s_trees, n_trees, out_total, out_grads, ensemble_id, debug_buf);
 }
 
 } // extern "C"
@@ -653,6 +704,33 @@ _multi_overlap_lut_kernel: cp.RawKernel | None = None
 
 # Flag to indicate lazy initialization completed
 _initialized: bool = False
+
+
+def _set_debug_mode(enabled: bool, solution_idx: int = 0, pair_idx: int = 0) -> None:
+    """Enable or disable debug mode for kernel.
+    
+    Parameters
+    ----------
+    enabled : bool
+        If True, enable debug output
+    solution_idx : int
+        Solution index to debug (0-based)
+    pair_idx : int
+        Tree pair index to debug (0-based, second tree in pair)
+    """
+    global _raw_module
+    
+    if _raw_module is None:
+        raise RuntimeError("Kernel not compiled yet")
+    
+    def set_constant(name, value, dtype_val):
+        ptr = _raw_module.get_global(name)
+        src = cp.array([value], dtype=dtype_val)
+        ptr.copy_from_device(src.data, src.nbytes)
+    
+    set_constant('c_debug_enabled', 1 if enabled else 0, np.int32)
+    set_constant('c_debug_solution_idx', solution_idx, np.int32)
+    set_constant('c_debug_pair_idx', pair_idx, np.int32)
 
 
 def _update_lut_constants(lut: LookupTable) -> None:
@@ -698,6 +776,11 @@ def _update_lut_constants(lut: LookupTable) -> None:
     
     # Update transform flag
     set_constant('c_apply_quadratic_transform', 1 if lut.apply_quadratic_transform else 0, np.int32)
+    
+    # Initialize debug constants to disabled (will be overridden when debug is requested)
+    set_constant('c_debug_enabled', 0, np.int32)
+    set_constant('c_debug_solution_idx', 0, np.int32)
+    set_constant('c_debug_pair_idx', 0, np.int32)
 
 
 def _ensure_initialized() -> None:
@@ -790,8 +873,10 @@ def overlap_multi_ensemble(
     out_cost: cp.ndarray,
     lut: LookupTable,
     out_grads: cp.ndarray | None = None,
-    stream: cp.cuda.Stream | None = None
-) -> None:
+    stream: cp.cuda.Stream | None = None,
+    debug_solution_idx: int | None = None,
+    debug_pair_idx: int = 1
+) -> cp.ndarray | None:
     """Compute total overlap sum for multiple ensembles in parallel using LUT.
 
     Parameters
@@ -836,6 +921,19 @@ def overlap_multi_ensemble(
 
     # Zero cost output (grads are written directly per-tree, no need to zero)
     out_cost[:] = 0
+    
+    # Handle debug mode
+    debug_buf = None
+    debug_buf_ptr = np.intp(0)
+    if debug_solution_idx is not None:
+        # Enable debug mode
+        _set_debug_mode(True, debug_solution_idx, debug_pair_idx)
+        # Allocate debug buffer: 22 values (see kernel for layout)
+        debug_buf = cp.zeros(22, dtype=kgs.dtype_cp)
+        debug_buf_ptr = debug_buf
+    else:
+        # Disable debug mode
+        _set_debug_mode(False)
 
     # Launch kernel: 1 block per ensemble, 1 thread per tree
     blocks = num_ensembles
@@ -861,7 +959,10 @@ def overlap_multi_ensemble(
             out_cost,
             out_grads_ptr,
             np.int32(num_ensembles),
+            debug_buf_ptr,
         ),
         stream=stream,
         shared_mem=shared_mem_bytes,
     )
+    
+    return debug_buf

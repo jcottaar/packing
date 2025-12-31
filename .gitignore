@@ -5,3 +5,4 @@ analysis/profile_report.ncu-rep
 *.ncu-rep
 *.nsys-rep
 *.sqlite
+*.png
