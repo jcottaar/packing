@@ -318,25 +318,11 @@ class Crossover(Move):
 
         # Generate all random values at once (vectorized RNG on GPU)
         h_sizes = h_params[:, 0]
-        offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-        offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-        center_x_all = offset_x_all + h_params[:, 1]
-        center_y_all = offset_y_all + h_params[:, 2]
-
-        # Generate mate offsets
-        if self.simple_mate_location:
-            mate_offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            mate_offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-        else:
-            mate_h_sizes = mate_h_params[:, 0]
-            # CuPy's generator doesn't have choice, use random binary values
-            sign_x = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
-            sign_y = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
-            mate_offset_x_all = cp.abs(offset_x_all) * (mate_h_sizes / h_sizes) * sign_x
-            mate_offset_y_all = cp.abs(offset_y_all) * (mate_h_sizes / h_sizes) * sign_y
-
-        mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
-        mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]
+        
+        
+        # Get all tree positions (N_moves, N_trees, 2) on GPU
+        tree_positions_all = new_xyt[inds_to_do, :, :2]  # (N_moves, N_trees, 2)
+        mate_positions_all = mate_sol.xyt[inds_mate, :, :2]  # (N_moves, N_trees, 2)
 
         # Generate n_trees_to_replace, rotation, and mirror for all
         min_trees = min(int(np.round(self.min_N_trees_ratio * np.sqrt(N_trees))), N_trees)
@@ -347,9 +333,28 @@ class Crossover(Move):
         rotation_choice_all = generator.integers(0, 4, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
 
-        # Get all tree positions (N_moves, N_trees, 2) on GPU
-        tree_positions_all = new_xyt[inds_to_do, :, :2]  # (N_moves, N_trees, 2)
-        mate_positions_all = mate_sol.xyt[inds_mate, :, :2]  # (N_moves, N_trees, 2)
+        # Generate mate offsets
+        if self.simple_mate_location:
+            # Estimate how far we have to be from the edge for the selected number of trees
+            raise 'todo'
+            
+            mate_offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            mate_offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        else:            
+            offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            # CuPy's generator doesn't have choice, use random binary values
+            sign_x = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
+            sign_y = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
+            center_x_all = offset_x_all + h_params[:, 1]
+            center_y_all = offset_y_all + h_params[:, 2]
+            mate_h_sizes = mate_h_params[:, 0]            
+            mate_offset_x_all = cp.abs(offset_x_all) * (mate_h_sizes / h_sizes) * sign_x
+            mate_offset_y_all = cp.abs(offset_y_all) * (mate_h_sizes / h_sizes) * sign_y
+
+        mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
+        mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
+
 
         # Compute L-infinity distances for all individuals at once (vectorized on GPU)
         # Shape: (N_moves, N_trees)
