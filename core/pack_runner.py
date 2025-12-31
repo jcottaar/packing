@@ -232,7 +232,7 @@ def baseline_runner(fast_mode=False):
 
 
     runner = pack_ga3.baseline()
-    runner.n_generations = 1000 if not fast_mode else 2
+    runner.n_generations = 2000 if not fast_mode else 2
     runner.diagnostic_plot = False
     runner.ga.do_legalize = not fast_mode
     #runner.ga.ga_base.alternative_selection = True
@@ -245,16 +245,25 @@ def baseline_runner(fast_mode=False):
     # print(DeepDiff(runner,runner2,ignore_order=True).pretty())
 
     res.base_ga = runner
+
+    res.modifier_dict['sort_ring_by_cost'] = pm(True, lambda r:r.choice([False,True]).item(), set_ga_prop)
+    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([2,4,6,8]).item(), set_ga_prop)
+    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.1,0.5), set_ga_prop)
+    res.modifier_dict['reset_check_generations'] = pm(50, lambda r:r.choice([50,100,200]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['allow_mate_with_better_controls_all'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['diversity_reset_threshold'] = pm(5./40, lambda r:r.uniform(0,5./40), set_ga_prop)
+    res.modifier_dict['N'] = pm(16, lambda r:r.integers(16,33).item(), set_ga_prop)
+
     
     #res.modifier_dict['make_single'] = pm(False, lambda r:False, make_single)
     #res.modifier_dict['use_minkowski_rough'] = pm(False, lambda r:r.choice([False,True]).item(), use_minkowski_rough)
     #res.modifier_dict['use_lookup_table_fine'] = pm(False, lambda r:r.choice([False,True]).item(), use_lookup_table_fine)
-    res.modifier_dict['elitism_fraction'] = pm(0.25, lambda r:r.choice([0., 0.25]).item(), set_ga_base_ga_prop)
-    res.modifier_dict['diversity_to_elite_only'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
-    res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_population_size)
-    res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
-    res.modifier_dict['use_minkowski_for_overall_cost'] = pm(True, lambda r:r.choice([False, True]).item(), set_minkowski_cost)
-    res.modifier_dict['simple_mate_location'] = pm(True, lambda r:r.choice([False, True]).item(), simple_mate_location)
+    # res.modifier_dict['elitism_fraction'] = pm(0.25, lambda r:r.choice([0., 0.25]).item(), set_ga_base_ga_prop)
+    # res.modifier_dict['diversity_to_elite_only'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
+    # res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_population_size)
+    # res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
+    # res.modifier_dict['use_minkowski_for_overall_cost'] = pm(True, lambda r:r.choice([False, True]).item(), set_minkowski_cost)
+    # res.modifier_dict['simple_mate_location'] = pm(True, lambda r:r.choice([False, True]).item(), simple_mate_location)
 
 
 
