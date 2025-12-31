@@ -977,6 +977,7 @@ class GASinglePopulationOld(GASinglePopulation):
     alternative_selection: bool = field(init=True, default=True) 
     diversity_criterion: float = field(init=True, default=0.2)  # will scale with N_trees
     diversity_criterion_scaling: float = field(init=True, default=0.) # will scale with N_trees
+    diversity_to_elite_only: bool = field(init=True, default=False)
     lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='min_cost_row'))
 
     def _initialize(self):
@@ -1093,14 +1094,15 @@ class GASinglePopulationOld(GASinglePopulation):
                     selected[selected_id] = True
                     
                     # Update diversity by computing to the newly selected individual only
-                    diversity = np.minimum(
-                        kgs.compute_genetic_diversity(
-                            cp.array(search_xyt),
-                            cp.array(current_xyt[selected_id]),
-                            lap_config=self.lap_config
-                        ).get(),
-                        diversity
-                    )
+                    if not self.diversity_to_elite_only:
+                        diversity = np.minimum(
+                            kgs.compute_genetic_diversity(
+                                cp.array(search_xyt),
+                                cp.array(current_xyt[selected_id]),
+                                lap_config=self.lap_config
+                            ).get(),
+                            diversity
+                        )
 
                     diversity_threshold += self.diversity_criterion_scaling * self.N_trees_to_do
             

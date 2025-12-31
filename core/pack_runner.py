@@ -210,6 +210,9 @@ def use_minkowski_fine(ga, name, value):
     if value:
         for r in ga.fine_relaxers:
             r.cost.costs[2] = minkowski
+def set_minkowski_cost(ga, name, value):
+    if not value:
+        ga.fitness_cost.costs[2] = pack_cost.CollisionCostSeparation()
 
 
 
@@ -227,8 +230,7 @@ def baseline_runner(fast_mode=False):
     runner = pack_ga3.baseline()
     runner.n_generations = 1000 if not fast_mode else 2
     runner.diagnostic_plot = False
-    runner.ga.do_legalize = True
-
+    runner.ga.do_legalize = not fast_mode
     #runner.ga.ga_base.alternative_selection = True
     #runner.ga.ga_base.search_depth = 1.
     
@@ -240,9 +242,14 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
     
-    res.modifier_dict['make_single'] = pm(False, lambda r:False, make_single)
+    #res.modifier_dict['make_single'] = pm(False, lambda r:False, make_single)
     #res.modifier_dict['use_minkowski_rough'] = pm(False, lambda r:r.choice([False,True]).item(), use_minkowski_rough)
     #res.modifier_dict['use_lookup_table_fine'] = pm(False, lambda r:r.choice([False,True]).item(), use_lookup_table_fine)
+    res.modifier_dict['elitism_fraction'] = pm(0.25, lambda r:r.choice([0., 0.25]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['diversity_to_elite_only'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_population_size)
+    res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['use_minkowski_for_overall_cost'] = pm(True, lambda r:r.choice([False, True]).item(), set_minkowski_cost)
 
 
 
