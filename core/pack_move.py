@@ -336,10 +336,16 @@ class Crossover(Move):
         # Generate mate offsets
         if self.simple_mate_location:
             # Estimate how far we have to be from the edge for the selected number of trees
-            raise 'todo'
-            
+            square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / N_trees)
+            h_sizes -= square_size
+            offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            center_x_all = offset_x_all + h_params[:, 1]
+            center_y_all = offset_y_all + h_params[:, 2]            
             mate_offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
             mate_offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
+            mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
         else:            
             offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
             offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
@@ -351,9 +357,8 @@ class Crossover(Move):
             mate_h_sizes = mate_h_params[:, 0]            
             mate_offset_x_all = cp.abs(offset_x_all) * (mate_h_sizes / h_sizes) * sign_x
             mate_offset_y_all = cp.abs(offset_y_all) * (mate_h_sizes / h_sizes) * sign_y
-
-        mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
-        mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
+            mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
+            mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
 
 
         # Compute L-infinity distances for all individuals at once (vectorized on GPU)

@@ -201,6 +201,9 @@ def use_lookup_table_fine(ga, name, value):
     for r in ga.fine_relaxers:
         r.cost.costs[2].use_lookup_table = value
 
+def simple_mate_location(ga, name, value):
+    ga.ga.ga_base.move.moves[-2][0].simple_mate_location = value
+
 minkowski = pack_cost.CollisionCostExactSeparation()
 minkowski.use_lookup_table = True
 def use_minkowski_rough(ga, name, value):
@@ -251,6 +254,7 @@ def baseline_runner(fast_mode=False):
     res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_population_size)
     res.modifier_dict['reduce_h_per_individual'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
     res.modifier_dict['use_minkowski_for_overall_cost'] = pm(True, lambda r:r.choice([False, True]).item(), set_minkowski_cost)
+    res.modifier_dict['simple_mate_location'] = pm(True, lambda r:r.choice([False, True]).item(), simple_mate_location)
 
 
 
