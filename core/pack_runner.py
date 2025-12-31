@@ -212,6 +212,7 @@ def use_minkowski_fine(ga, name, value):
             r.cost.costs[2] = minkowski
 def set_minkowski_cost(ga, name, value):
     if not value:
+        ga.fitness_cost = copy.deepcopy(ga.fitness_cost)
         ga.fitness_cost.costs[2] = pack_cost.CollisionCostSeparation()
 
 
