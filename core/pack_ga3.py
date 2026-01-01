@@ -1150,34 +1150,33 @@ class GASinglePopulationOld(GASinglePopulation):
         # Pick random parents (all from old_pop)
         parent_ids = self._generator.integers(0, parent_size, size=N_offspring)
 
-        # Decide which offspring use own population vs external mate population
-        if mate_sol is None or mate_sol.N_solutions == 0:
-            use_own = np.ones(N_offspring, dtype=bool)
-        else:
+        # Merge old_pop.genotype and mate_sol into a single mate collection
+        # Layout: [0, parent_size) are from old_pop, [parent_size, ...) are from mate_sol
+        merged_mate_sol = copy.deepcopy(old_pop.genotype)
+        if mate_sol is not None and mate_sol.N_solutions > 0:
+            merged_mate_sol.merge(mate_sol)
             use_own = self._generator.random(N_offspring) < self.prob_mate_own
+        else:
+            use_own = np.ones(N_offspring, dtype=bool)
 
         # Split offspring into two groups
         inds_use_own = np.where(use_own)[0]
         inds_use_external = np.where(~use_own)[0]
 
-        # Process offspring using own population as mate source
+        # === Prepare mate selection for own population offspring ===
         if len(inds_use_own) > 0:
             parent_ids_own = parent_ids[inds_use_own]
             # Pick random mates (excluding parent) - fully vectorized
             mate_ids_own = self._generator.integers(0, parent_size - 1, size=len(inds_use_own))
             # If mate_id >= parent_id, increment by 1 to skip the parent
             mate_ids_own = np.where(mate_ids_own >= parent_ids_own, mate_ids_own + 1, mate_ids_own)
-            
-            # Clone parents into new_pop
-            new_pop.create_clone_batch(inds_use_own, old_pop, parent_ids_own)
-            
-            # Apply moves with mates from own population
-            self.move.do_move_vec(new_pop, cp.array(inds_use_own), old_pop.genotype, cp.array(mate_ids_own), self._generator)
+        else:
+            parent_ids_own = None
+            mate_ids_own = None
 
-        # Process offspring using external population as mate source
+        # === Prepare mate selection for external population offspring ===
         if len(inds_use_external) > 0:
             parent_ids_external = parent_ids[inds_use_external]
-            mate_size = mate_sol.N_solutions
             
             # Normalize mate_weight to get probability distribution
             mate_prob = cp.asarray(mate_weights) / cp.sum(mate_weights)
@@ -1187,11 +1186,38 @@ class GASinglePopulationOld(GASinglePopulation):
             random_vals = self._generator.random(len(inds_use_external))
             mate_ids_external = cp.searchsorted(cum_prob, random_vals)
             
-            # Clone parents into new_pop
+            # Offset external mate indices to point into merged collection
+            mate_ids_external = mate_ids_external + parent_size
+        else:
+            parent_ids_external = None
+            mate_ids_external = None
+
+        # === Clone all parents into new_pop ===
+        if len(inds_use_own) > 0:
+            new_pop.create_clone_batch(inds_use_own, old_pop, parent_ids_own)
+        if len(inds_use_external) > 0:
             new_pop.create_clone_batch(inds_use_external, old_pop, parent_ids_external)
-            
-            # Apply moves with mates from external population
-            self.move.do_move_vec(new_pop, cp.array(inds_use_external), mate_sol, mate_ids_external, self._generator)
+
+        # === Apply moves (merged into single call) ===
+        all_inds = []
+        all_mate_ids = []
+        
+        if len(inds_use_own) > 0:
+            all_inds.append(inds_use_own)
+            # Ensure mate_ids_own is NumPy array
+            mate_ids_own_np = mate_ids_own.get() if isinstance(mate_ids_own, cp.ndarray) else np.asarray(mate_ids_own)
+            all_mate_ids.append(mate_ids_own_np)
+        
+        if len(inds_use_external) > 0:
+            all_inds.append(inds_use_external)
+            # Ensure mate_ids_external is NumPy array
+            mate_ids_external_np = mate_ids_external.get() if isinstance(mate_ids_external, cp.ndarray) else np.asarray(mate_ids_external)
+            all_mate_ids.append(mate_ids_external_np)
+        
+        if len(all_inds) > 0:
+            combined_inds = cp.array(np.concatenate(all_inds))
+            combined_mate_ids = cp.array(np.concatenate(all_mate_ids))
+            self.move.do_move_vec(new_pop, combined_inds, merged_mate_sol, combined_mate_ids, self._generator)
 
         return [new_pop]
     
