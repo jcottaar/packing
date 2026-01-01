@@ -639,7 +639,7 @@ class GAMultiRing(GAMultiSimilar):
     # Configuration
     mate_distance: int = field(init=True, default=4)   
     sort_ring_by_cost: bool = field(init=True, default=False)  
-    actually_use_champions: bool = field(init=True, default=False)
+    actually_use_champions: bool = field(init=True, default=True)
     def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
         assert mate_sol is None
         #if self.champions is None:
