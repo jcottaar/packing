@@ -823,6 +823,7 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
     # h[0]: crystal axis 1 length (a_length)
     
     aspect_ratios: cp.ndarray = field(default=None)  # (N_solutions,) array of aspect ratios (b_length / a_length)
+    angles: cp.ndarray = field(default=None)  # Optional (N_solutions,) array of lattice angles (radians)
 
     def __post_init__(self):        
         super().__post_init__()
@@ -831,53 +832,97 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
     def _check_constraints(self):
         super()._check_constraints()
         assert self.aspect_ratios.shape == (self.N_solutions,)
+        if self.angles is not None:
+            assert self.angles.shape == (self.N_solutions,)
 
     def compute_cost_single_ref(self):
         h = self.h[0]
-        prod = h[0] * h[0] * self.aspect_ratios[0]
+        angles = self._get_angles()
+        sin_angle = cp.sin(angles[0])
+        prod = h[0] * h[0] * self.aspect_ratios[0] * sin_angle
         area = cp.abs(prod)
         sgn = cp.sign(prod)
         grad_bound = cp.zeros_like(h)
-        grad_bound[0] = sgn * (2 * h[0] * self.aspect_ratios[0])          # ∂|prod|/∂a_length
+        grad_bound[0] = sgn * (2 * h[0] * self.aspect_ratios[0] * sin_angle)          # ∂|prod|/∂a_length
         return area, grad_bound
 
     def compute_cost(self, sol:SolutionCollection, cost:cp.ndarray, grad_bound:cp.ndarray):
-        # Area = a_length * b_length * sin(angle)
-        res = sol.h[:, 0]**2 * self.aspect_ratios
+        # Area = a_length * (a_length * aspect_ratio) * sin(angle)
+        angles = self._get_angles()
+        sin_angle = cp.sin(angles)
+        res = sol.h[:, 0]**2 * self.aspect_ratios * sin_angle
         cost_sign = cp.sign(res)
         cost[:] = cp.abs(res)
-        grad_bound[:, 0] = cost_sign * (2 * sol.h[:, 0] * self.aspect_ratios)          # ∂A/∂a_length
+        grad_bound[:, 0] = cost_sign * (2 * sol.h[:, 0] * self.aspect_ratios * sin_angle)          # ∂A/∂a_length
 
     def _get_crystal_axes(self, crystal_axes):
+        angles = self._get_angles()
         # First axis: a = (a_length, 0)
         crystal_axes[:, 0, 0] = self.h[:, 0]  # a_x = a_length
         crystal_axes[:, 0, 1] = 0              # a_y = 0
 
         # Second axis: b = (b_length * cos(angle), b_length * sin(angle))
-        crystal_axes[:, 1, 0] = 0  # b_x
-        crystal_axes[:, 1, 1] = self.h[:, 0] * self.aspect_ratios  # b_y
+        b_lengths = self.h[:, 0] * self.aspect_ratios
+        crystal_axes[:, 1, 0] = b_lengths * cp.cos(angles)
+        crystal_axes[:, 1, 1] = b_lengths * cp.sin(angles)
 
     def select_ids(self, inds):
         super().select_ids(inds)
         self.aspect_ratios = self.aspect_ratios[inds]
+        if self.angles is not None:
+            self.angles = self.angles[inds]
 
     def merge(self, other:'SolutionCollectionLatticeFixed'):
+        old_aspect = self.aspect_ratios
+        other_aspect = other.aspect_ratios
+        old_angles = self.angles
+        other_angles = other.angles
         super().merge(other)
-        self.aspect_ratios = cp.concatenate([self.aspect_ratios, other.aspect_ratios], axis=0)
+        self.aspect_ratios = cp.concatenate([old_aspect, other_aspect], axis=0)
+        if old_angles is None and other_angles is None:
+            self.angles = None
+        else:
+            if old_angles is None:
+                old_angles = cp.full((old_aspect.shape[0],), np.pi / 2, dtype=dtype_cp)
+            if other_angles is None:
+                other_angles = cp.full((other_aspect.shape[0],), np.pi / 2, dtype=dtype_cp)
+            self.angles = cp.concatenate([old_angles, other_angles], axis=0)
 
     def create_clone(self, idx, other, parent_id):
         self.aspect_ratios[idx] = other.aspect_ratios[parent_id]
+        if self.angles is not None or other.angles is not None:
+            target_angles = self._ensure_angle_storage()
+            source_angles = other._get_angles()
+            target_angles[idx] = source_angles[parent_id]
         super().create_clone(idx, other, parent_id)
 
     def create_clone_batch(self, inds, other, parent_ids):
         """Vectorized batch clone operation."""
         self.aspect_ratios[inds] = other.aspect_ratios[parent_ids]
+        if self.angles is not None or other.angles is not None:
+            target_angles = self._ensure_angle_storage()
+            source_angles = other._get_angles()
+            target_angles[inds] = source_angles[parent_ids]
         super().create_clone_batch(inds, other, parent_ids)
 
     def create_empty(self, N_solutions: int, N_trees: int):
         res = super().create_empty(N_solutions, N_trees)
-        res.aspect_ratios = cp.array([self.aspect_ratios[0]]*N_solutions, dtype=dtype_cp)
+        res.aspect_ratios = cp.full((N_solutions,), self.aspect_ratios[0], dtype=dtype_cp)
+        if self.angles is None:
+            res.angles = None
+        else:
+            res.angles = cp.full((N_solutions,), self.angles[0], dtype=dtype_cp)
         return res
+
+    def _get_angles(self) -> cp.ndarray:
+        if self.angles is not None:
+            return self.angles
+        return cp.full((self.N_solutions,), np.pi / 2, dtype=dtype_cp)
+
+    def _ensure_angle_storage(self) -> cp.ndarray:
+        if self.angles is None:
+            self.angles = cp.full((self.N_solutions,), np.pi / 2, dtype=dtype_cp)
+        return self.angles
 
 
 # ============================================================
