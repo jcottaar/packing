@@ -1451,9 +1451,9 @@ class Orchestrator(kgs.BaseClass):
 
 def baseline():
     runner = Orchestrator(n_generations=60000)
-    runner.ga = GAMultiRing(N=16)
-    runner.ga.diversity_reset_threshold = 5./40
-    runner.ga.mate_distance=8
+    runner.ga = GAMultiRing(N=32)
+    runner.ga.diversity_reset_threshold = -1.
+    runner.ga.mate_distance=6
 
     ga_base = GASinglePopulationOld(N_trees_to_do=-1)
     #value = 0.125
@@ -1461,7 +1461,7 @@ def baseline():
     #ga_base.selection_size = [int( (s-1) * value)+1 for s in ga_base.selection_size]
     ga_base.population_size = 500 
     #ga_base.selection_size = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 23, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 225, 250]
-    ga_base.reset_check_generations = 50
+    ga_base.reset_check_generations = 100
     ga_base.reset_check_threshold = 0.5
     ga_base.freeze_duration = 100
     ga_base.prob_mate_own = 0.7
@@ -1472,7 +1472,7 @@ def baseline():
 
     runner.ga.ga_base = ga_base
     runner.ga.do_legalize = True
-    runner.ga.allow_reset_ratio = 0.5
+    runner.ga.allow_reset_ratio = 0.95
 
     runner.ga.make_own_fig = (2,3)
     runner.ga.make_own_fig_size = (18,12)
