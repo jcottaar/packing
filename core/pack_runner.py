@@ -246,13 +246,12 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['sort_ring_by_cost'] = pm(True, lambda r:r.choice([False,True]).item(), set_ga_prop)
-    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([2,4,6,8]).item(), set_ga_prop)
-    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.1,0.5), set_ga_prop)
+    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([2,4,6]).item(), set_ga_prop)
+    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.5,1.), set_ga_prop)
     res.modifier_dict['reset_check_generations'] = pm(50, lambda r:r.choice([50,100,200]).item(), set_ga_base_ga_prop)
-    res.modifier_dict['allow_mate_with_better_controls_all'] = pm(False, lambda r:r.choice([False, True]).item(), set_ga_base_ga_prop)
-    res.modifier_dict['diversity_reset_threshold'] = pm(5./40, lambda r:r.uniform(0,5./40), set_ga_prop)
-    res.modifier_dict['N'] = pm(16, lambda r:r.integers(16,33).item(), set_ga_prop)
+    res.modifier_dict['diversity_reset_threshold'] = pm(5./40, lambda r:r.choice([5./40, -1.]).item(), set_ga_prop)
+    res.modifier_dict['N'] = pm(16, lambda r:r.choice([8,16,32]).item(), set_ga_prop)
+    res.modifier_dict['actually_use_champions'] = pm(False, lambda r:r.choice([False,True]).item(), set_ga_prop)
 
     
     #res.modifier_dict['make_single'] = pm(False, lambda r:False, make_single)

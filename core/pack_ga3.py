@@ -233,6 +233,7 @@ class GA(kgs.BaseClass):
     fitness_cost: pack_cost.Cost = field(init=True, default=None)     
 
     champions: list = field(init=True, default=None)
+    best_ever: list = field(init=True, default=None)
     best_costs_per_generation: list = field(init=True, default_factory=list)  
     do_legalize: bool = field(init=True, default=False)
 
@@ -273,9 +274,15 @@ class GA(kgs.BaseClass):
             for champion in self.champions:
                 assert(champion.phenotype.N_solutions==1)
                 champion.check_constraints()
-            assert(len(self.champions) == len(self.best_costs_per_generation))     
+            assert(len(self.champions) == len(self.best_costs_per_generation))  
             for champion, cost in zip(self.champions, self.best_costs_per_generation):
                 assert(np.all(cost[-1] == champion.fitness[0]))
+        if self.best_ever is not None:
+            for champion in self.best_ever:
+                assert(champion.phenotype.N_solutions==1)
+                champion.check_constraints()
+            assert(len(self.best_ever) == len(self.best_costs_per_generation))
+            
 
     def initialize(self):
         self.check_constraints(debugging_mode_offset=2)        
@@ -300,7 +307,13 @@ class GA(kgs.BaseClass):
             return
         self._score(register_best)
         if register_best:
-            assert(len(self.champions) == len(self.best_costs_per_generation))        
+            assert(len(self.champions) == len(self.best_costs_per_generation))     
+            if self.best_ever is None:
+                self.best_ever = copy.deepcopy(self.champions)
+            for i,c in enumerate(self.champions):
+                b = self.best_ever[i]
+                if kgs.lexicographic_less_than(c.fitness[0], b.fitness[0]):
+                    self.best_ever[i] = copy.deepcopy(c)
             if not self.stop_check_generations is None and len(self.champions)>0:
                 assert len(self.best_costs_per_generation)==1
                 effective_stop_check_generations = self.stop_check_generations + self.champions[0].phenotype.N_trees * self.stop_check_generations_scale 
@@ -497,8 +510,9 @@ class GAMulti(GA):
             costs_per_ga = np.array([ga.best_costs_per_generation[0][-1] for ga in self.ga_list])
             best_ga_idx = kgs.lexicographic_argmin(costs_per_ga)
             best_ga = self.ga_list[best_ga_idx]
-            self.champions = [best_ga.champions[0]]
-            self.best_costs_per_generation[0].append(best_ga.champions[0].fitness[0])
+            if self.champions is None or kgs.lexicographic_less_than(best_ga.champions[0].fitness[0], self.champions[0].fitness[0]):
+                self.champions = [best_ga.champions[0]]
+            self.best_costs_per_generation[0].append(self.champions[0].fitness[0])
             # Apply allow_reset_ratio - only allow worst X% of GAs to reset
             if self.allow_reset_ratio < 1.0:
                 sorted_indices = kgs.lexicographic_argsort(costs_per_ga)
@@ -625,6 +639,7 @@ class GAMultiRing(GAMultiSimilar):
     # Configuration
     mate_distance: int = field(init=True, default=4)   
     sort_ring_by_cost: bool = field(init=True, default=False)  
+    actually_use_champions: bool = field(init=True, default=False)
     def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
         assert mate_sol is None
         #if self.champions is None:
@@ -637,6 +652,12 @@ class GAMultiRing(GAMultiSimilar):
             sorted_ga_list = [self.ga_list[i] for i in sorted_indices]
         else:
             sorted_ga_list = self.ga_list
+
+        # Precompute the population objects and fitness arrays to use for mating
+        population_sources = []
+        for ga in sorted_ga_list:
+            source_pop = ga.champions[0] if self.actually_use_champions else ga.population
+            population_sources.append((source_pop, source_pop.fitness))
         
         # To each child GA, pass mate_sol as the merged champions of all GAs within mate_distance
         # Each GA gets the mate_distance nearest neighbors in the sorted list
@@ -653,10 +674,10 @@ class GAMultiRing(GAMultiSimilar):
                 while len(populations_to_merge) < self.mate_distance and offset < n_ga:
                     # Add left neighbor if available
                     if i - offset >= 0 and len(populations_to_merge) < self.mate_distance:
-                        populations_to_merge.append(sorted_ga_list[i - offset].population)
+                        populations_to_merge.append(population_sources[i - offset])
                     # Add right neighbor if available
                     if i + offset < n_ga and len(populations_to_merge) < self.mate_distance:
-                        populations_to_merge.append(sorted_ga_list[i + offset].population)
+                        populations_to_merge.append(population_sources[i + offset])
                     offset += 1
             else:
                 # Periodic boundaries (wraparound for ring topology)
@@ -665,19 +686,21 @@ class GAMultiRing(GAMultiSimilar):
                     # Add left neighbor (with wraparound)
                     if len(populations_to_merge) < self.mate_distance:
                         left_idx = (i - offset) % n_ga
-                        populations_to_merge.append(sorted_ga_list[left_idx].population)
+                        populations_to_merge.append(population_sources[left_idx])
                     # Add right neighbor (with wraparound)
                     if len(populations_to_merge) < self.mate_distance:
                         right_idx = (i + offset) % n_ga
-                        populations_to_merge.append(sorted_ga_list[right_idx].population)
+                        populations_to_merge.append(population_sources[right_idx])
                     offset += 1
             
             # Merge all collected populations into a single solution collection
             if len(populations_to_merge)>0:
-                merged_sol = copy.deepcopy(populations_to_merge[0].genotype)
-                merged_costs = [pop.fitness for pop in populations_to_merge]
-                for pop in populations_to_merge[1:]:
+                first_pop, first_costs = populations_to_merge[0]
+                merged_sol = copy.deepcopy(first_pop.genotype)
+                merged_costs = [first_costs]
+                for pop, costs in populations_to_merge[1:]:
                     merged_sol.merge(pop.genotype)
+                    merged_costs.append(costs)
                 mate_weights = np.ones(merged_sol.N_solutions) / merged_sol.N_solutions
                 mate_costs = np.concatenate(merged_costs, axis=0)
             else:
