@@ -221,18 +221,22 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
         ax.set_ylim(miny - margin_y, maxy + margin_y)
 
     elif sol.periodic:
-        # Periodic solution: plot 3x3 tiling and display unit cell
+        # Periodic solution: plot 7x7 tiling and display unit cell
 
         # Get crystal axes
         crystal_axes = sol.get_crystal_axes_allocate()
         a_vec = kgs.to_cpu(crystal_axes[solution_idx, 0, :])  # (ax, ay)
         b_vec = kgs.to_cpu(crystal_axes[solution_idx, 1, :])  # (bx, by)
 
-        # Create 3x3 tiling (centered on origin)
+        # Create 15x15 tiling (centered on origin)
         all_trees = []
         all_thetas = []
-        for i in range(-1, 2):
-            for j in range(-1, 2):
+        
+        # Trees used for calculating bounds (inner 3x3)
+        bounds_trees = []
+
+        for i in range(-7, 8):
+            for j in range(-7, 8):
                 # Translation vector for this tile
                 offset_x = i * a_vec[0] + j * b_vec[0]
                 offset_y = i * a_vec[1] + j * b_vec[1]
@@ -244,6 +248,10 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
 
                     # Keep same rotation color for all translated copies.
                     all_thetas.append(theta)
+                    
+                    # Collect trees for bounds calculation (inner 3x3)
+                    if abs(i) <= 1 and abs(j) <= 1:
+                        bounds_trees.append(translated_tree)
 
         # Plot all tiled trees with rotation-based colors
         _plot_polygons(all_trees, ax=ax, thetas=all_thetas, alpha=alpha)
@@ -262,8 +270,8 @@ def pack_vis_sol(sol, solution_idx=0, ax=None, margin_factor=0.1, alpha=1.0):
                           edgecolor='green', linewidth=3.0, zorder=4, linestyle='--')
         ax.add_patch(patch)
 
-        # Compute bounds of the 3x3 tiling
-        all_bounds = [tree.bounds for tree in all_trees]
+        # Compute bounds of the inner 3x3 tiling
+        all_bounds = [tree.bounds for tree in bounds_trees]
         minx = min(b[0] for b in all_bounds)
         miny = min(b[1] for b in all_bounds)
         maxx = max(b[2] for b in all_bounds)

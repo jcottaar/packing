@@ -226,9 +226,9 @@ class CollisionCost(Cost):
                 other_trees_all = []
                 other_xyt_all = []
 
-                # Loop over 3x3 grid of periodic cells
-                for dx in [-2,-1,0,1,2]:
-                    for dy in [-2,-1,0,1,2]:
+                # Loop over grid of periodic cells
+                for dx in range(-sol.N_periodic, sol.N_periodic + 1):
+                    for dy in range(-sol.N_periodic, sol.N_periodic + 1):
                         shift = dx * a_vec_np + dy * b_vec_np
 
                         for j in range(n_trees):
@@ -270,8 +270,8 @@ class CollisionCost(Cost):
                 other_xyt_self = []
 
                 # Only include self-interactions (tree i with its periodic images)
-                for dx in [-2,-1,0,1,2]:
-                    for dy in [-2,-1,0,1,2]:
+                for dx in range(-sol.N_periodic, sol.N_periodic + 1):
+                    for dy in range(-sol.N_periodic, sol.N_periodic + 1):
                         if dx == 0 and dy == 0:
                             continue  # Skip origin
 
@@ -334,8 +334,8 @@ class CollisionCost(Cost):
                     other_trees_tmp = []
                     other_xyt_tmp = []
 
-                    for dx in [-2,-1,0,1,2]:
-                        for dy in [-2,-1,0,1,2]:
+                    for dx in range(-sol.N_periodic, sol.N_periodic + 1):
+                        for dy in range(-sol.N_periodic, sol.N_periodic + 1):
                             shift_tmp = dx * a_vec_tmp_np + dy * b_vec_tmp_np
                             for j in range(n_trees):
                                 if dx == 0 and dy == 0 and i == j:
@@ -524,10 +524,10 @@ class CollisionCostOverlappingArea(CollisionCost):
                                only_self_interactions=False):
         # Use fast CUDA implementation
         if evaluate_gradient:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions, N_periodic=sol.N_periodic)
             grad_bound[:] = 0
         else:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions, N_periodic=sol.N_periodic)
 
 @dataclass
 class CollisionCostSeparation(CollisionCost):
@@ -875,10 +875,10 @@ class CollisionCostSeparation(CollisionCost):
                                only_self_interactions=False):
         # Use fast CUDA implementation
         if evaluate_gradient:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions, N_periodic=sol.N_periodic)
             grad_bound[:] = 0
         else:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions)
+            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, True, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions, N_periodic=sol.N_periodic)
 
 
 @dataclass

@@ -431,6 +431,7 @@ class SolutionCollection(BaseClass):
     h: cp.ndarray = field(default=None)      # (N,_N_h_DOF) array
     use_fixed_h: bool = field(default=False)
     periodic: bool = field(default=False)  # whether to use periodic boundaries
+    N_periodic: int = field(default=2)  # number of periodic images in each direction
 
     _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
 

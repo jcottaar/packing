@@ -268,7 +268,8 @@ __device__ double overlap_ref_with_list_piece(
     const int compute_grads, // if non-zero, compute gradients
     const int use_crystal, // if non-zero, loop over 3x3 cell for each tree
     const CrystalAxes crystal_axes, // crystal axes (only used if use_crystal is non-zero)
-    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
+    const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
+    const int N_periodic) // number of periodic images in each direction
 {
     double sum = 0.0;
 
@@ -336,9 +337,9 @@ __device__ double overlap_ref_with_list_piece(
 
         if (use_crystal) {
 #ifdef ENABLE_CRYSTAL_AXES
-            // Loop over 3x3 cell: cell_x and cell_y each go from -1 to 1
-            for (int cell_x = -2; cell_x <= 2; ++cell_x) {
-                for (int cell_y = -2; cell_y <= 2; ++cell_y) {
+            // Loop over grid of periodic cells
+            for (int cell_x = -N_periodic; cell_x <= N_periodic; ++cell_x) {
+                for (int cell_y = -N_periodic; cell_y <= N_periodic; ++cell_y) {
                     // Skip self-comparison at original position (0,0)
                     if (is_self && cell_x == 0 && cell_y == 0) {
                         continue;
@@ -590,7 +591,8 @@ __device__ void overlap_list_total(
     const int use_separation, // non-zero -> use separation sum-of-squares path
     const int use_crystal, // if non-zero, loop over 3x3 cell for each tree
     const CrystalAxes crystal_axes, // crystal axes (only used if use_crystal is non-zero)
-    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
+    const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
+    const int N_periodic) // number of periodic images in each direction
 {
     // Thread organization: 4 threads per tree
     // tid = tree_idx * 4 + piece_idx
@@ -622,7 +624,7 @@ __device__ void overlap_list_total(
 
         // Each thread computes overlap (or separation) for one piece of the reference tree
         double3* d_ref_output = compute_grads ? (double3*)(&out_grads[tree_idx * 3]) : NULL;
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx, compute_grads, use_crystal, crystal_axes, only_self_interactions);
+        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx, compute_grads, use_crystal, crystal_axes, only_self_interactions, N_periodic);
 
         // Atomic add for overlap sum
         // If only_self_interactions, don't divide by 2 since we're not double-counting
@@ -661,7 +663,8 @@ __global__ void multi_overlap_list_total(
     const int use_separation,
     const int use_crystal,
     const double* __restrict__ crystal_axes_base, // base pointer to [num_ensembles, 4] (NULL if use_crystal is 0)
-    const int only_self_interactions) // if non-zero, only compute interactions when i == skip_index
+    const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
+    const int N_periodic) // number of periodic images in each direction
 {
     int ensemble_id = blockIdx.x;
 
@@ -713,7 +716,7 @@ __global__ void multi_overlap_list_total(
     __syncthreads();
 
     // Call overlap_list_total - it now reads (n_trees, 3) format directly
-    overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads, use_separation, use_crystal, crystal_axes, only_self_interactions);
+    overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads, use_separation, use_crystal, crystal_axes, only_self_interactions, N_periodic);
 }
 
 // Multi-ensemble kernel for boundary: one block per ensemble
@@ -1270,7 +1273,7 @@ def _ensure_initialized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: bool, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, crystal_axes: cp.ndarray | None = None, only_self_interactions: bool = False, stream: cp.cuda.Stream | None = None):
+def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: bool, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, crystal_axes: cp.ndarray | None = None, only_self_interactions: bool = False, N_periodic: int = 2, stream: cp.cuda.Stream | None = None):
     """Compute total overlap sum for multiple ensembles in parallel.
 
     Parameters
@@ -1294,6 +1297,8 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
         If True, only compute cost/gradients for self-interactions (tree with its own
         periodic copies). Returns 0 if crystal_axes is None. Default is False.
         Note: Gradients are NOT computed for self-interactions regardless of this flag.
+    N_periodic : int, optional
+        Number of periodic images in each direction. Default is 2.
     stream : cp.cuda.Stream, optional
         CUDA stream for kernel execution. If None, uses default stream.
     """
@@ -1407,6 +1412,7 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
                 np.int32(use_crystal),
                 crystal_axes_ptr,
                 np.int32(1 if only_self_interactions else 0),
+                np.int32(N_periodic),
             ),
             stream=stream,
         )

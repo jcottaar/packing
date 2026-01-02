@@ -104,6 +104,7 @@ def test_costs():
         ]])/4
     sol_list[-1].aspect_ratios = cp.array([2.])
     sol_list[-1].h = cp.array([[0.3]])
+    sol_list[-1].N_periodic = 1
     
     for ii in range(len(sol_list)):
         pack_vis_sol.pack_vis_sol(sol_list[ii], solution_idx=0)
