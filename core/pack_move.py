@@ -639,6 +639,7 @@ class CrossoverStripe(Move):
             )
         elif self.distance_function == 'square90':
             assert isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90)
+            print(line_point_x, line_point_y, mate_line_point_x, mate_line_point_y)
             # Compute L-infinity distance considering all 4 rotational images (0°, 90°, 180°, 270°)
             # Each genotype tree at (x, y) appears at 4 phenotype positions:
             #   0°: (x, y), 90°: (-y, x), 180°: (-x, -y), 270°: (y, -x)
