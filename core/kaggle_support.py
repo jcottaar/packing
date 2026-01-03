@@ -482,7 +482,8 @@ class SolutionCollection(BaseClass):
             self._prepped_phenotype = None
 
     def convert_to_phenotype(self):
-        assert not self.is_phenotype()
+        if self.is_phenotype():
+            return self
         was_prepped = self._prepped_for_phenotype
         if not self._prepped_for_phenotype:
             self.prep_for_phenotype()

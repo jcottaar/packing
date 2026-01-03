@@ -106,6 +106,7 @@ class Population(kgs.BaseClass):
     def _check_constraints(self):
         self.genotype.check_constraints()
         self.phenotype.check_constraints()
+        assert self.phenotype.N_trees == self.genotype.N_trees
         assert self.fitness.shape[0] == self.genotype.N_solutions
         assert self.fitness.shape[0] == self.phenotype.N_solutions
         assert self.fitness.ndim == 2  # Shape: (N_solutions, N_components)
@@ -177,10 +178,12 @@ class Initializer(kgs.BaseClass):
     seed: int = field(init=True, default=42)
     def initialize_population(self, N_individuals, N_trees):
         population = self._initialize_population(N_individuals, N_trees)
-        population.phenotype = copy.deepcopy(population.genotype)
+        population.phenotype = copy.deepcopy(population.genotype.convert_to_phenotype())
         population.set_dummy_fitness()
         assert population.genotype.N_solutions == N_individuals
         assert population.genotype.N_trees == N_trees        
+        assert population.phenotype.N_solutions == N_individuals
+        assert population.phenotype.N_trees == N_trees        
         population.check_constraints()
         return population        
 
@@ -215,7 +218,9 @@ class InitializerRandomJiggled(Initializer):
                 sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)     
         else:
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
+        sol.canonicalize()
         sol = self.jiggler.run_simulation(sol)
+        sol.canonicalize()
         sol.snap()
         population = Population(genotype=sol)
         return population
@@ -375,7 +380,7 @@ class GA(kgs.BaseClass):
                 filtered_mate_sol = None
                 filtered_mate_weights = None
                 filtered_mate_costs = None
-        res = self._generate_offspring(filtered_mate_sol, filtered_mate_weights, filtered_mate_costs, generator)
+        res = self._generate_offspring(filtered_mate_sol, filtered_mate_weights, filtered_mate_costs, generator)        
         self._cached_offspring = res
         return res
     
@@ -626,12 +631,12 @@ class GAMultiSimilar(GAMulti):
     ga_base: GA = field(init=True, default=None)
     N: int = field(init=True, default=4)
 
-    def _initialize(self):
+    def _initialize(self, generator):
         self.ga_list = []        
         for i in range(self.N):
             ga_copy = copy.deepcopy(self.ga_base)            
             self.ga_list.append(ga_copy)     
-        super()._initialize()    
+        super()._initialize(generator)    
 
 @dataclass
 class GAMultiRing(GAMultiSimilar):
@@ -991,6 +996,8 @@ class GASinglePopulationTournament(GASinglePopulation):
             self.move.do_move_vec(new_pop, inds_use_external, mate_sol.genotype,
                                   mate_ids_external, generator)
         
+        new_pop.canonicalize()
+        
         return [new_pop]
 
     def _merge_offspring(self):
@@ -1237,6 +1244,8 @@ class GASinglePopulationOld(GASinglePopulation):
             combined_mate_ids = cp.array(np.concatenate(all_mate_ids))
             self.move.do_move_vec(new_pop, combined_inds, merged_mate_sol, combined_mate_ids, generator)
 
+        new_pop.genotype.canonicalize()
+
         return [new_pop]
     
     def _merge_offspring(self):
@@ -1309,6 +1318,32 @@ class Orchestrator(kgs.BaseClass):
         super().__post_init__()
 
     def _relax(self, sol_list):
+        # for s in sol_list:
+        #     fitness = self.fitness_cost.compute_cost_allocate(s.genotype, evaluate_gradient=False)[0].get()
+        #     sorted_ids = kgs.lexicographic_argsort(fitness)
+        #     n_keep = int(s.genotype.N_solutions*self.filter_before_rough)
+        #     s.select_ids(sorted_ids[:n_keep])
+        # for s in sol_list:
+        #     s.phenotype.xyt[:] = s.genotype.xyt[:]
+        #     s.phenotype.h[:] = s.genotype.h[:]
+        # conf_list = [s.phenotype for s in sol_list]
+        # if self.genotype_at == 0:
+        #     for s in sol_list:
+        #         s.genotype.xyt[:] = s.phenotype.xyt[:]
+        #         s.genotype.h[:] = s.phenotype.h[:]
+        # for relaxer in self.rough_relaxers:
+        #     pack_dynamics.run_simulation_list(relaxer, conf_list)
+        # if self.genotype_at == 1:
+        #     for s in sol_list:
+        #         s.genotype.xyt[:] = s.phenotype.xyt[:]
+        #         s.genotype.h[:] = s.phenotype.h[:]
+        # for relaxer in self.fine_relaxers:
+        #     pack_dynamics.run_simulation_list(relaxer, conf_list)
+        # if self.genotype_at == 2:
+        #     for s in sol_list:
+        #         s.genotype.xyt[:] = s.phenotype.xyt[:]
+        #         s.genotype.h[:] = s.phenotype.h[:]
+
         for s in sol_list:
             fitness = self.fitness_cost.compute_cost_allocate(s.genotype, evaluate_gradient=False)[0].get()
             sorted_ids = kgs.lexicographic_argsort(fitness)
@@ -1334,6 +1369,23 @@ class Orchestrator(kgs.BaseClass):
             for s in sol_list:
                 s.genotype.xyt[:] = s.phenotype.xyt[:]
                 s.genotype.h[:] = s.phenotype.h[:]
+
+        return
+        assert self.genotype_at==1
+        for s in sol_list:
+            fitness = self.fitness_cost.compute_cost_allocate(s.genotype, evaluate_gradient=False)[0].get()
+            sorted_ids = kgs.lexicographic_argsort(fitness)
+            n_keep = int(s.genotype.N_solutions*self.filter_before_rough)
+            s.select_ids(sorted_ids[:n_keep])
+        conf_list = [s.genotype for s in sol_list]
+        for relaxer in self.rough_relaxers:
+            pack_dynamics.run_simulation_list(relaxer, conf_list)
+        for s in sol_list:
+            s.genotype.canonicalize()
+            s.phenotype = s.genotype.convert_to_phenotype()
+        conf_list = [s.phenotype for s in sol_list]
+        for relaxer in self.fine_relaxers:
+            pack_dynamics.run_simulation_list(relaxer, conf_list)
 
 
     def _check_constraints(self):        
@@ -1479,11 +1531,11 @@ def baseline():
 
     runner.ga.make_own_fig = (2,3)
     runner.ga.make_own_fig_size = (18,12)
-    runner.ga.best_costs_per_generation_ax = ( (0,False,(0,0)) ,(1,True,(1,0)))
+    runner.ga.best_costs_per_generation_ax = ( (0,False,(0,0)),)# ,(1,True,(1,0)))
     runner.ga.plot_subpopulation_costs_per_generation_ax = ( (0,False,(0,1)) ,(1,True,(1,1)))
-    #runner.ga.champion_genotype_ax = (1,0)
+    runner.ga.champion_genotype_ax = (1,2)
     runner.ga.champion_phenotype_ax = (0,2)
-    runner.ga.plot_diversity_ax = (1,2)
+    runner.ga.plot_diversity_ax = (1,0)
     runner.plot_every = 3
 
     return runner
