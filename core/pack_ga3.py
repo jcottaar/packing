@@ -197,10 +197,11 @@ class InitializerRandomJiggled(Initializer):
 
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
+        sol = self.base_solution.create_empty(N_individuals, N_trees)
         size_setup_scaled = self.size_setup * np.sqrt(N_trees)
         if self.use_fixed_h_for_size_setup:
             size_setup_scaled = float(cp.asnumpy(self.fixed_h[0]))
-        xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=(N_individuals, N_trees, 3))
+        xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=sol.xyt.shape)
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
         xyt = cp.array(xyt, dtype=kgs.dtype_np)    
         sol = copy.deepcopy(self.base_solution)
@@ -1344,48 +1345,22 @@ class Orchestrator(kgs.BaseClass):
         #         s.genotype.xyt[:] = s.phenotype.xyt[:]
         #         s.genotype.h[:] = s.phenotype.h[:]
 
-        for s in sol_list:
-            fitness = self.fitness_cost.compute_cost_allocate(s.genotype, evaluate_gradient=False)[0].get()
-            sorted_ids = kgs.lexicographic_argsort(fitness)
-            n_keep = int(s.genotype.N_solutions*self.filter_before_rough)
-            s.select_ids(sorted_ids[:n_keep])
-        for s in sol_list:
-            s.phenotype.xyt[:] = s.genotype.xyt[:]
-            s.phenotype.h[:] = s.genotype.h[:]
-        conf_list = [s.phenotype for s in sol_list]
-        if self.genotype_at == 0:
-            for s in sol_list:
-                s.genotype.xyt[:] = s.phenotype.xyt[:]
-                s.genotype.h[:] = s.phenotype.h[:]
-        for relaxer in self.rough_relaxers:
-            pack_dynamics.run_simulation_list(relaxer, conf_list)
-        if self.genotype_at == 1:
-            for s in sol_list:
-                s.genotype.xyt[:] = s.phenotype.xyt[:]
-                s.genotype.h[:] = s.phenotype.h[:]
-        for relaxer in self.fine_relaxers:
-            pack_dynamics.run_simulation_list(relaxer, conf_list)
-        if self.genotype_at == 2:
-            for s in sol_list:
-                s.genotype.xyt[:] = s.phenotype.xyt[:]
-                s.genotype.h[:] = s.phenotype.h[:]
-
-        return
         assert self.genotype_at==1
         for s in sol_list:
             fitness = self.fitness_cost.compute_cost_allocate(s.genotype, evaluate_gradient=False)[0].get()
             sorted_ids = kgs.lexicographic_argsort(fitness)
             n_keep = int(s.genotype.N_solutions*self.filter_before_rough)
             s.select_ids(sorted_ids[:n_keep])
-        conf_list = [s.genotype for s in sol_list]
+        conf_list = [s.genotype for s in sol_list]        
         for relaxer in self.rough_relaxers:
             pack_dynamics.run_simulation_list(relaxer, conf_list)
         for s in sol_list:
             s.genotype.canonicalize()
             s.phenotype = s.genotype.convert_to_phenotype()
-        conf_list = [s.phenotype for s in sol_list]
+        conf_list = [s.phenotype for s in sol_list]        
         for relaxer in self.fine_relaxers:
             pack_dynamics.run_simulation_list(relaxer, conf_list)
+
 
 
     def _check_constraints(self):        

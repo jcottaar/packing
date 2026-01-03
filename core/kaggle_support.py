@@ -483,7 +483,7 @@ class SolutionCollection(BaseClass):
 
     def convert_to_phenotype(self):
         if self.is_phenotype():
-            return self
+            return copy.deepcopy(self)
         was_prepped = self._prepped_for_phenotype
         if not self._prepped_for_phenotype:
             self.prep_for_phenotype()
