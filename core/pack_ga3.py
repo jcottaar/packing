@@ -192,7 +192,7 @@ class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
-    fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array
+    fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array    
     use_fixed_h_for_size_setup: bool = field(init=True, default=True)
 
     def _initialize_population(self, N_individuals, N_trees):
@@ -772,7 +772,7 @@ class GASinglePopulation(GA):
         if self.fixed_h is not None:
             if self.fixed_h == -1.:
                 ref_score = ref_solution[1][self.N_trees_to_do-1]
-                ref_h = np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.055))
+                ref_h = max(np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.055)), np.sqrt(0.37*self.N_trees_to_do))
                 self.initializer.fixed_h = cp.array([ref_h,0,0],dtype=kgs.dtype_cp)
             else:
                 self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
