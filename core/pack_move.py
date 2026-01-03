@@ -300,7 +300,8 @@ class Crossover(Move):
     square selection) and replaces them with the n closest trees from the mate,
     applying a random rotation (0/90/180/270°) and optional mirroring.
     """
-    min_N_trees_ratio: float = field(init=True, default=4/np.sqrt(40)) # to be multiplied by sqrt(N_trees)
+    #min_N_trees_ratio: float = field(init=True, default=4/np.sqrt(40)) # to be multiplied by sqrt(N_trees)
+    min_N_trees: int = field(init=True, default=2) 
     max_N_trees_ratio: float = field(init=True, default=0.5) # to be multiplied by N_trees
     simple_mate_location: bool = field(init=True, default=True)
 
@@ -325,7 +326,7 @@ class Crossover(Move):
         mate_positions_all = mate_sol.xyt[inds_mate, :, :2]  # (N_moves, N_trees, 2)
 
         # Generate n_trees_to_replace, rotation, and mirror for all
-        min_trees = min(int(np.round(self.min_N_trees_ratio * np.sqrt(N_trees))), N_trees)
+        min_trees = min(self.min_N_trees, N_trees)
         max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
         if max_trees< min_trees:
             max_trees = min_trees
@@ -537,10 +538,10 @@ import typing
 @dataclass
 class CrossoverStripe(Move):
     """Stripe-based crossover that selects trees by distance to a random line."""
-    min_N_trees_ratio: float = field(init=True, default=4/np.sqrt(40)) # to be multiplied by sqrt(N_trees)
+    min_N_trees: int = field(init=True, default=2)
     max_N_trees_ratio: float = field(init=True, default=0.5)
 
-    distance_function: typing.Literal['stripe', 'square90'] = field(init=True, default='stripe')
+    distance_function: typing.Literal['stripe', 'square', 'square90'] = field(init=True, default='stripe')
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
@@ -572,7 +573,7 @@ class CrossoverStripe(Move):
         mate_line_point_y = offset_y_all + mate_h_params[:, 2]        
 
         # Decide how many trees swap hands and what transforms to apply to mates
-        min_trees = min(int(np.round(self.min_N_trees_ratio * np.sqrt(N_trees))), N_trees)
+        min_trees = min(self.min_N_trees, N_trees)
         max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
         if max_trees < min_trees:
             max_trees = min_trees
@@ -620,7 +621,63 @@ class CrossoverStripe(Move):
                 (mate_positions_all[:, :, 0] - mate_line_point_x_2d) * normal_x_2d +
                 (mate_positions_all[:, :, 1] - mate_line_point_y_2d) * normal_y_2d
             )
-        
+        elif self.distance_function == 'square':
+            # Compute the distances using L-infinity metric for both populations.
+            line_point_x_2d = line_point_x[:, cp.newaxis]
+            line_point_y_2d = line_point_y[:, cp.newaxis]
+            mate_line_point_x_2d = mate_line_point_x[:, cp.newaxis]
+            mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
+
+            distances_individual_all = cp.maximum(
+                cp.abs(tree_positions_all[:, :, 0] - line_point_x_2d),
+                cp.abs(tree_positions_all[:, :, 1] - line_point_y_2d)
+            )
+
+            distances_mate_all = cp.maximum(
+                cp.abs(mate_positions_all[:, :, 0] - mate_line_point_x_2d),
+                cp.abs(mate_positions_all[:, :, 1] - mate_line_point_y_2d)
+            )
+        elif self.distance_function == 'square90':
+            assert isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90)
+            # Compute L-infinity distance considering all 4 rotational images (0°, 90°, 180°, 270°)
+            # Each genotype tree at (x, y) appears at 4 phenotype positions:
+            #   0°: (x, y), 90°: (-y, x), 180°: (-x, -y), 270°: (y, -x)
+            # We take the minimum distance across all 4 images
+            line_point_x_2d = line_point_x[:, cp.newaxis]
+            line_point_y_2d = line_point_y[:, cp.newaxis]
+            mate_line_point_x_2d = mate_line_point_x[:, cp.newaxis]
+            mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
+
+            # For individual population trees
+            x_ind = tree_positions_all[:, :, 0]
+            y_ind = tree_positions_all[:, :, 1]
+            
+            # Compute L-infinity distances for all 4 rotational images
+            # Image 0: (x, y)
+            dist_0 = cp.maximum(cp.abs(x_ind - line_point_x_2d), cp.abs(y_ind - line_point_y_2d))
+            # Image 1: (-y, x)
+            dist_1 = cp.maximum(cp.abs(-y_ind - line_point_x_2d), cp.abs(x_ind - line_point_y_2d))
+            # Image 2: (-x, -y)
+            dist_2 = cp.maximum(cp.abs(-x_ind - line_point_x_2d), cp.abs(-y_ind - line_point_y_2d))
+            # Image 3: (y, -x)
+            dist_3 = cp.maximum(cp.abs(y_ind - line_point_x_2d), cp.abs(-x_ind - line_point_y_2d))
+            
+            # Take minimum distance across all 4 images
+            distances_individual_all = cp.minimum(cp.minimum(dist_0, dist_1), cp.minimum(dist_2, dist_3))
+
+            # For mate population trees
+            x_mate = mate_positions_all[:, :, 0]
+            y_mate = mate_positions_all[:, :, 1]
+            
+            # Compute L-infinity distances for all 4 rotational images
+            dist_0_mate = cp.maximum(cp.abs(x_mate - mate_line_point_x_2d), cp.abs(y_mate - mate_line_point_y_2d))
+            dist_1_mate = cp.maximum(cp.abs(-y_mate - mate_line_point_x_2d), cp.abs(x_mate - mate_line_point_y_2d))
+            dist_2_mate = cp.maximum(cp.abs(-x_mate - mate_line_point_x_2d), cp.abs(-y_mate - mate_line_point_y_2d))
+            dist_3_mate = cp.maximum(cp.abs(y_mate - mate_line_point_x_2d), cp.abs(-x_mate - mate_line_point_y_2d))
+            
+            distances_mate_all = cp.minimum(cp.minimum(dist_0_mate, dist_1_mate), cp.minimum(dist_2_mate, dist_3_mate))
+        else:
+            raise Exception(f"Unknown distance function: {self.distance_function}")
 
         # Rank trees by proximity to the stripe for both populations
         sorted_individual_tree_ids = cp.argsort(distances_individual_all, axis=1)

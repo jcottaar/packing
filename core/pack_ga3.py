@@ -1521,4 +1521,5 @@ def baseline_symmetry_90():
     print([m[1] for m in runner.ga.ga_base.move.moves])
     runner.ga.ga_base.move.moves = [m for m in runner.ga.ga_base.move.moves if m[1] not in ['Translate']]
     print([m[1] for m in runner.ga.ga_base.move.moves])
+    runner.ga.ga_base.move.moves[-1][0].distance_function = 'square90'
     return runner
