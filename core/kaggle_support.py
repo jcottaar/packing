@@ -459,6 +459,10 @@ class SolutionCollection(BaseClass):
         return self.xyt.shape[1]
     
     def canonicalize(self):
+        self.canonicalize_xyt(self.xyt)
+
+    def canonicalize_xyt(self, xyt:cp.ndarray):
+        """Canonicalize genotype xyt. Default implementation does nothing."""
         pass
     
     def is_phenotype(self):
@@ -681,7 +685,7 @@ class SolutionCollectionSquareSymmetric(SolutionCollection):
     def rotate(self):
         raise Exception('rotate not implemented for SolutionCollectionSquare')
     
-    def canonicalize(self):
+    def canonicalize_xyt(self, xyt:cp.ndarray):
         """Canonicalize genotype to x<=0, y<=0 quadrant.
         
         Rotate each tree based on its current quadrant to move it to the canonical quadrant:
@@ -694,9 +698,9 @@ class SolutionCollectionSquareSymmetric(SolutionCollection):
         images of each genotype tree.
         """
         # Get views of original values (before any modifications)
-        x = self.xyt[:, :, 0]
-        y = self.xyt[:, :, 1]
-        theta = self.xyt[:, :, 2]
+        x = xyt[:, :, 0]
+        y = xyt[:, :, 1]
+        theta = xyt[:, :, 2]
         
         # Determine which quadrant each tree is in
         q1 = (x > 0) & (y > 0)   # Quadrant 1: rotate 180°
@@ -723,9 +727,9 @@ class SolutionCollectionSquareSymmetric(SolutionCollection):
         new_theta = cp.where(q4, theta + 3*cp.pi/2, new_theta)
         
         # Assign all at once
-        self.xyt[:, :, 0] = new_x
-        self.xyt[:, :, 1] = new_y
-        self.xyt[:, :, 2] = cp.remainder(new_theta, 2*cp.pi)
+        xyt[:, :, 0] = new_x
+        xyt[:, :, 1] = new_y
+        xyt[:, :, 2] = cp.remainder(new_theta, 2*cp.pi)
     
     def is_phenotype(self):
         return False

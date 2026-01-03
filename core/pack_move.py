@@ -555,8 +555,12 @@ class CrossoverStripe(Move):
 
         # Sample a random point inside each square to anchor the crossover stripe
         h_sizes = h_params[:, 0]
-        offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-        offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric):
+            offset_x_all = generator.uniform(-h_sizes / 2, 0.)
+            offset_y_all = generator.uniform(-h_sizes / 2, 0.)
+        else:
+            offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
         line_point_x = offset_x_all + h_params[:, 1]
         line_point_y = offset_y_all + h_params[:, 2]
 
@@ -588,6 +592,7 @@ class CrossoverStripe(Move):
             rotation_choice_all,
             do_mirror_all,
         )
+        mate_sol.canonicalize_xyt(mate_trees_full)
 
         # Drop the theta channel for distance computations
         mate_positions_all = mate_trees_full[:, :, :2]
@@ -666,3 +671,4 @@ class CrossoverStripe(Move):
         mate_trees_full[:, :, 0] = mate_x
         mate_trees_full[:, :, 1] = mate_y
         mate_trees_full[:, :, 2] = mate_theta
+        

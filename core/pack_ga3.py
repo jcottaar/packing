@@ -300,7 +300,7 @@ class GA(kgs.BaseClass):
         self._reset(generator)
         self._last_reset_generation = len(self.best_costs_per_generation[0])-1
 
-    def score(self, register_best=False):
+    def score(self, generator, register_best=False):
         if self._is_frozen2:
             if register_best:
                 for c in self.best_costs_per_generation:
@@ -311,7 +311,7 @@ class GA(kgs.BaseClass):
                     self._is_frozen2 = False
                     self._last_reset_generation = len(self.best_costs_per_generation[0])-1
             return
-        self._score(register_best)
+        self._score(generator, register_best)
         if register_best:
             assert(len(self.champions) == len(self.best_costs_per_generation))     
             if self.best_ever is None:
@@ -342,9 +342,9 @@ class GA(kgs.BaseClass):
                         costs[-1][0]==costs[-effective_reset_check_generations][0] and \
                         costs[-1][1]>=self.reset_check_threshold*costs[-effective_reset_check_generations][1]:                    
                     if self.allow_reset:
-                        self.reset()                        
+                        self.reset(generator)                        
                         self.best_costs_per_generation[0].pop(-1)
-                        self._score(register_best)
+                        self._score(generator, register_best)
                         self._skip_next_selection = True
                     elif self.allow_freeze:
                         self._is_frozen2 = True                        
@@ -499,9 +499,9 @@ class GAMulti(GA):
     def _reset(self, generator):
         for ga in self.ga_list:
             ga.reset(generator)
-    def _score(self, register_best):
+    def _score(self, generator, register_best):
         for ga in self.ga_list:
-            ga.score(register_best=register_best)
+            ga.score(generator, register_best=register_best)
         if register_best:
             if not self.single_champion:
                 self.champions = [a.champions[0] for a in self.ga_list]
@@ -559,8 +559,8 @@ class GAMulti(GA):
                         ga_to_reset = self.ga_list[idx]
                         if ga_to_reset.best_costs_per_generation and ga_to_reset.best_costs_per_generation[0]:
                             ga_to_reset.best_costs_per_generation[0].pop(-1)
-                        ga_to_reset.reset()
-                        ga_to_reset.score(register_best=True)
+                        ga_to_reset.reset(generator)
+                        ga_to_reset.score(generator, register_best=True)
                         ga_to_reset._skip_next_selection = True
                         costs_per_ga[idx] = ga_to_reset.champions[0].fitness[0]
 
@@ -780,7 +780,7 @@ class GASinglePopulation(GA):
         self.population = self.initializer.initialize_population(len(self.selection_size), self.N_trees_to_do)    
         self.population.check_constraints()        
 
-    def _score(self, register_best):
+    def _score(self, generator, register_best):
         # Compute cost and reshape to (N_solutions, 1) for tuple-based fitness
         cost_values = self.fitness_cost.compute_cost_allocate(self.population.phenotype, evaluate_gradient=False)[0].get()
 
@@ -1433,7 +1433,7 @@ class Orchestrator(kgs.BaseClass):
                 self.ga.initialize(self._generator)
                 self.ga.reset(self._generator)
                 #self._relax(self.ga.get_list_for_simulation())    
-                self.ga.score(register_best=True)
+                self.ga.score(self._generator, register_best=True)
 
 
             self._current_generation = self._current_generation
@@ -1442,7 +1442,7 @@ class Orchestrator(kgs.BaseClass):
             self._relax(offspring_list)
             self.ga.merge_offspring()
             
-            self.ga.score(register_best=True)            
+            self.ga.score(self._generator, register_best=True)            
             for s in self.ga.best_costs_per_generation:
                 assert len(s) == self._current_generation + 2
             self.ga.apply_selection()
