@@ -284,14 +284,14 @@ class GA(kgs.BaseClass):
             assert(len(self.best_ever) == len(self.best_costs_per_generation))
             
 
-    def initialize(self):
+    def initialize(self, generator):
         self.check_constraints(debugging_mode_offset=2)        
         self.fitness_cost.check_constraints()
-        self._initialize()
+        self._initialize(generator)
 
-    def reset(self):
+    def reset(self, generator):
         self.champions = None
-        self._reset()
+        self._reset(generator)
         self._last_reset_generation = len(self.best_costs_per_generation[0])-1
 
     def score(self, register_best=False):
@@ -344,7 +344,7 @@ class GA(kgs.BaseClass):
                         self._is_frozen2 = True                        
 
 
-    def generate_offspring(self, mate_sol, mate_weights, mate_costs):        
+    def generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):        
         if self._is_frozen2:
             return []
         filtered_mate_sol = mate_sol
@@ -375,7 +375,7 @@ class GA(kgs.BaseClass):
                 filtered_mate_sol = None
                 filtered_mate_weights = None
                 filtered_mate_costs = None
-        res = self._generate_offspring(filtered_mate_sol, filtered_mate_weights, filtered_mate_costs)
+        res = self._generate_offspring(filtered_mate_sol, filtered_mate_weights, filtered_mate_costs, generator)
         self._cached_offspring = res
         return res
     
@@ -481,19 +481,18 @@ class GAMulti(GA):
             if kgs.debugging_mode>=2:
                 for ga in self.ga_list:
                     ga.check_constraints()
-    def _initialize(self):  
-        generator = cp.random.default_rng(seed=self.seed)          
+    def _initialize(self, generator):          
         for ga in self.ga_list:
             ga.seed = generator.integers(0, 2**30).get().item()
             ga.fitness_cost = self.fitness_cost
-            ga.initialize()
+            ga.initialize(generator)
         if self.single_champion:
             self.best_costs_per_generation = [[]]
         else:
             self.best_costs_per_generation = [ [] for _ in self.ga_list ]
-    def _reset(self):
+    def _reset(self, generator):
         for ga in self.ga_list:
-            ga.reset()
+            ga.reset(generator)
     def _score(self, register_best):
         for ga in self.ga_list:
             ga.score(register_best=register_best)
@@ -559,9 +558,9 @@ class GAMulti(GA):
                         ga_to_reset._skip_next_selection = True
                         costs_per_ga[idx] = ga_to_reset.champions[0].fitness[0]
 
-    def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
+    def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         return sum([
-            ga.generate_offspring(mate_sol, mate_weights, mate_costs)
+            ga.generate_offspring(mate_sol, mate_weights, mate_costs, generator)
             for ga in self.ga_list
         ], [])
     def _merge_offspring(self):
@@ -640,7 +639,7 @@ class GAMultiRing(GAMultiSimilar):
     mate_distance: int = field(init=True, default=4)   
     sort_ring_by_cost: bool = field(init=True, default=False)  
     actually_use_champions: bool = field(init=True, default=True)
-    def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
+    def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         assert mate_sol is None
         #if self.champions is None:
         #    return super()._generate_offspring(mate_sol, mate_weights)
@@ -707,7 +706,7 @@ class GAMultiRing(GAMultiSimilar):
                 merged_sol, mate_weights, mate_costs = None, None, None
             
             # Generate offspring for this GA using the merged mate population
-            offspring_list.extend(ga.generate_offspring(merged_sol, mate_weights, mate_costs))
+            offspring_list.extend(ga.generate_offspring(merged_sol, mate_weights, mate_costs, generator))
         # offspring_list is out of order - this is OK (child GAs cache their own offspring)
         return offspring_list
 
@@ -733,10 +732,7 @@ class GASinglePopulation(GA):
     plot_population_fitness_ax = None
 
     # Results
-    population: Population = field(init=True, default=None)    
-
-    # Internal
-    _generator: cp.random.Generator = field(init=False, default=None)
+    population: Population = field(init=True, default=None)
 
     def __post_init__(self):        
         self.initializer.jiggler.n_rounds=0        
@@ -762,12 +758,11 @@ class GASinglePopulation(GA):
             self.population.check_constraints()
         super()._check_constraints()
 
-    def _initialize(self):
-        self._generator = cp.random.default_rng(seed=self.seed)
+    def _initialize(self, generator):
         self.best_costs_per_generation = [[]]
 
-    def _reset(self):
-        self.initializer.seed = self._generator.integers(0, 2**30).get().item()
+    def _reset(self, generator):
+        self.initializer.seed = generator.integers(0, 2**30).get().item()
         if self.fixed_h is not None:
             if self.fixed_h == -1.:
                 ref_score = ref_solution[1][self.N_trees_to_do-1]
@@ -823,7 +818,7 @@ class GASinglePopulation(GA):
         return [self.population]
     
     def _finalize(self):
-        self._generator = None
+        pass
 
     def _abbreviate(self):
         self.population = None
@@ -913,14 +908,14 @@ class GASinglePopulationTournament(GASinglePopulation):
         self.population = current_pop
         self.population.check_constraints()
 
-    def _tournament_select(self, parent_size: int, n_offspring: int) -> cp.ndarray:
+    def _tournament_select(self, parent_size: int, n_offspring: int, generator) -> cp.ndarray:
         """Perform tournament selection to choose parents.
         
         For each offspring, draw tournament_size candidates and select the best.
         Returns array of parent indices (shape: n_offspring).
         """
         # Draw tournament candidates: (n_offspring, tournament_size)
-        candidates = self._generator.integers(0, parent_size, (n_offspring, self.tournament_size))
+        candidates = generator.integers(0, parent_size, (n_offspring, self.tournament_size))
         
         # Get fitness for all candidates - need to find best in each tournament
         # fitness shape: (parent_size, n_components)
@@ -936,7 +931,7 @@ class GASinglePopulationTournament(GASinglePopulation):
         
         return winners
 
-    def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
+    def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         old_pop = self.population
         old_pop.check_constraints()
         old_pop.parent_fitness = old_pop.fitness.copy()
@@ -967,7 +962,7 @@ class GASinglePopulationTournament(GASinglePopulation):
             all_parent_ids[:n_champion] = best_idx
         
         if n_tournament > 0:
-            all_parent_ids[n_champion:] = self._tournament_select(parent_size, n_tournament)
+            all_parent_ids[n_champion:] = self._tournament_select(parent_size, n_tournament, generator)
         
         # Clone all parents at once
         all_inds = cp.arange(self.population_size)
@@ -977,24 +972,24 @@ class GASinglePopulationTournament(GASinglePopulation):
         if mate_sol is None or mate_sol.N_solutions == 0:
             use_own = cp.ones(self.population_size, dtype=bool)
         else:
-            use_own = self._generator.random(self.population_size) < self.prob_mate_own
+            use_own = generator.random(self.population_size) < self.prob_mate_own
         
         # Own-population mates (always mate with champion)
         inds_use_own = cp.where(use_own)[0]
         if len(inds_use_own) > 0:
             mate_ids_own = cp.full(len(inds_use_own), best_idx, dtype=cp.int64)
             self.move.do_move_vec(new_pop, inds_use_own, old_pop.genotype,
-                                  mate_ids_own, self._generator)
+                                  mate_ids_own, generator)
         
         # External-population mates
         inds_use_external = cp.where(~use_own)[0]
         if len(inds_use_external) > 0:
             mate_prob = cp.asarray(mate_weights) / cp.sum(mate_weights)
             cum_prob = cp.cumsum(mate_prob)
-            random_vals = self._generator.random(len(inds_use_external))
+            random_vals = generator.random(len(inds_use_external))
             mate_ids_external = cp.searchsorted(cum_prob, random_vals)
             self.move.do_move_vec(new_pop, inds_use_external, mate_sol.genotype,
-                                  mate_ids_external, self._generator)
+                                  mate_ids_external, generator)
         
         return [new_pop]
 
@@ -1028,7 +1023,7 @@ class GASinglePopulationOld(GASinglePopulation):
     diversity_to_elite_only: bool = field(init=True, default=False)
     lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='min_cost_row'))
 
-    def _initialize(self):
+    def _initialize(self, generator):
         # Generate selection_size from parameters if not provided
         if self.selection_size is None:
             total_survivors = max(2, int(self.population_size * self.survival_rate))
@@ -1043,7 +1038,7 @@ class GASinglePopulationOld(GASinglePopulation):
             else:
                 tiers = []
             self.selection_size = elite + tiers
-        super()._initialize()
+        super()._initialize(generator)
 
     def _apply_selection(self):
         current_pop = self.population
@@ -1159,7 +1154,7 @@ class GASinglePopulationOld(GASinglePopulation):
         self.population = current_pop
         self.population.check_constraints()
 
-    def _generate_offspring(self, mate_sol, mate_weights, mate_costs):
+    def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         
         old_pop = self.population
         old_pop.check_constraints()
@@ -1171,14 +1166,14 @@ class GASinglePopulationOld(GASinglePopulation):
         N_offspring = new_pop.genotype.N_solutions
 
         # Pick random parents (all from old_pop)
-        parent_ids = self._generator.integers(0, parent_size, size=N_offspring)
+        parent_ids = generator.integers(0, parent_size, size=N_offspring)
 
         # Merge old_pop.genotype and mate_sol into a single mate collection
         # Layout: [0, parent_size) are from old_pop, [parent_size, ...) are from mate_sol
         merged_mate_sol = copy.deepcopy(old_pop.genotype)
         if mate_sol is not None and mate_sol.N_solutions > 0:
             merged_mate_sol.merge(mate_sol)
-            use_own = self._generator.random(N_offspring) < self.prob_mate_own
+            use_own = generator.random(N_offspring) < self.prob_mate_own
         else:
             use_own = np.ones(N_offspring, dtype=bool)
 
@@ -1190,7 +1185,7 @@ class GASinglePopulationOld(GASinglePopulation):
         if len(inds_use_own) > 0:
             parent_ids_own = parent_ids[inds_use_own]
             # Pick random mates (excluding parent) - fully vectorized
-            mate_ids_own = self._generator.integers(0, parent_size - 1, size=len(inds_use_own))
+            mate_ids_own = generator.integers(0, parent_size - 1, size=len(inds_use_own))
             # If mate_id >= parent_id, increment by 1 to skip the parent
             mate_ids_own = np.where(mate_ids_own >= parent_ids_own, mate_ids_own + 1, mate_ids_own)
         else:
@@ -1206,7 +1201,7 @@ class GASinglePopulationOld(GASinglePopulation):
             
             # Sample mates using weighted selection (CuPy doesn't have choice, use cumsum + searchsorted)
             cum_prob = cp.cumsum(mate_prob)
-            random_vals = self._generator.random(len(inds_use_external))
+            random_vals = generator.random(len(inds_use_external))
             mate_ids_external = cp.searchsorted(cum_prob, random_vals)
             
             # Offset external mate indices to point into merged collection
@@ -1240,7 +1235,7 @@ class GASinglePopulationOld(GASinglePopulation):
         if len(all_inds) > 0:
             combined_inds = cp.array(np.concatenate(all_inds))
             combined_mate_ids = cp.array(np.concatenate(all_mate_ids))
-            self.move.do_move_vec(new_pop, combined_inds, merged_mate_sol, combined_mate_ids, self._generator)
+            self.move.do_move_vec(new_pop, combined_inds, merged_mate_sol, combined_mate_ids, generator)
 
         return [new_pop]
     
@@ -1253,42 +1248,7 @@ class GASinglePopulationOld(GASinglePopulation):
         
         self.population.check_constraints()
 
-    def __getstate__(self):
-        state = super().__getstate__()
-        gen = state.get('_generator', None)
-        if gen is None:
-            return state
-        bitgen = getattr(gen, 'bit_generator', None)
-        assert not( bitgen is None or type(bitgen).__name__ != 'XORWOW')
-        bit_state = bitgen.__getstate__()
-        raw_state = bit_state.get('_state', None)
-        assert isinstance(raw_state, cp.ndarray)
-        raw_state_np = raw_state.get()
-        assert raw_state_np.dtype == np.int8
-        state['_generator'] = {
-            '__format__': 'cupy_xorwow_state_only_v1',
-            '_state': _encode_int8_array(raw_state_np),
-        }
-        return state
 
-    def __setstate__(self, state):
-        gen_payload = state.get('_generator', None)
-
-        # New compact format: only restores XORWOW._state
-        if isinstance(gen_payload, dict) and gen_payload.get('__format__') == 'cupy_xorwow_state_only_v1':
-            sparse_state = gen_payload.get('_state', None)
-            if isinstance(sparse_state, dict) and sparse_state.get('format') in ('sparse_int8_v1', 'zlib_int8_v1'):
-                decoded = _decode_int8_array(sparse_state)
-
-                gen = cp.random.default_rng()
-                bitgen = getattr(gen, 'bit_generator', None)
-                if bitgen is not None and type(bitgen).__name__ == 'XORWOW':
-                    # Only mutate `_state` as requested.
-                    bitgen._state = cp.asarray(decoded)
-                    state = dict(state)
-                    state['_generator'] = gen
-
-        super().__setstate__(state)
         
 
 @dataclass
@@ -1314,6 +1274,7 @@ class Orchestrator(kgs.BaseClass):
     # Intermediate
     _current_generation: int = field(init=False, default=0)
     _is_finalized: bool = field(init=False, default=False)
+    _generator: cp.random.Generator = field(init=False, default=None)
 
     
     def __post_init__(self):        
@@ -1380,6 +1341,43 @@ class Orchestrator(kgs.BaseClass):
         self.ga.check_constraints()
         return super()._check_constraints()
     
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        gen = state.get('_generator', None)
+        if gen is None:
+            return state
+        bitgen = getattr(gen, 'bit_generator', None)
+        assert not( bitgen is None or type(bitgen).__name__ != 'XORWOW')
+        bit_state = bitgen.__getstate__()
+        raw_state = bit_state.get('_state', None)
+        assert isinstance(raw_state, cp.ndarray)
+        raw_state_np = raw_state.get()
+        assert raw_state_np.dtype == np.int8
+        state['_generator'] = {
+            '__format__': 'cupy_xorwow_state_only_v1',
+            '_state': _encode_int8_array(raw_state_np),
+        }
+        return state
+
+    def __setstate__(self, state):
+        gen_payload = state.get('_generator', None)
+
+        # New compact format: only restores XORWOW._state
+        if isinstance(gen_payload, dict) and gen_payload.get('__format__') == 'cupy_xorwow_state_only_v1':
+            sparse_state = gen_payload.get('_state', None)
+            if isinstance(sparse_state, dict) and sparse_state.get('format') in ('sparse_int8_v1', 'zlib_int8_v1'):
+                decoded = _decode_int8_array(sparse_state)
+
+                gen = cp.random.default_rng()
+                bitgen = getattr(gen, 'bit_generator', None)
+                if bitgen is not None and type(bitgen).__name__ == 'XORWOW':
+                    # Only mutate `_state` as requested.
+                    bitgen._state = cp.asarray(decoded)
+                    state = dict(state)
+                    state['_generator'] = gen
+
+        self.__dict__.update(state)
+    
     def _save_checkpoint(self, filename):
         """Save checkpoint with optional atomic write."""
         if self.filename == '':
@@ -1397,19 +1395,23 @@ class Orchestrator(kgs.BaseClass):
 
         while self._current_generation<self.n_generations and not self.ga._stopped:
             if self._current_generation==0:
+                # Initialize generator if not already present (e.g., loaded from checkpoint)
+                if self._generator is None:
+                    self._generator = cp.random.default_rng(seed=self.seed)
+                
                 self.ga.fitness_cost = self.fitness_cost
                 self.ga.seed = self.seed
 
                 # Initialize
-                self.ga.initialize()
-                self.ga.reset()
+                self.ga.initialize(self._generator)
+                self.ga.reset(self._generator)
                 #self._relax(self.ga.get_list_for_simulation())    
                 self.ga.score(register_best=True)
 
 
             self._current_generation = self._current_generation
 
-            offspring_list = self.ga.generate_offspring(None, None, None)
+            offspring_list = self.ga.generate_offspring(None, None, None, self._generator)
             self._relax(offspring_list)
             self.ga.merge_offspring()
             
@@ -1436,6 +1438,7 @@ class Orchestrator(kgs.BaseClass):
         
         if not self._is_finalized:
             self._save_checkpoint(save_filename)
+            self._generator = None
             self.ga.finalize()
             self._is_finalized = True
 
