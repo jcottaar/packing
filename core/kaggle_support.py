@@ -668,7 +668,7 @@ class SolutionCollectionSquare(SolutionCollection):
         else:
             self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
 
-class SolutionCollectionSquareSymmetric(SolutionCollection):
+class SolutionCollectionSquareSymmetric90(SolutionCollection):
 
     def __post_init__(self):
         self._N_h_DOF = 3  # h = [size, x_offset, y_offset]

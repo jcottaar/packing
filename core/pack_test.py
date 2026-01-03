@@ -66,7 +66,7 @@ def test_costs():
 
     kgs.set_float32(False)
     sol_list = []
-    sol_list.append(kgs.SolutionCollectionSquareSymmetric())
+    sol_list.append(kgs.SolutionCollectionSquareSymmetric90())
     sol_list[-1].xyt = cp.array([pack_basics.place_random(3, 1.5, generator=np.random.default_rng(seed=1)).xyt], dtype=cp.float64)
     sol_list[-1].h = cp.array([[0.5, 0., 0.]])
     sol_list.append(kgs.SolutionCollectionSquare())

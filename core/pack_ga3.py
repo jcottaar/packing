@@ -997,7 +997,7 @@ class GASinglePopulationTournament(GASinglePopulation):
             self.move.do_move_vec(new_pop, inds_use_external, mate_sol.genotype,
                                   mate_ids_external, generator)
         
-        new_pop.canonicalize()
+        new_pop.genotype.canonicalize()
         
         return [new_pop]
 
@@ -1513,4 +1513,12 @@ def baseline():
     runner.ga.plot_diversity_ax = (1,0)
     runner.plot_every = 3
 
+    return runner
+
+def baseline_symmetry_90():
+    runner = baseline()
+    runner.ga.ga_base.initializer.base_solution = kgs.SolutionCollectionSquareSymmetric90()
+    print([m[1] for m in runner.ga.ga_base.move.moves])
+    runner.ga.ga_base.move.moves = [m for m in runner.ga.ga_base.move.moves if m[1] not in ['Translate']]
+    print([m[1] for m in runner.ga.ga_base.move.moves])
     return runner

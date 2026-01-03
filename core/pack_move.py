@@ -532,12 +532,15 @@ class Crossover(Move):
         trees[:, 1] = dst_center_y + dy
         trees[:, 2] = theta
 
+import typing
 
 @dataclass
 class CrossoverStripe(Move):
     """Stripe-based crossover that selects trees by distance to a random line."""
     min_N_trees_ratio: float = field(init=True, default=4/np.sqrt(40)) # to be multiplied by sqrt(N_trees)
     max_N_trees_ratio: float = field(init=True, default=0.5)
+
+    distance_function: typing.Literal['stripe', 'square90'] = field(init=True, default='stripe')
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
@@ -555,7 +558,7 @@ class CrossoverStripe(Move):
 
         # Sample a random point inside each square to anchor the crossover stripe
         h_sizes = h_params[:, 0]
-        if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric):
+        if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90):
             offset_x_all = generator.uniform(-h_sizes / 2, 0.)
             offset_y_all = generator.uniform(-h_sizes / 2, 0.)
         else:
@@ -566,12 +569,7 @@ class CrossoverStripe(Move):
 
         # Mirror that same point into mate coordinates after accounting for its square center
         mate_line_point_x = offset_x_all + mate_h_params[:, 1]
-        mate_line_point_y = offset_y_all + mate_h_params[:, 2]
-
-        # Draw random line orientations and compute their normals for distance tests
-        line_angles = generator.uniform(0, 2 * cp.pi, size=N_moves)
-        normal_x = -cp.sin(line_angles)
-        normal_y = cp.cos(line_angles)
+        mate_line_point_y = offset_y_all + mate_h_params[:, 2]        
 
         # Decide how many trees swap hands and what transforms to apply to mates
         min_trees = min(int(np.round(self.min_N_trees_ratio * np.sqrt(N_trees))), N_trees)
@@ -597,25 +595,32 @@ class CrossoverStripe(Move):
         # Drop the theta channel for distance computations
         mate_positions_all = mate_trees_full[:, :, :2]
 
-        # Broadcast reference points and line normals for batched projections
-        line_point_x_2d = line_point_x[:, cp.newaxis]
-        line_point_y_2d = line_point_y[:, cp.newaxis]
-        mate_line_point_x_2d = mate_line_point_x[:, cp.newaxis]
-        mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
-        normal_x_2d = normal_x[:, cp.newaxis]
-        normal_y_2d = normal_y[:, cp.newaxis]
+        if self.distance_function == 'stripe':
+            # Draw random line orientations and compute their normals for distance tests
+            line_angles = generator.uniform(0, 2 * cp.pi, size=N_moves)
+            normal_x = -cp.sin(line_angles)
+            normal_y = cp.cos(line_angles)
 
-        # Compute absolute distances to each line for the target population
-        distances_individual_all = cp.abs(
-            (tree_positions_all[:, :, 0] - line_point_x_2d) * normal_x_2d +
-            (tree_positions_all[:, :, 1] - line_point_y_2d) * normal_y_2d
-        )
+            # Broadcast reference points and line normals for batched projections
+            line_point_x_2d = line_point_x[:, cp.newaxis]
+            line_point_y_2d = line_point_y[:, cp.newaxis]
+            mate_line_point_x_2d = mate_line_point_x[:, cp.newaxis]
+            mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
+            normal_x_2d = normal_x[:, cp.newaxis]
+            normal_y_2d = normal_y[:, cp.newaxis]
 
-        # Repeat the distance evaluation for the transformed mate coordinates
-        distances_mate_all = cp.abs(
-            (mate_positions_all[:, :, 0] - mate_line_point_x_2d) * normal_x_2d +
-            (mate_positions_all[:, :, 1] - mate_line_point_y_2d) * normal_y_2d
-        )
+            # Compute absolute distances to each line for the target population
+            distances_individual_all = cp.abs(
+                (tree_positions_all[:, :, 0] - line_point_x_2d) * normal_x_2d +
+                (tree_positions_all[:, :, 1] - line_point_y_2d) * normal_y_2d
+            )
+
+            # Repeat the distance evaluation for the transformed mate coordinates
+            distances_mate_all = cp.abs(
+                (mate_positions_all[:, :, 0] - mate_line_point_x_2d) * normal_x_2d +
+                (mate_positions_all[:, :, 1] - mate_line_point_y_2d) * normal_y_2d
+            )
+        
 
         # Rank trees by proximity to the stripe for both populations
         sorted_individual_tree_ids = cp.argsort(distances_individual_all, axis=1)
