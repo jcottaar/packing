@@ -20,10 +20,10 @@ kgs.set_float32(CUDA_float32)
 pack_cuda._ensure_initialized()
 
 def run_all_tests(regenerate_reference=False):
-    kgs.debugging_mode = 2    
+    kgs.debugging_mode = 2   
     test_ga(regenerate_reference, False)
-    test_ga(False, True)
-    test_costs()        
+    test_ga(False, True)      
+    test_costs()               
     pack_cuda_primitives_test.run_all_tests()    
     print("All tests passed.")
 
@@ -42,6 +42,7 @@ def test_ga(regenerate_reference, do_resume):
     ga.use_atomic_save = False
     #ga.ga.selection_size = [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,26,27,28,29,30,35,40,45,50,60,70,80,90]
     ga.ga.do_legalize = False
+    ga.ga.initializer.base_solution.override_phenotype = True
     if not do_resume:
         ga.run()
         res = ga.ga.population.fitness
@@ -65,12 +66,17 @@ def test_costs():
 
     kgs.set_float32(False)
     sol_list = []
+    sol_list.append(kgs.SolutionCollectionSquareSymmetric())
+    sol_list[-1].xyt = cp.array([pack_basics.place_random(3, 1.5, generator=np.random.default_rng(seed=1)).xyt], dtype=cp.float64)
+    sol_list[-1].h = cp.array([[0.5, 0., 0.]])
     sol_list.append(kgs.SolutionCollectionSquare())
     sol_list[-1].xyt = cp.array([pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=0)).xyt], dtype=cp.float64)
     sol_list[-1].h = cp.array([[0.5, 0.2, 0.4]])
+    sol_list[-1].override_phenotype = True
     sol_list.append(kgs.SolutionCollectionSquare())
     sol_list[-1].xyt = cp.array([pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=2)).xyt], dtype=cp.float64)
     sol_list[-1].h = cp.array([[2., -0.1, -0.15]])
+    sol_list[-1].override_phenotype = True
     sol_list.append(kgs.SolutionCollectionLattice())
     sol_list[-1].xyt = cp.array([[
         [0.0, 0.0, 0.0],      # Tree 0 at origin
@@ -107,7 +113,16 @@ def test_costs():
     sol_list[-1].N_periodic = 1
     
     for ii in range(len(sol_list)):
-        pack_vis_sol.pack_vis_sol(sol_list[ii], solution_idx=0)
+        if sol_list[ii].is_phenotype():
+            pack_vis_sol.pack_vis_sol(sol_list[ii], solution_idx=0)
+        else:
+            _,ax = plt.subplots(1,2,figsize=(10,5))
+            pack_vis_sol.pack_vis_sol(sol_list[ii], ax=ax[0], solution_idx=0)
+            pack_vis_sol.pack_vis_sol(sol_list[ii].convert_to_phenotype(), ax=ax[1], solution_idx=0)
+            sol_list[ii].canonicalize()
+            _,ax = plt.subplots(1,2,figsize=(10,5))
+            pack_vis_sol.pack_vis_sol(sol_list[ii], ax=ax[0], solution_idx=0)
+            pack_vis_sol.pack_vis_sol(sol_list[ii].convert_to_phenotype(), ax=ax[1], solution_idx=0)
     plt.pause(0.001)
 
     for c in costs_to_test:
@@ -218,14 +233,14 @@ def test_costs():
             max_diff_bound = cp.max(cp.abs(grad_bound_num - grad_bound_fast_flat)).get().item()
             assert cp.allclose(grad_bound_num, grad_bound_ref.ravel(), rtol=1e-4, atol=1e-4), f"Finite-diff bound gradient mismatch (max diff {max_diff_bound})"
         
-        for todo in ([[0,1]] if (isinstance(c, pack_cost.BoundaryDistanceCost) or isinstance(c, pack_cost.BoundaryCost)) else [[0,1],[2,3]]):
+        for todo in ([[1,2]] if (isinstance(c, pack_cost.BoundaryDistanceCost) or isinstance(c, pack_cost.BoundaryCost)) else [[1,2],[3,4]]):
             # Vectorized check: call with all xyt and bounds for this cost function
             print(f"  Vectorized check for {c.__class__.__name__}")
             full_xyt = cp.concatenate(all_xyt[todo[0]:todo[-1]+1], axis=0)
             full_bounds = cp.concatenate(all_bounds[todo[0]:todo[-1]+1], axis=0)
 
             # Compute vectorized results using kgs.SolutionCollectionSquare
-            full_sol = type(sol_list[todo[0]])()
+            full_sol = copy.deepcopy(sol_list[todo[0]])#type(sol_list[todo[0]])()
             full_sol.xyt = full_xyt
             full_sol.h = full_bounds
             kgs.set_float32(False)
@@ -233,7 +248,7 @@ def test_costs():
             vec_cost_ref, vec_grad_ref, vec_grad_bound_ref = c.compute_cost_ref(full_sol)
             print(vec_cost_ref)
             kgs.set_float32(CUDA_float32)
-            full_sol_fast = type(sol_list[todo[0]])()
+            full_sol_fast = copy.deepcopy(sol_list[todo[0]])#type(sol_list[todo[0]])()
             full_sol_fast.xyt = cp.array(full_xyt,dtype=kgs.dtype_cp)
             full_sol_fast.h = cp.array(full_bounds,dtype=kgs.dtype_cp)
             vec_cost_fast, vec_grad_fast, vec_grad_bound_fast = c.compute_cost_allocate(full_sol_fast)

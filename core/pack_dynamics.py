@@ -43,6 +43,7 @@ class OptimizerBFGS(kgs.BaseClass):
 
         sol.check_constraints()
         sol = copy.deepcopy(sol)
+        sol.prep_for_phenotype()
         #sol.snap()
 
         #print('snapped', cp.min(self.cost.compute_cost_allocate(sol)[0]))
@@ -70,7 +71,7 @@ class OptimizerBFGS(kgs.BaseClass):
             tmp_x[:x.shape[0]] = cp.from_dlpack(to_dlpack(x))
             nonlocal sol_tmp, counter
             counter+=1
-            N_split = sol_tmp.N_trees*3
+            N_split = sol_tmp.xyt.shape[1]*3
             N = x.shape[0]
 
             # This has to go via tmp_xyt/tmp_h for contiguity
@@ -98,8 +99,8 @@ class OptimizerBFGS(kgs.BaseClass):
             f_torch,x0,tolerance_grad=0, tolerance_change=0, tolerance_rel_change=self.tolerance_rel_change, max_iter=self.n_iterations, history_size=self.history_size, max_step=self.max_step,
             line_search_fn = 'strong_wolfe' if self.use_line_search else None, stop_on_cost_increase=self.stop_on_cost_increase)
         x_result = cp.from_dlpack(to_dlpack(results))
-        sol.xyt = cp.ascontiguousarray(x_result[:,:sol.N_trees*3].reshape(sol.N_solutions,-1,3))
-        sol.h = cp.ascontiguousarray(x_result[:,sol.N_trees*3:].reshape(sol.N_solutions,-1))
+        sol.xyt = cp.ascontiguousarray(x_result[:,:sol.xyt.shape[1]*3].reshape(sol.N_solutions,-1,3))
+        sol.h = cp.ascontiguousarray(x_result[:,sol.xyt.shape[1]*3:].reshape(sol.N_solutions,-1))
 
         if self.plot_cost and self.track_cost:
             cost_history = np.array(cost_history)  # Convert list to array: (n_actual_iterations, N_solutions)
@@ -114,6 +115,7 @@ class OptimizerBFGS(kgs.BaseClass):
 
         #print('after', cp.min(self.cost.compute_cost_allocate(sol)[0]))
 
+        sol.unprep_for_phenotype()
         return sol
 
 @dataclass
@@ -144,6 +146,7 @@ class Optimizer(kgs.BaseClass):
         # Initial configuration
 
         sol.check_constraints()
+        sol.prep_for_phenotype()
         sol = copy.deepcopy(sol)
         #sol.snap()
 
@@ -273,6 +276,7 @@ class Optimizer(kgs.BaseClass):
             ax = plt.gca()
             ax.set_yscale('log')
             plt.pause(0.001)
+        sol.unprep_for_phenotype()
         return sol
 
 @dataclass

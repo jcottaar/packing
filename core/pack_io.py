@@ -18,6 +18,7 @@ import lap_batch
 import pack_metric
 
 def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True):
+    assert sol.is_phenotype()
     solx = copy.deepcopy(sol)
     solx.use_fixed_h = False
     solx.snap()

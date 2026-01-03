@@ -432,8 +432,11 @@ class SolutionCollection(BaseClass):
     use_fixed_h: bool = field(default=False)
     periodic: bool = field(default=False)  # whether to use periodic boundaries
     N_periodic: int = field(default=2)  # number of periodic images in each direction
+    override_phenotype: bool = field(default=False, init=True) # for testing
 
     _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
+    _prepped_for_phenotype: bool = field(default=False, init=False, repr=False)
+    _prepped_phenotype = None
 
     def _check_constraints(self):
         if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
@@ -454,6 +457,58 @@ class SolutionCollection(BaseClass):
         if self.xyt is None:
             return 0
         return self.xyt.shape[1]
+    
+    def canonicalize(self):
+        pass
+    
+    def is_phenotype(self):
+        return not self.override_phenotype
+    
+    def prep_for_phenotype(self):
+        self._prep_for_phenotype()
+        self._prepped_for_phenotype = True
+
+    def _prep_for_phenotype(self):
+        if self.override_phenotype:
+            self._prepped_phenotype = copy.deepcopy(self)
+            self._prepped_phenotype.override_phenotype = False
+    
+    def unprep_for_phenotype(self):
+        self._unprep_for_phenotype()
+        self._prepped_for_phenotype = False
+
+    def _unprep_for_phenotype(self):
+        if self.override_phenotype:            
+            self._prepped_phenotype = None
+
+    def convert_to_phenotype(self):
+        assert not self.is_phenotype()
+        was_prepped = self._prepped_for_phenotype
+        if not self._prepped_for_phenotype:
+            self.prep_for_phenotype()
+        phenotype = self._convert_to_phenotype()
+        if not was_prepped:
+            self.unprep_for_phenotype()
+        return phenotype
+
+    def _convert_to_phenotype(self):
+        assert self.override_phenotype
+        self._prepped_phenotype.xyt[:] = self.xyt 
+        self._prepped_phenotype.h[:] = self.h 
+        return self._prepped_phenotype
+    
+    def backprop_phenotype(self, grad_xyt_phenotype, grad_h_phenotype, grad_xyt_genotype, grad_h_genotype):
+        """Backpropagate gradients from phenotype space to genotype space.
+        
+        Args:
+            grad_xyt_phenotype: Gradients w.r.t. phenotype xyt
+            grad_h_phenotype: Gradients w.r.t. phenotype h
+            grad_xyt_genotype: Output array for genotype xyt gradients
+            grad_h_genotype: Output array for genotype h gradients
+        """
+        assert self.override_phenotype
+        grad_xyt_genotype[:] = grad_xyt_phenotype
+        grad_h_genotype[:] = grad_h_phenotype
     
     def rotate(self, angle:cp.ndarray):
         # rotate xyt by given angle (radians)
@@ -607,6 +662,175 @@ class SolutionCollectionSquare(SolutionCollection):
             self.h = cp.stack([size, 0*size, 0*size], axis=1)  # (n_solutions, 3)
         else:
             self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
+
+class SolutionCollectionSquareSymmetric(SolutionCollection):
+
+    def __post_init__(self):
+        self._N_h_DOF = 3  # h = [size, x_offset, y_offset]
+        return super().__post_init__()
+
+    @property
+    def N_trees(self) -> int:
+        """Number of trees per solution (N_trees)."""
+        if self.xyt is None:
+            return 0
+        return 4*self.xyt.shape[1]
+    
+    
+    def rotate(self):
+        raise Exception('rotate not implemented for SolutionCollectionSquare')
+    
+    def canonicalize(self):
+        """Canonicalize genotype to x<=0, y<=0 quadrant.
+        
+        Rotate each tree based on its current quadrant to move it to the canonical quadrant:
+        - Q1 (x>0, y>0): rotate 180°
+        - Q2 (x≤0, y>0): rotate 90° CCW
+        - Q3 (x≤0, y≤0): no rotation (already canonical)
+        - Q4 (x>0, y≤0): rotate 270° CCW
+        
+        This doesn't change the phenotype because the phenotype contains all 4 rotational
+        images of each genotype tree.
+        """
+        # Get views of original values (before any modifications)
+        x = self.xyt[:, :, 0]
+        y = self.xyt[:, :, 1]
+        theta = self.xyt[:, :, 2]
+        
+        # Determine which quadrant each tree is in
+        q1 = (x > 0) & (y > 0)   # Quadrant 1: rotate 180°
+        q2 = (x <= 0) & (y > 0)  # Quadrant 2: rotate 90° CCW
+        q4 = (x > 0) & (y <= 0)  # Quadrant 4: rotate 270° CCW
+        # q3 = (x <= 0) & (y <= 0) - already canonical, no action needed
+        
+        # Compute new values for all trees simultaneously from original values
+        # Q1: (x,y,θ) → (-x, -y, θ+π)
+        # Q2: (x,y,θ) → (-y, x, θ+π/2)
+        # Q4: (x,y,θ) → (y, -x, θ+3π/2)
+        # Q3: (x,y,θ) → (x, y, θ)
+        
+        new_x = cp.where(q1, -x, x)
+        new_x = cp.where(q2, -y, new_x)
+        new_x = cp.where(q4, y, new_x)
+        
+        new_y = cp.where(q1, -y, y)
+        new_y = cp.where(q2, x, new_y)
+        new_y = cp.where(q4, -x, new_y)
+        
+        new_theta = cp.where(q1, theta + cp.pi, theta)
+        new_theta = cp.where(q2, theta + cp.pi/2, new_theta)
+        new_theta = cp.where(q4, theta + 3*cp.pi/2, new_theta)
+        
+        # Assign all at once
+        self.xyt[:, :, 0] = new_x
+        self.xyt[:, :, 1] = new_y
+        self.xyt[:, :, 2] = cp.remainder(new_theta, 2*cp.pi)
+    
+    def is_phenotype(self):
+        return False
+
+    def _prep_for_phenotype(self):        
+        self._prepped_phenotype = SolutionCollectionSquare()
+        self._prepped_phenotype.h = cp.zeros_like(self.h)
+        self._prepped_phenotype.use_fixed_h = self.use_fixed_h
+        self._prepped_phenotype.xyt = cp.zeros((self.N_solutions, self.N_trees, 3), dtype=dtype_cp)
+
+    def _unprep_for_phenotype(self):
+        self._prepped_phenotype = None
+
+    def _convert_to_phenotype(self):
+        """Convert genotype to phenotype by generating 4 rotational images.
+        
+        For each tree at (x, y, θ), create 4 images:
+        - 0°:   (x, y, θ)
+        - 90°:  (-y, x, θ + π/2)
+        - 180°: (-x, -y, θ + π)
+        - 270°: (y, -x, θ + 3π/2)
+        """
+        N_solutions = self.N_solutions
+        N_trees_gen = self.xyt.shape[1]
+        
+        # Extract genotype components
+        x = self.xyt[:, :, 0]  # (N_solutions, N_trees_gen)
+        y = self.xyt[:, :, 1]
+        theta = self.xyt[:, :, 2]
+        
+        # Image 0: identity (0° rotation)
+        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 0] = x
+        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 1] = y
+        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 2] = theta
+        
+        # Image 1: 90° rotation
+        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 0] = -y
+        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 1] = x
+        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 2] = theta + cp.pi/2
+        
+        # Image 2: 180° rotation
+        self._prepped_phenotype.xyt[:, 2*N_trees_gen:3*N_trees_gen, 0] = -x
+        self._prepped_phenotype.xyt[:, 2*N_trees_gen:3*N_trees_gen, 1] = -y
+        self._prepped_phenotype.xyt[:, 2*N_trees_gen:3*N_trees_gen, 2] = theta + cp.pi
+        
+        # Image 3: 270° rotation
+        self._prepped_phenotype.xyt[:, 3*N_trees_gen:4*N_trees_gen, 0] = y
+        self._prepped_phenotype.xyt[:, 3*N_trees_gen:4*N_trees_gen, 1] = -x
+        self._prepped_phenotype.xyt[:, 3*N_trees_gen:4*N_trees_gen, 2] = theta + 3*cp.pi/2
+        
+        self._prepped_phenotype.h[:] = self.h
+        return self._prepped_phenotype
+    
+    def backprop_phenotype(self, grad_xyt_phenotype, grad_h_phenotype, grad_xyt_genotype, grad_h_genotype):
+        """Backpropagate gradients from 4 phenotype images to genotype.
+        
+        Each genotype tree affects 4 phenotype trees through the rotation transformations.
+        We sum the contributions using the chain rule.
+        """
+        N_solutions = self.N_solutions
+        N_trees_gen = self.xyt.shape[1]
+        
+        # Extract phenotype gradients for each image
+        gx0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 0]  # Image 0
+        gy0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 1]
+        gtheta0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 2]
+        
+        gx1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 0]  # Image 1 (90°)
+        gy1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 1]
+        gtheta1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 2]
+        
+        gx2 = grad_xyt_phenotype[:, 2*N_trees_gen:3*N_trees_gen, 0]  # Image 2 (180°)
+        gy2 = grad_xyt_phenotype[:, 2*N_trees_gen:3*N_trees_gen, 1]
+        gtheta2 = grad_xyt_phenotype[:, 2*N_trees_gen:3*N_trees_gen, 2]
+        
+        gx3 = grad_xyt_phenotype[:, 3*N_trees_gen:4*N_trees_gen, 0]  # Image 3 (270°)
+        gy3 = grad_xyt_phenotype[:, 3*N_trees_gen:4*N_trees_gen, 1]
+        gtheta3 = grad_xyt_phenotype[:, 3*N_trees_gen:4*N_trees_gen, 2]
+        
+        # Apply chain rule for each transformation:
+        # Image 0 (x, y, θ):        ∂x/∂x=1, ∂y/∂y=1, ∂θ/∂θ=1
+        # Image 1 (-y, x, θ+π/2):   ∂x/∂y=-1, ∂y/∂x=1, ∂θ/∂θ=1
+        # Image 2 (-x, -y, θ+π):    ∂x/∂x=-1, ∂y/∂y=-1, ∂θ/∂θ=1
+        # Image 3 (y, -x, θ+3π/2):  ∂x/∂y=1, ∂y/∂x=-1, ∂θ/∂θ=1
+        
+        grad_xyt_genotype[:, :, 0] = gx0 + gy1 - gx2 - gy3
+        grad_xyt_genotype[:, :, 1] = gy0 - gx1 - gy2 + gx3
+        grad_xyt_genotype[:, :, 2] = gtheta0 + gtheta1 + gtheta2 + gtheta3
+        
+        # Boundary parameter gradients pass through unchanged
+        grad_h_genotype[:] = grad_h_phenotype
+    
+ 
+    def create_empty(self, N_solutions: int, N_trees: int):
+        assert(N_trees % 4 == 0)
+        xyt = cp.zeros((N_solutions, N_trees//4, 3), dtype=dtype_cp)
+        h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
+        return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, periodic=self.periodic)
+    # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
+
+    def snap(self):
+        phenotype = self.convert_to_phenotype()
+        phenotype.snap()
+        self.h[:] = phenotype.h[:]
+
+
 
 @dataclass
 class SolutionCollectionLattice(SolutionCollection):

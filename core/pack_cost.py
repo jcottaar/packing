@@ -19,6 +19,15 @@ class Cost(kgs.BaseClass):
     def compute_cost_ref(self, sol:kgs.SolutionCollection):
         # xyt: (n_ensemble, n_trees, 3) array
         #bound: (n_ensemble, 1 or 3) array
+        if not sol.is_phenotype():
+            sol_phenotype = sol.convert_to_phenotype()
+            cost, grad_xyt_phenotype, grad_h_phenotype = self.compute_cost_ref(sol_phenotype)
+            # backprop gradients from phenotype to genotype space
+            grad_xyt = cp.zeros_like(sol.xyt)
+            grad_bound = cp.zeros_like(sol.h)
+            sol.backprop_phenotype(grad_xyt_phenotype, grad_h_phenotype, grad_xyt, grad_bound)
+            return cost, grad_xyt, grad_bound
+
         sol.check_constraints()                
         cost,grad_xyt,grad_bound = self._compute_cost_ref(sol)
         assert cost.shape == (sol.N_solutions,)
@@ -49,6 +58,16 @@ class Cost(kgs.BaseClass):
     
     def compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool=True):
         # Subclass can implement faster version with preallocated gradients
+        if not sol.is_phenotype():            
+            sol_phenotype = sol.convert_to_phenotype()
+            # Allocate temp arrays for phenotype gradients
+            grad_xyt_temp = cp.zeros_like(sol_phenotype.xyt)
+            grad_h_temp = cp.zeros_like(sol_phenotype.h)
+            self.compute_cost(sol_phenotype, cost, grad_xyt_temp, grad_h_temp, evaluate_gradient=evaluate_gradient)
+            # backprop gradients from phenotype to genotype space
+            if evaluate_gradient:
+                sol.backprop_phenotype(grad_xyt_temp, grad_h_temp, grad_xyt, grad_bound)
+            return
         self._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         if self.scaling != 1.0:
             cost *= self.scaling
