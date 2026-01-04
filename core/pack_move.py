@@ -578,7 +578,7 @@ class CrossoverStripe(Move):
             mate_line_point_x = line_point_x - h_params[:, 1] + mate_h_params[:, 1]
             mate_line_point_y = line_point_y - h_params[:, 2] + mate_h_params[:, 2]
         else:
-            print(mate_sol.N_trees)
+            #print(mate_sol.N_trees)
             square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (mate_sol.N_trees))
             line_point_x, line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
             mate_line_point_x, mate_line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
@@ -649,7 +649,7 @@ class CrossoverStripe(Move):
         #     mate_line_point_x = offset_x_all + mate_h_params[:, 1]
         #     mate_line_point_y = offset_y_all + mate_h_params[:, 2]     
 
-        print(line_point_x, line_point_y, mate_line_point_x, mate_line_point_y)   
+        #print(line_point_x, line_point_y, mate_line_point_x, mate_line_point_y)   
 
 
         # Fetch the full set of tree coordinates for both parents involved
