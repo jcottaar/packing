@@ -751,19 +751,8 @@ class GAMultiRing(GAMultiIsland):
         n_ga = len(self.ga_list)
         connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
         
-        if self.star_topology:
-            # Star topology: hub (island 0) connects with all others
-            for i in range(1, n_ga):
-                if self.asymmetric_star:
-                    # Asymmetric: hub receives from all, but doesn't send back
-                    connectivity_matrix[0, i] = True   # hub receives from island i
-                    connectivity_matrix[i, 0] = False  # island i does NOT receive from hub
-                else:
-                    # Symmetric: bidirectional connections with hub
-                    connectivity_matrix[i, 0] = True
-                    connectivity_matrix[0, i] = True
-        else:
-            # Ring topology with mate_distance
+        # Always start with ring topology (if we have more than 1 island)
+        if n_ga > 1:
             for i in range(n_ga):
                 # Add connections to neighbors within mate_distance
                 for offset in range(1, min(self.mate_distance + 1, n_ga // 2 + 1)):
@@ -775,8 +764,21 @@ class GAMultiRing(GAMultiIsland):
                     right_idx = (i + offset) % n_ga
                     connectivity_matrix[i, right_idx] = True
         
-        # Apply small-world rewiring if specified
-        if self.small_world_rewiring > 0.0 and not self.star_topology:
+        # Optionally ADD star topology connections on top of ring
+        if self.star_topology:
+            # Star topology: hub (island 0) connects with all others
+            for i in range(1, n_ga):
+                if self.asymmetric_star:
+                    # Asymmetric: hub receives from all, but doesn't send back
+                    connectivity_matrix[0, i] = True   # hub receives from island i
+                    connectivity_matrix[i, 0] = False  # island i does NOT receive from hub
+                else:
+                    # Symmetric: bidirectional connections with hub
+                    connectivity_matrix[i, 0] = True
+                    connectivity_matrix[0, i] = True
+        
+        # Apply small-world rewiring if specified (only to original ring edges)
+        if self.small_world_rewiring > 0.0 and n_ga > 2:
             rng = np.random.default_rng(self.seed)  # Use deterministic rewiring
             for i in range(n_ga):
                 for j in range(i + 1, n_ga):
@@ -840,10 +842,77 @@ class GAMultiTree(GAMultiIsland):
         if n_ga <= 0 or not self._is_complete_binary_tree_size(n_ga):
             powers = [2**k - 1 for k in range(1, 10)]
             raise ValueError(f"GAMultiTree requires number of islands to be 2^k - 1 (complete binary tree), got {n_ga}. Valid sizes: {powers[:6]}...")
+        self.display_structure()
     
     def _is_complete_binary_tree_size(self, n: int) -> bool:
         """Check if n is of the form 2^k - 1."""
         return n > 0 and (n + 1) & n == 0
+    
+    def display_structure(self):
+        """Display the binary tree structure as ASCII art."""
+        n_ga = len(self.ga_list)
+        if n_ga == 0:
+            return
+        
+        # Calculate tree depth
+        depth = int(np.log2(n_ga + 1))
+        
+        print(f"\nGAMultiTree structure ({n_ga} islands, depth {depth}):")
+        
+        if n_ga <= 31:  # Only show ASCII art for reasonably sized trees
+            # Use a simpler, cleaner ASCII representation
+            def print_subtree(node_idx, prefix="", is_last=True):
+                if node_idx >= n_ga:
+                    return
+                
+                # Print current node
+                connector = "└── " if is_last else "├── "
+                print(f"{prefix}{connector}{node_idx}")
+                
+                # Update prefix for children
+                child_prefix = prefix + ("    " if is_last else "│   ")
+                
+                # Print children
+                left_child = 2 * node_idx + 1
+                right_child = 2 * node_idx + 2
+                
+                children = []
+                if left_child < n_ga:
+                    children.append(left_child)
+                if right_child < n_ga:
+                    children.append(right_child)
+                
+                for i, child in enumerate(children):
+                    is_last_child = (i == len(children) - 1)
+                    print_subtree(child, child_prefix, is_last_child)
+            
+            # Start with root
+            print_subtree(0)
+            
+            # Show connectivity info
+            print("\nConnectivity (each island connects to parent, children, and sibling):")
+            connectivity_matrix = self._get_connectivity_matrix()
+            for i in range(min(n_ga, 15)):  # Show first 15 islands to avoid clutter
+                connections = [j for j in range(n_ga) if connectivity_matrix[i, j]]
+                print(f"  Island {i}: → {connections}")
+            if n_ga > 15:
+                print(f"  ... (showing first 15 of {n_ga} islands)")
+                
+        else:
+            # For large trees, just show level-by-level listing
+            for level in range(depth):
+                start_idx = 2**level - 1
+                end_idx = min(2**(level+1) - 1, n_ga)
+                nodes = list(range(start_idx, end_idx))
+                print(f"  Level {level}: {nodes}")
+        
+        print()  # Add blank line after structure
+        
+        try:
+            import matplotlib.pyplot as plt
+            plt.pause(0.001)
+        except ImportError:
+            pass
     
     def _get_connectivity_matrix(self) -> np.ndarray:
         """Return connectivity matrix for binary tree with sibling connections.
