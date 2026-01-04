@@ -702,25 +702,192 @@ class GAMultiIsland(GAMultiSimilar):
 class GAMultiRing(GAMultiIsland):
     # Configuration
     mate_distance: int = field(init=True, default=4)
+    star_topology: bool = field(init=True, default=False)  # Connect all islands to island 0
+    asymmetric_star: bool = field(init=True, default=False)  # If True with star_topology, hub receives but doesn't send
+    small_world_rewiring: float = field(init=True, default=0.0)  # Probability of rewiring edges
     def _get_connectivity_matrix(self) -> np.ndarray:
         """Return connectivity matrix for ring topology with mate_distance.
         
         Each island can mate with islands at distances 1 to mate_distance in both directions,
-        with wraparound (periodic boundaries).
+        with wraparound (periodic boundaries). Optionally convert to star topology or apply
+        small-world rewiring.
+        """
+        n_ga = len(self.ga_list)
+        connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
+        
+        if self.star_topology:
+            # Star topology: hub (island 0) connects with all others
+            for i in range(1, n_ga):
+                if self.asymmetric_star:
+                    # Asymmetric: hub receives from all, but doesn't send back
+                    connectivity_matrix[0, i] = True   # hub receives from island i
+                    connectivity_matrix[i, 0] = False  # island i does NOT receive from hub
+                else:
+                    # Symmetric: bidirectional connections with hub
+                    connectivity_matrix[i, 0] = True
+                    connectivity_matrix[0, i] = True
+        else:
+            # Ring topology with mate_distance
+            for i in range(n_ga):
+                # Add connections to neighbors within mate_distance
+                for offset in range(1, min(self.mate_distance + 1, n_ga // 2 + 1)):
+                    # Left neighbor (with wraparound)
+                    left_idx = (i - offset) % n_ga
+                    connectivity_matrix[i, left_idx] = True
+                    
+                    # Right neighbor (with wraparound) 
+                    right_idx = (i + offset) % n_ga
+                    connectivity_matrix[i, right_idx] = True
+        
+        # Apply small-world rewiring if specified
+        if self.small_world_rewiring > 0.0 and not self.star_topology:
+            rng = np.random.default_rng(self.seed)  # Use deterministic rewiring
+            for i in range(n_ga):
+                for j in range(i + 1, n_ga):
+                    if connectivity_matrix[i, j] and rng.random() < self.small_world_rewiring:
+                        # Rewire edge (i,j) to (i,k) where k is random
+                        connectivity_matrix[i, j] = False
+                        connectivity_matrix[j, i] = False
+                        # Find a random target that's not i and not already connected
+                        candidates = [k for k in range(n_ga) if k != i and not connectivity_matrix[i, k]]
+                        if candidates:
+                            k = rng.choice(candidates)
+                            connectivity_matrix[i, k] = True
+                            connectivity_matrix[k, i] = True
+        
+
+@dataclass
+class GAMultiHypercube(GAMultiIsland):
+    """Hypercube topology where islands connect to neighbors differing by one bit.
+    
+    Number of islands must be a power of 2.
+    """
+    
+    def _initialize(self, generator):
+        super()._initialize(generator)
+        # Validate that number of islands is a power of 2
+        n_ga = len(self.ga_list)
+        if n_ga <= 0 or (n_ga & (n_ga - 1)) != 0:
+            raise ValueError(f"GAMultiHypercube requires number of islands to be a power of 2, got {n_ga}")
+    
+    def _get_connectivity_matrix(self) -> np.ndarray:
+        """Return connectivity matrix for hypercube topology.
+        
+        Each island connects to neighbors that differ by exactly one bit
+        in their binary representation.
         """
         n_ga = len(self.ga_list)
         connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
         
         for i in range(n_ga):
-            # Add connections to neighbors within mate_distance
-            for offset in range(1, min(self.mate_distance + 1, n_ga // 2 + 1)):
-                # Left neighbor (with wraparound)
-                left_idx = (i - offset) % n_ga
-                connectivity_matrix[i, left_idx] = True
-                
-                # Right neighbor (with wraparound) 
+            for bit_pos in range(int(np.log2(n_ga))):
+                # Flip the bit_pos-th bit to get neighbor
+                neighbor = i ^ (1 << bit_pos)
+                connectivity_matrix[i, neighbor] = True
+        
+        return connectivity_matrix
+
+
+@dataclass
+class GAMultiTree(GAMultiIsland):
+    """Binary tree topology with sibling connections.
+    
+    Number of islands must be 2^k - 1 (complete binary tree).
+    Islands connect to parent, children, and siblings.
+    """
+    
+    def _initialize(self, generator):
+        super()._initialize(generator)
+        # Validate that number of islands is 2^k - 1
+        n_ga = len(self.ga_list)
+        if n_ga <= 0 or not self._is_complete_binary_tree_size(n_ga):
+            powers = [2**k - 1 for k in range(1, 10)]
+            raise ValueError(f"GAMultiTree requires number of islands to be 2^k - 1 (complete binary tree), got {n_ga}. Valid sizes: {powers[:6]}...")
+    
+    def _is_complete_binary_tree_size(self, n: int) -> bool:
+        """Check if n is of the form 2^k - 1."""
+        return n > 0 and (n + 1) & n == 0
+    
+    def _get_connectivity_matrix(self) -> np.ndarray:
+        """Return connectivity matrix for binary tree with sibling connections.
+        
+        Tree layout: root=0, left_child=2*i+1, right_child=2*i+2, parent=(i-1)//2
+        Each node connects to parent, children, and sibling.
+        """
+        n_ga = len(self.ga_list)
+        connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
+        
+        for i in range(n_ga):
+            # Connect to parent (except root)
+            if i > 0:
+                parent = (i - 1) // 2
+                connectivity_matrix[i, parent] = True
+                connectivity_matrix[parent, i] = True
+            
+            # Connect to left child
+            left_child = 2 * i + 1
+            if left_child < n_ga:
+                connectivity_matrix[i, left_child] = True
+                connectivity_matrix[left_child, i] = True
+            
+            # Connect to right child
+            right_child = 2 * i + 2
+            if right_child < n_ga:
+                connectivity_matrix[i, right_child] = True
+                connectivity_matrix[right_child, i] = True
+            
+            # Connect to sibling
+            if i > 0:  # Skip root
+                if i % 2 == 1:  # i is left child
+                    sibling = i + 1  # right sibling
+                else:  # i is right child
+                    sibling = i - 1  # left sibling
+                if sibling < n_ga:
+                    connectivity_matrix[i, sibling] = True
+                    connectivity_matrix[sibling, i] = True
+        
+        return connectivity_matrix
+
+
+@dataclass
+class GAMultiSmallWorld(GAMultiIsland):
+    """Small-world topology: start with ring, then rewire edges with probability.
+    
+    Based on Watts-Strogatz model.
+    """
+    base_neighbors: int = field(init=True, default=2)  # Each island connects to this many nearest neighbors
+    rewiring_probability: float = field(init=True, default=0.1)  # Probability of rewiring each edge
+    
+    def _get_connectivity_matrix(self) -> np.ndarray:
+        """Return connectivity matrix for small-world topology.
+        
+        Start with regular ring lattice, then rewire edges with given probability.
+        """
+        n_ga = len(self.ga_list)
+        connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
+        
+        # Step 1: Create regular ring lattice
+        for i in range(n_ga):
+            for offset in range(1, min(self.base_neighbors // 2 + 1, n_ga // 2 + 1)):
+                # Right neighbor (with wraparound)
                 right_idx = (i + offset) % n_ga
                 connectivity_matrix[i, right_idx] = True
+                connectivity_matrix[right_idx, i] = True
+        
+        # Step 2: Rewire edges with probability
+        rng = np.random.default_rng(self.seed if hasattr(self, 'seed') else 42)
+        for i in range(n_ga):
+            for j in range(i + 1, n_ga):
+                if connectivity_matrix[i, j] and rng.random() < self.rewiring_probability:
+                    # Rewire edge (i,j) to (i,k) where k is random
+                    connectivity_matrix[i, j] = False
+                    connectivity_matrix[j, i] = False
+                    # Find a random target that's not i and not already connected
+                    candidates = [k for k in range(n_ga) if k != i and not connectivity_matrix[i, k]]
+                    if candidates:
+                        k = rng.choice(candidates)
+                        connectivity_matrix[i, k] = True
+                        connectivity_matrix[k, i] = True
         
         return connectivity_matrix
 
