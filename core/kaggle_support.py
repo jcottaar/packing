@@ -890,6 +890,171 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
         return move_centers_x, move_centers_y
 
 
+@dataclass
+class SolutionCollectionSquareSymmetric180(SolutionCollection):
+    """Square boundary with 180° rotational symmetry (2 images instead of 4)."""
+
+    def __post_init__(self):
+        self._N_h_DOF = 3  # h = [size, x_offset, y_offset]
+        return super().__post_init__()
+
+    @property
+    def N_trees(self) -> int:
+        """Number of trees per solution (N_trees)."""
+        if self.xyt is None:
+            return 0
+        return 2*self.xyt.shape[1]
+    
+    def rotate(self):
+        raise Exception('rotate not implemented for SolutionCollectionSquareSymmetric180')
+    
+    def canonicalize_xyt(self, xyt:cp.ndarray):
+        """Canonicalize genotype to one half-plane.
+        
+        Rotate trees in the "wrong" half by 180° to move them to the canonical half:
+        - If x > 0: rotate 180° to move to x ≤ 0
+        - If x ≤ 0: no rotation (already canonical)
+        
+        This doesn't change the phenotype because the phenotype contains both
+        rotational images of each genotype tree.
+        """
+        # Get views of original values
+        x = xyt[:, :, 0]
+        y = xyt[:, :, 1]
+        theta = xyt[:, :, 2]
+        
+        # Determine which trees need rotation (x > 0)
+        needs_rotation = x > 0
+        
+        # Rotate by 180°: (x,y,θ) → (-x, -y, θ+π)
+        new_x = cp.where(needs_rotation, -x, x)
+        new_y = cp.where(needs_rotation, -y, y)
+        new_theta = cp.where(needs_rotation, theta + cp.pi, theta)
+        
+        # Assign all at once
+        xyt[:, :, 0] = new_x
+        xyt[:, :, 1] = new_y
+        xyt[:, :, 2] = cp.remainder(new_theta, 2*cp.pi)
+    
+    def is_phenotype(self):
+        return False
+
+    def _prep_for_phenotype(self):        
+        self._prepped_phenotype = SolutionCollectionSquare()
+        self._prepped_phenotype.h = cp.zeros_like(self.h)
+        self._prepped_phenotype.use_fixed_h = self.use_fixed_h
+        self._prepped_phenotype.xyt = cp.zeros((self.N_solutions, self.N_trees, 3), dtype=dtype_cp)
+
+    def _unprep_for_phenotype(self):
+        self._prepped_phenotype = None
+
+    def _convert_to_phenotype(self):
+        """Convert genotype to phenotype by generating 2 rotational images.
+        
+        For each tree at (x, y, θ), create 2 images:
+        - 0°:   (x, y, θ)
+        - 180°: (-x, -y, θ + π)
+        """
+        N_solutions = self.N_solutions
+        N_trees_gen = self.xyt.shape[1]
+        
+        # Extract genotype components
+        x = self.xyt[:, :, 0]  # (N_solutions, N_trees_gen)
+        y = self.xyt[:, :, 1]
+        theta = self.xyt[:, :, 2]
+        
+        # Image 0: identity (0° rotation)
+        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 0] = x
+        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 1] = y
+        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 2] = theta
+        
+        # Image 1: 180° rotation
+        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 0] = -x
+        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 1] = -y
+        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 2] = theta + cp.pi
+        
+        self._prepped_phenotype.h[:] = self.h
+        return self._prepped_phenotype
+    
+    def backprop_phenotype(self, grad_xyt_phenotype, grad_h_phenotype, grad_xyt_genotype, grad_h_genotype):
+        """Backpropagate gradients from 2 phenotype images to genotype.
+        
+        Each genotype tree affects 2 phenotype trees through the rotation transformations.
+        We sum the contributions using the chain rule.
+        """
+        N_solutions = self.N_solutions
+        N_trees_gen = self.xyt.shape[1]
+        
+        # Extract phenotype gradients for each image
+        gx0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 0]  # Image 0
+        gy0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 1]
+        gtheta0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 2]
+        
+        gx1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 0]  # Image 1 (180°)
+        gy1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 1]
+        gtheta1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 2]
+        
+        # Apply chain rule for each transformation:
+        # Image 0 (x, y, θ):        ∂x/∂x=1, ∂y/∂y=1, ∂θ/∂θ=1
+        # Image 1 (-x, -y, θ+π):    ∂x/∂x=-1, ∂y/∂y=-1, ∂θ/∂θ=1
+        
+        grad_xyt_genotype[:, :, 0] = gx0 - gx1
+        grad_xyt_genotype[:, :, 1] = gy0 - gy1
+        grad_xyt_genotype[:, :, 2] = gtheta0 + gtheta1
+        
+        # Boundary parameter gradients pass through unchanged
+        grad_h_genotype[:] = grad_h_phenotype
+    
+    def create_empty(self, N_solutions: int, N_trees: int):
+        assert(N_trees % 2 == 0)
+        xyt = cp.zeros((N_solutions, N_trees//2, 3), dtype=dtype_cp)
+        h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
+        return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, periodic=self.periodic)
+
+    def snap(self):
+        phenotype = self.convert_to_phenotype()
+        phenotype.snap()
+        self.h[:] = phenotype.h[:]
+
+    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):        
+        original_size = self.h[inds_to_do,0].copy()  # (N,)
+        size = original_size.copy()
+        if edge_clearance is not None:
+            size -= edge_clearance*2
+        else:
+            edge_clearance = 0*size
+       
+        # Assert no infinite loop: need original_size >= 2*edge_clearance for acceptance to be possible
+        # For 180° symmetry, only need to avoid x > -edge_clearance (single constraint)
+        assert cp.all(original_size >= 4*edge_clearance), \
+            f"Infinite loop risk: original_size must be >= 4*edge_clearance. " \
+            f"Min ratio: {float(cp.min(original_size / (edge_clearance + 1e-10)))}"
+       
+        # Rejection sampling: not allowed to have x > -edge_clearance
+        # (Only one constraint for 180° symmetry)
+        N = len(inds_to_do)
+        move_centers_x = cp.zeros(N, dtype=dtype_cp)
+        move_centers_y = cp.zeros(N, dtype=dtype_cp)
+        remaining_mask = cp.ones(N, dtype=bool)
+        
+        print('start')
+        while cp.any(remaining_mask):
+            n_remaining = int(cp.sum(remaining_mask))
+            candidate_x = generator.uniform(-size[remaining_mask] / 2, 0., size=n_remaining)
+            candidate_y = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, size=n_remaining)
+            # Accept if x <= -edge_clearance (left half-plane)
+            accept_mask = (candidate_x <= -edge_clearance[remaining_mask]) | (cp.abs(candidate_y) <= edge_clearance[remaining_mask])
+            # Update only the accepted samples
+            indices_remaining = cp.where(remaining_mask)[0]
+            indices_accepted = indices_remaining[accept_mask]
+            move_centers_x[indices_accepted] = candidate_x[accept_mask] + self.h[inds_to_do[indices_accepted], 1]
+            move_centers_y[indices_accepted] = candidate_y[accept_mask] + self.h[inds_to_do[indices_accepted], 2]
+            remaining_mask[indices_accepted] = False
+        print('end')
+
+        return move_centers_x, move_centers_y
+
+
 
 @dataclass
 class SolutionCollectionLattice(SolutionCollection):

@@ -807,6 +807,85 @@ class CrossoverStripe(Move):
             # Assert that transformed distances match original minimum distances
             distance_error = cp.max(cp.abs(distances_mate_all - distances_mate_all_original))
             assert distance_error < 1e-4, f"Distance mismatch after transformation: max error = {distance_error}"
+        elif self.distance_function == 'square180':
+            assert isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric180)
+            # Compute L-infinity distance considering both rotational images (0°, 180°)
+            # Each genotype tree at (x, y) appears at 2 phenotype positions:
+            #   0°: (x, y), 180°: (-x, -y)
+            # We take the minimum distance across both images
+            line_point_x_2d = line_point_x[:, cp.newaxis]
+            line_point_y_2d = line_point_y[:, cp.newaxis]
+            mate_line_point_x_2d = mate_line_point_x[:, cp.newaxis]
+            mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
+
+            # For individual population trees
+            x_ind = tree_positions_all[:, :, 0]
+            y_ind = tree_positions_all[:, :, 1]
+            
+            # Compute L-infinity distances for both rotational images
+            # Image 0: (x, y)
+            dist_0 = cp.maximum(cp.abs(x_ind - line_point_x_2d), cp.abs(y_ind - line_point_y_2d))
+            # Image 1: (-x, -y)
+            dist_1 = cp.maximum(cp.abs(-x_ind - line_point_x_2d), cp.abs(-y_ind - line_point_y_2d))
+            
+            # Take minimum distance across both images
+            distances_individual_all = cp.minimum(dist_0, dist_1)
+
+            # For mate population trees - compute distances for both rotational images
+            x_mate = mate_positions_all[:, :, 0]
+            y_mate = mate_positions_all[:, :, 1]
+            theta_mate = mate_trees_full[:, :, 2]
+            
+            # Compute L-infinity distances for both rotational images
+            # Image 0: (x, y)
+            dist_0_mate = cp.maximum(cp.abs(x_mate - mate_line_point_x_2d), cp.abs(y_mate - mate_line_point_y_2d))
+            # Image 1: (-x, -y) - 180° rotation
+            dist_1_mate = cp.maximum(cp.abs(-x_mate - mate_line_point_x_2d), cp.abs(-y_mate - mate_line_point_y_2d))
+            
+            # Stack distances and find which image is closest for each tree
+            # Shape: (N_moves, N_trees, 2)
+            all_distances_mate = cp.stack([dist_0_mate, dist_1_mate], axis=2)
+            # Shape: (N_moves, N_trees) - indices 0-1 indicating which rotation is closest
+            closest_rotation_mate = cp.argmin(all_distances_mate, axis=2)
+            
+            # Original minimum distances (for assertion)
+            distances_mate_all_original = cp.minimum(dist_0_mate, dist_1_mate)
+            
+            # Apply the appropriate rotation to each tree based on which image was closest
+            # Create masks for each rotation choice
+            mask_rot0 = closest_rotation_mate == 0  # (N_moves, N_trees)
+            mask_rot1 = closest_rotation_mate == 1
+            
+            # Initialize transformed coordinates (will be modified in-place)
+            x_mate_transformed = cp.zeros_like(x_mate)
+            y_mate_transformed = cp.zeros_like(y_mate)
+            theta_mate_transformed = cp.zeros_like(theta_mate)
+            
+            # Apply transformations based on which rotation was chosen
+            # Rotation 0 (0°): (x, y) -> (x, y), theta -> theta
+            x_mate_transformed = cp.where(mask_rot0, x_mate, x_mate_transformed)
+            y_mate_transformed = cp.where(mask_rot0, y_mate, y_mate_transformed)
+            theta_mate_transformed = cp.where(mask_rot0, theta_mate, theta_mate_transformed)
+            
+            # Rotation 1 (180°): (x, y) -> (-x, -y), theta -> theta + π
+            x_mate_transformed = cp.where(mask_rot1, -x_mate, x_mate_transformed)
+            y_mate_transformed = cp.where(mask_rot1, -y_mate, y_mate_transformed)
+            theta_mate_transformed = cp.where(mask_rot1, theta_mate + cp.pi, theta_mate_transformed)
+            
+            # Update mate_positions_all and mate_trees_full with transformed coordinates
+            mate_positions_all[:, :, 0] = x_mate_transformed
+            mate_positions_all[:, :, 1] = y_mate_transformed
+            mate_trees_full[:, :, 2] = theta_mate_transformed
+            
+            # Compute distances from transformed positions and verify they match
+            distances_mate_all = cp.maximum(
+                cp.abs(x_mate_transformed - mate_line_point_x_2d),
+                cp.abs(y_mate_transformed - mate_line_point_y_2d)
+            )
+            
+            # Assert that transformed distances match original minimum distances
+            distance_error = cp.max(cp.abs(distances_mate_all - distances_mate_all_original))
+            assert distance_error < 1e-4, f"Distance mismatch after transformation: max error = {distance_error}"
         else:
             raise Exception(f"Unknown distance function: {self.distance_function}")
 
@@ -834,26 +913,26 @@ class CrossoverStripe(Move):
         trees_to_write = mate_trees_all[move_indices_flat, tree_indices_flat, :]
 
         # Debug visualization of selected mating trees for solution 0
-        # if move_indices_flat.shape[0] > 0 and move_indices_flat[0] == 0:
-        #     import pack_vis_sol
-        #     import matplotlib.pyplot as plt
+        if move_indices_flat.shape[0] > 0 and move_indices_flat[0] == 0:
+            import pack_vis_sol
+            import matplotlib.pyplot as plt
             
-        #     # Get all trees for solution 0 from mate_trees_all
-        #     mask_sol0 = move_indices_flat == 0
-        #     trees_sol0 = trees_to_write[mask_sol0]
+            # Get all trees for solution 0 from mate_trees_all
+            mask_sol0 = move_indices_flat == 0
+            trees_sol0 = trees_to_write[mask_sol0]
             
-        #     # Create a temporary solution collection with just these selected trees
-        #     temp_sol = type(mate_sol)()
-        #     temp_sol.xyt = trees_sol0[cp.newaxis, :, :]  # Shape: (1, N_selected_trees, 3)
-        #     temp_sol.h = mate_sol.h[inds_mate[0:1]]  # Get h for solution 0
-        #     temp_sol.check_constraints()
+            # Create a temporary solution collection with just these selected trees
+            temp_sol = type(mate_sol)()
+            temp_sol.xyt = trees_sol0[cp.newaxis, :, :]  # Shape: (1, N_selected_trees, 3)
+            temp_sol.h = mate_sol.h[inds_mate[0:1]]  # Get h for solution 0
+            temp_sol.check_constraints()
             
-        #     # Visualize using pack_vis_sol
-        #     fig, ax = plt.subplots(figsize=(8, 8))
-        #     pack_vis_sol.pack_vis_sol(temp_sol, solution_idx=0, ax=ax)
-        #     ax.set_title(f'Selected Mating Trees (Solution 0, N={trees_sol0.shape[0]})')
-        #     plt.tight_layout()
-        #     plt.show()
+            # Visualize using pack_vis_sol
+            fig, ax = plt.subplots(figsize=(8, 8))
+            pack_vis_sol.pack_vis_sol(temp_sol, solution_idx=0, ax=ax)
+            ax.set_title(f'Selected Mating Trees (Solution 0, N={trees_sol0.shape[0]})')
+            plt.tight_layout()
+            plt.show()
         
         # Transform mate trees to proper coordinates (compensate for offset between mate and original points)
         if self.decouple_mate_location:
@@ -867,13 +946,13 @@ class CrossoverStripe(Move):
             trees_to_write[:, 0] += offset_x[move_indices_flat]
             trees_to_write[:, 1] += offset_y[move_indices_flat]
         
-        # new_xyt[individual_ids_flat, tree_ids_flat, :] = 0*trees_to_write
+        new_xyt[individual_ids_flat, tree_ids_flat, :] = 0*trees_to_write
 
-        # pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
+        pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
 
         new_xyt[individual_ids_flat, tree_ids_flat, :] = trees_to_write
 
-        # pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
+        pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
         
 
     def _apply_orientation_preselection(self, mate_trees_full: cp.ndarray,

@@ -66,6 +66,10 @@ def test_costs():
 
     kgs.set_float32(False)
     sol_list = []
+    sol_list = []
+    sol_list.append(kgs.SolutionCollectionSquareSymmetric180())
+    sol_list[-1].xyt = cp.array([pack_basics.place_random(3, 1.5, generator=np.random.default_rng(seed=1)).xyt], dtype=cp.float64)
+    sol_list[-1].h = cp.array([[0.5, 0., 0.]])
     sol_list.append(kgs.SolutionCollectionSquareSymmetric90())
     sol_list[-1].xyt = cp.array([pack_basics.place_random(3, 1.5, generator=np.random.default_rng(seed=1)).xyt], dtype=cp.float64)
     sol_list[-1].h = cp.array([[0.5, 0., 0.]])
@@ -233,7 +237,7 @@ def test_costs():
             max_diff_bound = cp.max(cp.abs(grad_bound_num - grad_bound_fast_flat)).get().item()
             assert cp.allclose(grad_bound_num, grad_bound_ref.ravel(), rtol=1e-4, atol=1e-4), f"Finite-diff bound gradient mismatch (max diff {max_diff_bound})"
         
-        for todo in ([[1,2]] if (isinstance(c, pack_cost.BoundaryDistanceCost) or isinstance(c, pack_cost.BoundaryCost)) else [[1,2],[3,4]]):
+        for todo in ([[2,3]] if (isinstance(c, pack_cost.BoundaryDistanceCost) or isinstance(c, pack_cost.BoundaryCost)) else [[2,3],[4,5]]):
             # Vectorized check: call with all xyt and bounds for this cost function
             print(f"  Vectorized check for {c.__class__.__name__}")
             full_xyt = cp.concatenate(all_xyt[todo[0]:todo[-1]+1], axis=0)
