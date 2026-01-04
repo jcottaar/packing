@@ -1533,4 +1533,5 @@ def baseline_symmetry_180():
     runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square180', max_N_trees_ratio = 0.45), 'CrossoverSquare', 2.0] )
     runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square180', decouple_mate_location=True, max_N_trees_ratio = 0.45), 
                                           'CrossoverSquareDecoupled', 2.0] )
+    runner.ga.stop_check_generations_scale = 35
     return runner
