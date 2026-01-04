@@ -642,26 +642,20 @@ class GAMultiSimilar(GAMulti):
 @dataclass
 class GAMultiRing(GAMultiSimilar):
     # Configuration
-    mate_distance: int = field(init=True, default=4)   
-    sort_ring_by_cost: bool = field(init=True, default=False)  
-    actually_use_champions: bool = field(init=True, default=True)
+    mate_distance: int = field(init=True, default=4)
     def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         assert mate_sol is None
         #if self.champions is None:
         #    return super()._generate_offspring(mate_sol, mate_weights)
-        # Sort ga_list by cost value using lexicographic sort
-        # Get the best cost for each GA
-        costs_per_ga = np.array([ga.champions[0].fitness[0] for ga in self.ga_list])        
-        if self.sort_ring_by_cost:
-            sorted_indices = kgs.lexicographic_argsort(costs_per_ga)
-            sorted_ga_list = [self.ga_list[i] for i in sorted_indices]
-        else:
-            sorted_ga_list = self.ga_list
+        
+        # Use ga_list in original order (no sorting by cost)
+        sorted_ga_list = self.ga_list
 
         # Precompute the population objects and fitness arrays to use for mating
+        # Always use champions for mating
         population_sources = []
         for ga in sorted_ga_list:
-            source_pop = ga.champions[0] if self.actually_use_champions else ga.population
+            source_pop = ga.champions[0]
             population_sources.append((source_pop, source_pop.fitness))
         
         # To each child GA, pass mate_sol as the merged champions of all GAs within mate_distance
@@ -673,30 +667,18 @@ class GAMultiRing(GAMultiSimilar):
             populations_to_merge = []
             
             # Collect neighbors, expanding outward from current position
-            if self.sort_ring_by_cost:
-                # Linear boundaries (no wraparound)
-                offset = 1
-                while len(populations_to_merge) < self.mate_distance and offset < n_ga:
-                    # Add left neighbor if available
-                    if i - offset >= 0 and len(populations_to_merge) < self.mate_distance:
-                        populations_to_merge.append(population_sources[i - offset])
-                    # Add right neighbor if available
-                    if i + offset < n_ga and len(populations_to_merge) < self.mate_distance:
-                        populations_to_merge.append(population_sources[i + offset])
-                    offset += 1
-            else:
-                # Periodic boundaries (wraparound for ring topology)
-                offset = 1
-                while len(populations_to_merge) < self.mate_distance and offset <= n_ga // 2:
-                    # Add left neighbor (with wraparound)
-                    if len(populations_to_merge) < self.mate_distance:
-                        left_idx = (i - offset) % n_ga
-                        populations_to_merge.append(population_sources[left_idx])
-                    # Add right neighbor (with wraparound)
-                    if len(populations_to_merge) < self.mate_distance:
-                        right_idx = (i + offset) % n_ga
-                        populations_to_merge.append(population_sources[right_idx])
-                    offset += 1
+            # Use periodic boundaries (wraparound for ring topology)
+            offset = 1
+            while len(populations_to_merge) < self.mate_distance and offset <= n_ga // 2:
+                # Add left neighbor (with wraparound)
+                if len(populations_to_merge) < self.mate_distance:
+                    left_idx = (i - offset) % n_ga
+                    populations_to_merge.append(population_sources[left_idx])
+                # Add right neighbor (with wraparound)
+                if len(populations_to_merge) < self.mate_distance:
+                    right_idx = (i + offset) % n_ga
+                    populations_to_merge.append(population_sources[right_idx])
+                offset += 1
             
             # Merge all collected populations into a single solution collection
             if len(populations_to_merge)>0:

@@ -218,6 +218,18 @@ def set_minkowski_cost(ga, name, value):
         ga.fitness_cost = copy.deepcopy(ga.fitness_cost)
         ga.fitness_cost.costs[2] = pack_cost.CollisionCostSeparation()
 
+def set_reset_approach(ga, name, value):
+    match value:
+        case 1:
+            pass
+        case 2:
+            ga.ga.allow_reset_ratio = 0.75
+        case 3:
+            ga.ga.allow_reset_ratio = 0.5
+        case 4:
+            raise 'todo'
+            
+
 
 
 
@@ -246,7 +258,7 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([2,4,6]).item(), set_ga_prop) # 6
+    res.modifier_dict['reset_approach'] = pm(6, lambda r:r.choice([1,2,3,4]).item(), set_reset_approach) # 6
     res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.5,1.), set_ga_prop) # 0.95
     res.modifier_dict['reset_check_generations'] = pm(50, lambda r:r.choice([50,100,200]).item(), set_ga_base_ga_prop) # 100
     res.modifier_dict['diversity_reset_threshold'] = pm(5./40, lambda r:r.choice([5./40, -1.]).item(), set_ga_prop) # -1.
