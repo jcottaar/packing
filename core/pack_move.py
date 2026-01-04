@@ -181,10 +181,10 @@ class JiggleCluster(Move):
         h_sizes = h_params[:, 0]
 
         # Generate random centers (GPU-based RNG) - shape (N_moves, 1)
-        center_x_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]
-        center_y_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]
-        #center_x_all, center_y_all = population.genotype.generate_move_centers(edge_clearance=0.0, generator=generator)
-        #center_x_all = center_x_all*1.1
+        #center_x_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]
+        #center_y_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]
+        center_x_all, center_y_all = population.genotype.generate_move_centers(0.0, inds_to_do, generator)
+        center_x_all, center_y_all = center_x_all[:,None], center_y_all[:,None]
 
         # Generate n_trees_to_jiggle for all individuals (GPU-based RNG)
         max_jiggle = min(self.max_N_trees, N_trees)
@@ -265,8 +265,11 @@ class Twist(Move):
 
         # Generate all random parameters at once (vectorized RNG on GPU)
         h_sizes = h_params[:, 0]
-        center_x_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]  # (N_moves, 1)
-        center_y_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]  # (N_moves, 1)
+        #center_x_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]  # (N_moves, 1)
+        #center_y_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]  # (N_moves, 1)
+        center_x_gpu, center_y_gpu = population.genotype.generate_move_centers(0.0, inds_to_do, generator)
+        center_x_gpu = center_x_gpu[:, cp.newaxis]  # (N_moves, 1)
+        center_y_gpu = center_y_gpu[:, cp.newaxis]  # (N_moves, 1)
         max_twist_angle_gpu = generator.uniform(-cp.pi, cp.pi, size=N_moves)[:, cp.newaxis]  # (N_moves, 1)
         radius_gpu = generator.uniform(self.min_radius, self.max_radius, size=N_moves)[:, cp.newaxis]  # (N_moves, 1)
 
@@ -341,26 +344,24 @@ class Crossover(Move):
             # Estimate how far we have to be from the edge for the selected number of trees
             square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / N_trees)
             h_sizes -= square_size
-            offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            center_x_all = offset_x_all + h_params[:, 1]
-            center_y_all = offset_y_all + h_params[:, 2]            
-            mate_offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            mate_offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
-            mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
+            #offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            #offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            center_x_all, center_y_all = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
+            #center_x_all = offset_x_all + h_params[:, 1]
+            #center_y_all = offset_y_all + h_params[:, 2]            
+            #mate_offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            #mate_offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            mate_center_x_all, mate_center_y_all = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
+            #mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
+            #mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
         else:          
-              
-            offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            center_x_all, center_y_all = population.genotype.generate_move_centers(0., inds_to_do, generator)            
             # CuPy's generator doesn't have choice, use random binary values
             sign_x = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
             sign_y = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
-            center_x_all = offset_x_all + h_params[:, 1]
-            center_y_all = offset_y_all + h_params[:, 2]
             mate_h_sizes = mate_h_params[:, 0]            
-            mate_offset_x_all = cp.abs(offset_x_all) * (mate_h_sizes / h_sizes) * sign_x
-            mate_offset_y_all = cp.abs(offset_y_all) * (mate_h_sizes / h_sizes) * sign_y
+            mate_offset_x_all = cp.abs(center_x_all - h_params[:, 1]) * (mate_h_sizes / h_sizes) * sign_x
+            mate_offset_y_all = cp.abs(center_y_all - h_params[:, 2]) * (mate_h_sizes / h_sizes) * sign_y
             mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
             mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
 
@@ -572,74 +573,83 @@ class CrossoverStripe(Move):
 
         # Sample a random point inside each square to anchor the crossover stripe
         h_sizes = h_params[:, 0]
-        if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90):
-            if not self.decouple_mate_location:
-                offset_x_all = generator.uniform(-h_sizes / 2, 0.)
-                offset_y_all = generator.uniform(-h_sizes / 2, 0.)
-                line_point_x = offset_x_all + h_params[:, 1]
-                line_point_y = offset_y_all + h_params[:, 2]
-
-                # Mirror that same point into mate coordinates after accounting for its square center
-                mate_line_point_x = offset_x_all + mate_h_params[:, 1]
-                mate_line_point_y = offset_y_all + mate_h_params[:, 2]        
-            else:
-                square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (4*N_trees))
-                h_sizes -= square_size
-                
-                # Sample main point with rejection sampling to avoid the forbidden square
-                # Forbidden region: both x > -square_size/2 AND y > -square_size/2
-                offset_x_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
-                offset_y_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
-                remaining_mask = cp.ones(N_moves, dtype=bool)
-                
-                while cp.any(remaining_mask):
-                    n_remaining = int(cp.sum(remaining_mask))
-                    candidate_x = generator.uniform(-h_sizes[remaining_mask] / 2, 0., size=n_remaining)
-                    candidate_y = generator.uniform(-h_sizes[remaining_mask] / 2, 0., size=n_remaining)
-                    # Accept if NOT in forbidden region (i.e., at least one coord <= -square_size/2)
-                    accept_mask = (candidate_x <= -square_size[remaining_mask] / 2) | (candidate_y <= -square_size[remaining_mask] / 2)
-                    # Update only the accepted samples
-                    indices_remaining = cp.where(remaining_mask)[0]
-                    indices_accepted = indices_remaining[accept_mask]
-                    offset_x_all[indices_accepted] = candidate_x[accept_mask]
-                    offset_y_all[indices_accepted] = candidate_y[accept_mask]
-                    remaining_mask[indices_accepted] = False
-
-                line_point_x = offset_x_all + h_params[:, 1]
-                line_point_y = offset_y_all + h_params[:, 2]
-
-                # Sample mate point with rejection sampling
-                mate_h_sizes = mate_h_params[:, 0]
-                mate_h_sizes -= square_size
-                mate_offset_x_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
-                mate_offset_y_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
-                remaining_mask = cp.ones(N_moves, dtype=bool)
-                
-                while cp.any(remaining_mask):
-                    n_remaining = int(cp.sum(remaining_mask))
-                    candidate_x = generator.uniform(-mate_h_sizes[remaining_mask] / 2, 0., size=n_remaining)
-                    candidate_y = generator.uniform(-mate_h_sizes[remaining_mask] / 2, 0., size=n_remaining)
-                    accept_mask = (candidate_x <= -square_size[remaining_mask] / 2) | (candidate_y <= -square_size[remaining_mask] / 2)
-                    indices_remaining = cp.where(remaining_mask)[0]
-                    indices_accepted = indices_remaining[accept_mask]
-                    mate_offset_x_all[indices_accepted] = candidate_x[accept_mask]
-                    mate_offset_y_all[indices_accepted] = candidate_y[accept_mask]
-                    remaining_mask[indices_accepted] = False
-                    
-                mate_line_point_x = mate_offset_x_all + mate_h_params[:, 1]
-                mate_line_point_y = mate_offset_y_all + mate_h_params[:, 2]
+        if not self.decouple_mate_location:
+            line_point_x, line_point_y = population.genotype.generate_move_centers(0.0, inds_to_do, generator)
+            mate_line_point_x = line_point_x - h_params[:, 1] + mate_h_params[:, 1]
+            mate_line_point_y = line_point_y - h_params[:, 2] + mate_h_params[:, 2]
         else:
-            assert not self.decouple_mate_location
-            offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            line_point_x = offset_x_all + h_params[:, 1]
-            line_point_y = offset_y_all + h_params[:, 2]
+            print(mate_sol.genotype.N_trees)
+            square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (mate_sol.genotype.N_trees))
+            line_point_x, line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
+            mate_line_point_x, mate_line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
+        # if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90):
+        #     if not self.decouple_mate_location:
+        #         offset_x_all = generator.uniform(-h_sizes / 2, 0.)
+        #         offset_y_all = generator.uniform(-h_sizes / 2, 0.)
+        #         line_point_x = offset_x_all + h_params[:, 1]
+        #         line_point_y = offset_y_all + h_params[:, 2]
 
-            # Mirror that same point into mate coordinates after accounting for its square center
-            mate_line_point_x = offset_x_all + mate_h_params[:, 1]
-            mate_line_point_y = offset_y_all + mate_h_params[:, 2]     
+        #         # Mirror that same point into mate coordinates after accounting for its square center
+        #         mate_line_point_x = offset_x_all + mate_h_params[:, 1]
+        #         mate_line_point_y = offset_y_all + mate_h_params[:, 2]        
+        #     else:
+        #         square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (4*N_trees))
+        #         h_sizes -= square_size
+                
+        #         # Sample main point with rejection sampling to avoid the forbidden square
+        #         # Forbidden region: both x > -square_size/2 AND y > -square_size/2
+        #         offset_x_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
+        #         offset_y_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
+        #         remaining_mask = cp.ones(N_moves, dtype=bool)
+                
+        #         while cp.any(remaining_mask):
+        #             n_remaining = int(cp.sum(remaining_mask))
+        #             candidate_x = generator.uniform(-h_sizes[remaining_mask] / 2, 0., size=n_remaining)
+        #             candidate_y = generator.uniform(-h_sizes[remaining_mask] / 2, 0., size=n_remaining)
+        #             # Accept if NOT in forbidden region (i.e., at least one coord <= -square_size/2)
+        #             accept_mask = (candidate_x <= -square_size[remaining_mask] / 2) | (candidate_y <= -square_size[remaining_mask] / 2)
+        #             # Update only the accepted samples
+        #             indices_remaining = cp.where(remaining_mask)[0]
+        #             indices_accepted = indices_remaining[accept_mask]
+        #             offset_x_all[indices_accepted] = candidate_x[accept_mask]
+        #             offset_y_all[indices_accepted] = candidate_y[accept_mask]
+        #             remaining_mask[indices_accepted] = False
 
-       # print(line_point_x, line_point_y, mate_line_point_x, mate_line_point_y)   
+        #         line_point_x = offset_x_all + h_params[:, 1]
+        #         line_point_y = offset_y_all + h_params[:, 2]
+
+        #         # Sample mate point with rejection sampling
+        #         mate_h_sizes = mate_h_params[:, 0]
+        #         mate_h_sizes -= square_size
+        #         mate_offset_x_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
+        #         mate_offset_y_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
+        #         remaining_mask = cp.ones(N_moves, dtype=bool)
+                
+        #         while cp.any(remaining_mask):
+        #             n_remaining = int(cp.sum(remaining_mask))
+        #             candidate_x = generator.uniform(-mate_h_sizes[remaining_mask] / 2, 0., size=n_remaining)
+        #             candidate_y = generator.uniform(-mate_h_sizes[remaining_mask] / 2, 0., size=n_remaining)
+        #             accept_mask = (candidate_x <= -square_size[remaining_mask] / 2) | (candidate_y <= -square_size[remaining_mask] / 2)
+        #             indices_remaining = cp.where(remaining_mask)[0]
+        #             indices_accepted = indices_remaining[accept_mask]
+        #             mate_offset_x_all[indices_accepted] = candidate_x[accept_mask]
+        #             mate_offset_y_all[indices_accepted] = candidate_y[accept_mask]
+        #             remaining_mask[indices_accepted] = False
+                    
+        #         mate_line_point_x = mate_offset_x_all + mate_h_params[:, 1]
+        #         mate_line_point_y = mate_offset_y_all + mate_h_params[:, 2]
+        # else:
+        #     assert not self.decouple_mate_location
+        #     offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        #     offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+        #     line_point_x = offset_x_all + h_params[:, 1]
+        #     line_point_y = offset_y_all + h_params[:, 2]
+
+        #     # Mirror that same point into mate coordinates after accounting for its square center
+        #     mate_line_point_x = offset_x_all + mate_h_params[:, 1]
+        #     mate_line_point_y = offset_y_all + mate_h_params[:, 2]     
+
+        print(line_point_x, line_point_y, mate_line_point_x, mate_line_point_y)   
 
 
         # Fetch the full set of tree coordinates for both parents involved

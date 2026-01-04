@@ -571,13 +571,13 @@ class SolutionCollection(BaseClass):
         return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, periodic=self.periodic)
     # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
 
-    def generate_move_centers(self, edge_clearance: float, generator: cp.random.Generator):
+    def generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):
         """Generate move centers for all solutions.
         
         Args:
             edge_clearance: Minimum distance from edge of crystal to move center
             generator: Cupy random number generator"""
-        return self._generate_move_centers(edge_clearance, generator)
+        return self._generate_move_centers(edge_clearance, inds_to_do, generator)
     
 
 @dataclass
@@ -676,11 +676,12 @@ class SolutionCollectionSquare(SolutionCollection):
         else:
             self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
 
-    def _generate_move_centers(self, edge_clearance: float, generator: cp.random.Generator):        
-        size = self.h[:,0]  # (N,)
+    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):        
+        size = self.h[inds_to_do,0].copy()  # (N,)
+        size -= edge_clearance*2
        
-        move_centers_x = generator.uniform(-size/2, size/2)  # (N,)
-        move_centers_y = generator.uniform(-size/2, size/2)  # (N,)
+        move_centers_x = generator.uniform(-size/2, size/2) + self.h[inds_to_do, 1]  # (N,)
+        move_centers_y = generator.uniform(-size/2, size/2) + self.h[inds_to_do, 2]  # (N,)
 
         return move_centers_x, move_centers_y
 
