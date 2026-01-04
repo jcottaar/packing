@@ -849,49 +849,6 @@ class GAMultiTree(GAMultiIsland):
         return connectivity_matrix
 
 
-@dataclass
-class GAMultiSmallWorld(GAMultiIsland):
-    """Small-world topology: start with ring, then rewire edges with probability.
-    
-    Based on Watts-Strogatz model.
-    """
-    base_neighbors: int = field(init=True, default=2)  # Each island connects to this many nearest neighbors
-    rewiring_probability: float = field(init=True, default=0.1)  # Probability of rewiring each edge
-    
-    def _get_connectivity_matrix(self) -> np.ndarray:
-        """Return connectivity matrix for small-world topology.
-        
-        Start with regular ring lattice, then rewire edges with given probability.
-        """
-        n_ga = len(self.ga_list)
-        connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
-        
-        # Step 1: Create regular ring lattice
-        for i in range(n_ga):
-            for offset in range(1, min(self.base_neighbors // 2 + 1, n_ga // 2 + 1)):
-                # Right neighbor (with wraparound)
-                right_idx = (i + offset) % n_ga
-                connectivity_matrix[i, right_idx] = True
-                connectivity_matrix[right_idx, i] = True
-        
-        # Step 2: Rewire edges with probability
-        rng = np.random.default_rng(self.seed if hasattr(self, 'seed') else 42)
-        for i in range(n_ga):
-            for j in range(i + 1, n_ga):
-                if connectivity_matrix[i, j] and rng.random() < self.rewiring_probability:
-                    # Rewire edge (i,j) to (i,k) where k is random
-                    connectivity_matrix[i, j] = False
-                    connectivity_matrix[j, i] = False
-                    # Find a random target that's not i and not already connected
-                    candidates = [k for k in range(n_ga) if k != i and not connectivity_matrix[i, k]]
-                    if candidates:
-                        k = rng.choice(candidates)
-                        connectivity_matrix[i, k] = True
-                        connectivity_matrix[k, i] = True
-        
-        return connectivity_matrix
-
-
 import pack_io
 import pandas as pd
 ref_solution = pack_io.dataframe_to_solution_list(pd.read_csv(kgs.code_dir + '../res/71.01.csv'))
