@@ -227,7 +227,7 @@ def set_reset_approach(ga, name, value):
         case 3:
             ga.ga.allow_reset_ratio = 0.5
         case 4:
-            raise 'todo'
+            ga.ga.allow_reset_based_on_local_champion = True
 
 
 def set_connectivity_pattern(ga, name, value):
@@ -298,6 +298,7 @@ def baseline_runner(fast_mode=False):
     runner.n_generations = 2000 if not fast_mode else 2
     runner.diagnostic_plot = False
     runner.ga.do_legalize = not fast_mode
+    runner.ga.stop_check_generations = 1000000
     #runner.ga.ga_base.alternative_selection = True
     #runner.ga.ga_base.search_depth = 1.
     
@@ -309,13 +310,15 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['reset_approach'] = pm(1, lambda r:r.choice([1,2,3]).item(), set_reset_approach) #
+    res.modifier_dict['reset_approach'] = pm(1, lambda r:r.choice([1,2,3,4]).item(), set_reset_approach) #
     print('add 4')
     res.modifier_dict['reset_check_generations'] = pm(100, lambda r:r.choice([50,100]).item(), set_ga_base_ga_prop) 
     res.modifier_dict['diversity_reset_threshold'] = pm(-1., lambda r:r.choice([0.01/40, -1.]).item(), set_ga_prop) 
     res.modifier_dict['scale_rough_iterations'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_rough_iterations) 
     res.modifier_dict['scale_fine_iterations'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_fine_iterations) 
-    res.modifier_dict['connectivity_pattern'] = pm(1, lambda r:r.choice([1,2,3,4,5,6]).item(), set_connectivity_pattern) 
+    res.modifier_dict['connectivity_pattern'] = pm(1, lambda r:r.choice([1,2,3,4,5,6]).item(), set_connectivity_pattern)
+    res.modifier_dict['allow_reset_based_on_local_champion'] = pm(False, lambda r:r.choice([True, False]).item(), set_ga_prop)   
+    
     
      
     #res.modifier_dict['make_single'] = pm(False, lambda r:False, make_single)

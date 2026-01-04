@@ -646,6 +646,8 @@ class GAMultiIsland(GAMultiSimilar):
     Subclasses must implement _get_connectivity_matrix() to define which islands
     can mate with each other.
     """
+
+    allow_reset_based_on_local_champion: bool = field(init=True, default=False)
     
     def _get_connectivity_matrix(self) -> np.ndarray:
         """Return boolean connectivity matrix where [i,j]=True means island i can mate with island j.
@@ -654,6 +656,40 @@ class GAMultiIsland(GAMultiSimilar):
             np.ndarray: Boolean matrix of shape (n_islands, n_islands)
         """
         raise NotImplementedError("Subclasses must implement _get_connectivity_matrix")
+    
+    def _score(self, generator, register_best):
+        # Call parent implementation first
+        super()._score(generator, register_best)
+        
+        # Apply local champion logic if enabled and we're registering best
+        if self.allow_reset_based_on_local_champion and register_best:
+            connectivity_matrix = self._get_connectivity_matrix()
+            n_ga = len(self.ga_list)
+            
+            # Get current fitness for all islands
+            costs_per_ga = np.array([ga.best_costs_per_generation[0][-1] for ga in self.ga_list])
+            
+            for i, ga in enumerate(self.ga_list):
+                # Find neighbors for island i (where it gets genetic material from)
+                neighbor_indices = [j for j in range(n_ga) if connectivity_matrix[i, j]]
+                
+                if len(neighbor_indices) > 0:
+                    # Include self in comparison with neighborhood
+                    comparison_indices = neighbor_indices + [i]
+                    neighborhood_costs = costs_per_ga[comparison_indices]
+                    
+                    # Check if current island is the best in its neighborhood
+                    # lexicographic_argmin breaks ties by choosing lowest index in comparison_indices
+                    # This means in case of fitness ties, the island with lower original index wins
+                    best_in_neighborhood_idx = kgs.lexicographic_argmin(neighborhood_costs)
+                    actual_best_idx = comparison_indices[best_in_neighborhood_idx]
+                    
+                    # If this island is the local champion, don't allow reset
+                    # In case of ties, higher-indexed islands will be allowed to reset
+                    ga.allow_reset = (actual_best_idx != i)
+                else:
+                    # If no neighbors, allow reset (shouldn't happen in normal topologies)
+                    ga.allow_reset = True
     
     def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         assert mate_sol is None
