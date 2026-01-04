@@ -228,6 +228,57 @@ def set_reset_approach(ga, name, value):
             ga.ga.allow_reset_ratio = 0.5
         case 4:
             raise 'todo'
+
+
+def set_connectivity_pattern(ga, name, value):
+    """Switch between different connectivity patterns for multi-island GA"""
+    # Save current ga properties
+    old_ga = ga.ga
+    current_ga_base = old_ga.ga_base
+    mate_distance = ga.ga.mate_distance
+    
+    match value:
+        case 1:  # Default ring
+            new_ga = pack_ga3.GAMultiRing(N=32)
+            new_ga.mate_distance = mate_distance
+        case 2:  # Ring with symmetric star topology
+            new_ga = pack_ga3.GAMultiRing(N=32)
+            new_ga.mate_distance = mate_distance
+            new_ga.star_topology = True
+            new_ga.asymmetric_star = False
+        case 3:  # Ring with asymmetric star topology
+            new_ga = pack_ga3.GAMultiRing(N=32)
+            new_ga.mate_distance = mate_distance
+            new_ga.star_topology = True
+            new_ga.asymmetric_star = True
+        case 4:  # Ring with small world rewiring
+            new_ga = pack_ga3.GAMultiRing(N=32)
+            new_ga.mate_distance = mate_distance
+            new_ga.small_world_rewiring = 0.1
+        case 5:  # Hypercube (N must be power of 2)
+            new_ga = pack_ga3.GAMultiHypercube(N=32)
+        case 6:  # Tree (N must be 2^k-1, so use 31)
+            new_ga = pack_ga3.GAMultiTree(N=31)
+        case _:
+            raise ValueError(f"Unknown connectivity pattern: {value}")
+    
+    # Copy all properties from old GA to new GA, excluding class-specific ones
+    for attr_name in dir(old_ga):
+        if (not attr_name.startswith('_') and 
+            hasattr(new_ga, attr_name) and 
+            not callable(getattr(old_ga, attr_name)) and
+            attr_name not in ['N', 'mate_distance', 'star_topology', 'asymmetric_star', 'small_world_rewiring']):
+            try:
+                setattr(new_ga, attr_name, getattr(old_ga, attr_name))
+            except (AttributeError, TypeError):
+                # Skip properties that can't be set (read-only, etc.)
+                pass
+    
+    # Ensure ga_base is properly set
+    new_ga.ga_base = current_ga_base
+    
+    # Replace the GA
+    ga.ga = new_ga
             
 
 
@@ -243,7 +294,7 @@ def baseline_runner(fast_mode=False):
     res.label = 'Baseline'
 
 
-    runner = pack_ga3.baseline()
+    runner = pack_ga3.baseline_symmetry_180()
     runner.n_generations = 2000 if not fast_mode else 2
     runner.diagnostic_plot = False
     runner.ga.do_legalize = not fast_mode
@@ -258,14 +309,15 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['reset_approach'] = pm(6, lambda r:r.choice([1,2,3,4]).item(), set_reset_approach) # 6
-    res.modifier_dict['allow_reset_ratio'] = pm(0.5, lambda r:r.uniform(0.5,1.), set_ga_prop) # 0.95
-    res.modifier_dict['reset_check_generations'] = pm(50, lambda r:r.choice([50,100,200]).item(), set_ga_base_ga_prop) # 100
-    res.modifier_dict['diversity_reset_threshold'] = pm(5./40, lambda r:r.choice([5./40, -1.]).item(), set_ga_prop) # -1.
-    res.modifier_dict['N'] = pm(16, lambda r:r.choice([8,16,32]).item(), set_ga_prop) # 32
-    res.modifier_dict['actually_use_champions'] = pm(False, lambda r:True, set_ga_prop) # True
-
+    res.modifier_dict['reset_approach'] = pm(1, lambda r:r.choice([1,2,3]).item(), set_reset_approach) #
+    print('add 4')
+    res.modifier_dict['reset_check_generations'] = pm(100, lambda r:r.choice([50,100]).item(), set_ga_base_ga_prop) 
+    res.modifier_dict['diversity_reset_threshold'] = pm(-1., lambda r:r.choice([0.01/40, -1.]).item(), set_ga_prop) 
+    res.modifier_dict['scale_rough_iterations'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_rough_iterations) 
+    res.modifier_dict['scale_fine_iterations'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_fine_iterations) 
+    res.modifier_dict['connectivity_pattern'] = pm(1, lambda r:r.choice([1,2,3,4,5,6]).item(), set_connectivity_pattern) 
     
+     
     #res.modifier_dict['make_single'] = pm(False, lambda r:False, make_single)
     #res.modifier_dict['use_minkowski_rough'] = pm(False, lambda r:r.choice([False,True]).item(), use_minkowski_rough)
     #res.modifier_dict['use_lookup_table_fine'] = pm(False, lambda r:r.choice([False,True]).item(), use_lookup_table_fine)
