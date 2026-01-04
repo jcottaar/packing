@@ -1030,25 +1030,65 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
             f"Infinite loop risk: original_size must be >= 4*edge_clearance. " \
             f"Min ratio: {float(cp.min(original_size / (edge_clearance + 1e-10)))}"
        
-        # Rejection sampling: not allowed to have x > -edge_clearance
-        # (Only one constraint for 180° symmetry)
+        # Direct sampling from the valid L-shaped region (no rejection sampling needed)
+        # Valid region: x ∈ [-size/2, 0], y ∈ [-size/2, size/2], excluding {x > -edge_clearance AND |y| <= edge_clearance}
+        #
+        # Decompose into 3 rectangles:
+        # Region A: x ∈ [-size/2, -edge_clearance], y ∈ [-size/2, size/2]  (left strip)
+        # Region B: x ∈ [-edge_clearance, 0], y ∈ (edge_clearance, size/2]  (top right)
+        # Region C: x ∈ [-edge_clearance, 0], y ∈ [-size/2, -edge_clearance) (bottom right)
+        
         N = len(inds_to_do)
+        half_size = size / 2  # (N,)
+        
+        # Compute widths and heights for each region
+        width_A = half_size - edge_clearance  # x extent of region A
+        height_A = size                        # y extent of region A
+        width_BC = edge_clearance              # x extent of regions B and C
+        height_B = half_size - edge_clearance  # y extent of region B (top)
+        height_C = half_size - edge_clearance  # y extent of region C (bottom)
+        
+        # Compute areas of each region
+        area_A = width_A * height_A
+        area_B = width_BC * height_B
+        area_C = width_BC * height_C
+        total_area = area_A + area_B + area_C
+        
+        # Cumulative probabilities for region selection
+        prob_A = area_A / total_area
+        prob_AB = (area_A + area_B) / total_area
+        # prob_ABC = 1.0 (implicit)
+        
+        # Generate uniform random values for region selection
+        region_selector = generator.uniform(0., 1., size=N)
+        
+        # Determine which region each sample falls into
+        in_A = region_selector < prob_A
+        in_B = (region_selector >= prob_A) & (region_selector < prob_AB)
+        in_C = region_selector >= prob_AB
+        
+        # Generate x and y coordinates based on region
         move_centers_x = cp.zeros(N, dtype=dtype_cp)
         move_centers_y = cp.zeros(N, dtype=dtype_cp)
-        remaining_mask = cp.ones(N, dtype=bool)
         
-        while cp.any(remaining_mask):
-            n_remaining = int(cp.sum(remaining_mask))
-            candidate_x = generator.uniform(-size[remaining_mask] / 2, 0., size=n_remaining)
-            candidate_y = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, size=n_remaining)
-            # Accept if x <= -edge_clearance (left half-plane)
-            accept_mask = (candidate_x <= -edge_clearance[remaining_mask]) | (cp.abs(candidate_y) > edge_clearance[remaining_mask])
-            # Update only the accepted samples
-            indices_remaining = cp.where(remaining_mask)[0]
-            indices_accepted = indices_remaining[accept_mask]
-            move_centers_x[indices_accepted] = candidate_x[accept_mask] + self.h[inds_to_do[indices_accepted], 1]
-            move_centers_y[indices_accepted] = candidate_y[accept_mask] + self.h[inds_to_do[indices_accepted], 2]
-            remaining_mask[indices_accepted] = False
+        # Region A: x ∈ [-size/2, -edge_clearance], y ∈ [-size/2, size/2]
+        if cp.any(in_A):
+            move_centers_x[in_A] = generator.uniform(-half_size[in_A], -edge_clearance[in_A])
+            move_centers_y[in_A] = generator.uniform(-half_size[in_A], half_size[in_A])
+        
+        # Region B: x ∈ [-edge_clearance, 0], y ∈ (edge_clearance, size/2]
+        if cp.any(in_B):
+            move_centers_x[in_B] = generator.uniform(-edge_clearance[in_B], cp.zeros_like(edge_clearance[in_B]))
+            move_centers_y[in_B] = generator.uniform(edge_clearance[in_B], half_size[in_B])
+        
+        # Region C: x ∈ [-edge_clearance, 0], y ∈ [-size/2, -edge_clearance)
+        if cp.any(in_C):
+            move_centers_x[in_C] = generator.uniform(-edge_clearance[in_C], cp.zeros_like(edge_clearance[in_C]))
+            move_centers_y[in_C] = generator.uniform(-half_size[in_C], -edge_clearance[in_C])
+        
+        # Add offsets
+        move_centers_x += self.h[inds_to_do, 1]
+        move_centers_y += self.h[inds_to_do, 2]
 
         return move_centers_x, move_centers_y
 
