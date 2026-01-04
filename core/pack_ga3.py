@@ -754,6 +754,7 @@ class GAMultiRing(GAMultiIsland):
                             k = rng.choice(candidates)
                             connectivity_matrix[i, k] = True
                             connectivity_matrix[k, i] = True
+        return connectivity_matrix
         
 
 @dataclass
