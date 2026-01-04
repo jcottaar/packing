@@ -678,7 +678,8 @@ class SolutionCollectionSquare(SolutionCollection):
 
     def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):        
         size = self.h[inds_to_do,0].copy()  # (N,)
-        size -= edge_clearance*2
+        if edge_clearance is not None:
+            size -= edge_clearance*2
        
         move_centers_x = generator.uniform(-size/2, size/2) + self.h[inds_to_do, 1]  # (N,)
         move_centers_y = generator.uniform(-size/2, size/2) + self.h[inds_to_do, 2]  # (N,)
@@ -851,6 +852,42 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
         phenotype = self.convert_to_phenotype()
         phenotype.snap()
         self.h[:] = phenotype.h[:]
+
+    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):        
+        original_size = self.h[inds_to_do,0].copy()  # (N,)
+        size = original_size.copy()
+        if edge_clearance is not None:
+            size -= edge_clearance*2
+        else:
+            edge_clearance = 0*size
+       
+        # Assert no infinite loop: need original_size >= 4*edge_clearance for acceptance to be possible
+        # This ensures that min candidate value (-size/2 = -original_size/2 + edge_clearance) <= -edge_clearance
+        assert cp.all(original_size >= 4*edge_clearance), \
+            f"Infinite loop risk: original_size must be >= 4*edge_clearance. " \
+            f"Min ratio: {float(cp.min(original_size / (edge_clearance + 1e-10)))}"
+       
+        # Rejection sampling: not allowed to have both x>-edge_clearance and y>-edge_clearance
+        N = len(inds_to_do)
+        move_centers_x = cp.zeros(N, dtype=dtype_cp)
+        move_centers_y = cp.zeros(N, dtype=dtype_cp)
+        remaining_mask = cp.ones(N, dtype=bool)
+        
+        while cp.any(remaining_mask):
+            n_remaining = int(cp.sum(remaining_mask))
+            candidate_x = generator.uniform(-size[remaining_mask] / 2, 0., size=n_remaining)
+            candidate_y = generator.uniform(-size[remaining_mask] / 2, 0., size=n_remaining)
+            # Accept if NOT in forbidden region (i.e., at least one coord <= -edge_clearance)
+            # edge_clearance is an array with same size as the remaining samples
+            accept_mask = (candidate_x+candidate_y <= -2*edge_clearance[remaining_mask])
+            # Update only the accepted samples
+            indices_remaining = cp.where(remaining_mask)[0]
+            indices_accepted = indices_remaining[accept_mask]
+            move_centers_x[indices_accepted] = candidate_x[accept_mask] + self.h[inds_to_do[indices_accepted], 1]
+            move_centers_y[indices_accepted] = candidate_y[accept_mask] + self.h[inds_to_do[indices_accepted], 2]
+            remaining_mask[indices_accepted] = False
+
+        return move_centers_x, move_centers_y
 
 
 

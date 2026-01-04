@@ -183,7 +183,7 @@ class JiggleCluster(Move):
         # Generate random centers (GPU-based RNG) - shape (N_moves, 1)
         #center_x_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]
         #center_y_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]
-        center_x_all, center_y_all = population.genotype.generate_move_centers(0.0, inds_to_do, generator)
+        center_x_all, center_y_all = population.genotype.generate_move_centers(None, inds_to_do, generator)
         center_x_all, center_y_all = center_x_all[:,None], center_y_all[:,None]
 
         # Generate n_trees_to_jiggle for all individuals (GPU-based RNG)
@@ -267,7 +267,7 @@ class Twist(Move):
         h_sizes = h_params[:, 0]
         #center_x_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]  # (N_moves, 1)
         #center_y_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]  # (N_moves, 1)
-        center_x_gpu, center_y_gpu = population.genotype.generate_move_centers(0.0, inds_to_do, generator)
+        center_x_gpu, center_y_gpu = population.genotype.generate_move_centers(None, inds_to_do, generator)
         center_x_gpu = center_x_gpu[:, cp.newaxis]  # (N_moves, 1)
         center_y_gpu = center_y_gpu[:, cp.newaxis]  # (N_moves, 1)
         max_twist_angle_gpu = generator.uniform(-cp.pi, cp.pi, size=N_moves)[:, cp.newaxis]  # (N_moves, 1)
@@ -355,7 +355,7 @@ class Crossover(Move):
             #mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
             #mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
         else:          
-            center_x_all, center_y_all = population.genotype.generate_move_centers(0., inds_to_do, generator)            
+            center_x_all, center_y_all = population.genotype.generate_move_centers(None, inds_to_do, generator)            
             # CuPy's generator doesn't have choice, use random binary values
             sign_x = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
             sign_y = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
@@ -574,12 +574,12 @@ class CrossoverStripe(Move):
         # Sample a random point inside each square to anchor the crossover stripe
         h_sizes = h_params[:, 0]
         if not self.decouple_mate_location:
-            line_point_x, line_point_y = population.genotype.generate_move_centers(0.0, inds_to_do, generator)
+            line_point_x, line_point_y = population.genotype.generate_move_centers(None, inds_to_do, generator)
             mate_line_point_x = line_point_x - h_params[:, 1] + mate_h_params[:, 1]
             mate_line_point_y = line_point_y - h_params[:, 2] + mate_h_params[:, 2]
         else:
-            print(mate_sol.genotype.N_trees)
-            square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (mate_sol.genotype.N_trees))
+            print(mate_sol.N_trees)
+            square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (mate_sol.N_trees))
             line_point_x, line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
             mate_line_point_x, mate_line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
         # if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90):
@@ -833,7 +833,7 @@ class CrossoverStripe(Move):
         tree_ids_flat = individual_tree_ids_all[move_indices_flat, tree_indices_flat]
         trees_to_write = mate_trees_all[move_indices_flat, tree_indices_flat, :]
 
-        # # Debug visualization of selected mating trees for solution 0
+        # Debug visualization of selected mating trees for solution 0
         # if move_indices_flat.shape[0] > 0 and move_indices_flat[0] == 0:
         #     import pack_vis_sol
         #     import matplotlib.pyplot as plt
@@ -867,8 +867,13 @@ class CrossoverStripe(Move):
             trees_to_write[:, 0] += offset_x[move_indices_flat]
             trees_to_write[:, 1] += offset_y[move_indices_flat]
         
+        # new_xyt[individual_ids_flat, tree_ids_flat, :] = 0*trees_to_write
+
+        # pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
+
         new_xyt[individual_ids_flat, tree_ids_flat, :] = trees_to_write
 
+        # pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
         
 
     def _apply_orientation_preselection(self, mate_trees_full: cp.ndarray,
