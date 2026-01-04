@@ -640,48 +640,47 @@ class GAMultiSimilar(GAMulti):
         super()._initialize(generator)    
 
 @dataclass
-class GAMultiRing(GAMultiSimilar):
-    # Configuration
-    mate_distance: int = field(init=True, default=4)
+class GAMultiIsland(GAMultiSimilar):
+    """Base class for island-based GA with configurable connectivity patterns.
+    
+    Subclasses must implement _get_connectivity_matrix() to define which islands
+    can mate with each other.
+    """
+    
+    def _get_connectivity_matrix(self) -> np.ndarray:
+        """Return boolean connectivity matrix where [i,j]=True means island i can mate with island j.
+        
+        Returns:
+            np.ndarray: Boolean matrix of shape (n_islands, n_islands)
+        """
+        raise NotImplementedError("Subclasses must implement _get_connectivity_matrix")
+    
     def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         assert mate_sol is None
-        #if self.champions is None:
-        #    return super()._generate_offspring(mate_sol, mate_weights)
         
-        # Use ga_list in original order (no sorting by cost)
-        sorted_ga_list = self.ga_list
-
+        # Get connectivity matrix from subclass
+        connectivity_matrix = self._get_connectivity_matrix()
+        n_ga = len(self.ga_list)
+        assert connectivity_matrix.shape == (n_ga, n_ga), f"Connectivity matrix shape {connectivity_matrix.shape} doesn't match number of islands {n_ga}"
+        
         # Precompute the population objects and fitness arrays to use for mating
         # Always use champions for mating
         population_sources = []
-        for ga in sorted_ga_list:
+        for ga in self.ga_list:
             source_pop = ga.champions[0]
             population_sources.append((source_pop, source_pop.fitness))
         
-        # To each child GA, pass mate_sol as the merged champions of all GAs within mate_distance
-        # Each GA gets the mate_distance nearest neighbors in the sorted list
+        # Generate offspring for each island based on connectivity
         offspring_list = []
-        n_ga = len(sorted_ga_list)
-        for i, ga in enumerate(sorted_ga_list):
-            # Collect the mate_distance nearest populations
+        for i, ga in enumerate(self.ga_list):
+            # Collect populations from connected islands
             populations_to_merge = []
+            for j in range(n_ga):
+                if connectivity_matrix[i, j]:  # Island i can mate with island j
+                    populations_to_merge.append(population_sources[j])
             
-            # Collect neighbors, expanding outward from current position
-            # Use periodic boundaries (wraparound for ring topology)
-            offset = 1
-            while len(populations_to_merge) < self.mate_distance and offset <= n_ga // 2:
-                # Add left neighbor (with wraparound)
-                if len(populations_to_merge) < self.mate_distance:
-                    left_idx = (i - offset) % n_ga
-                    populations_to_merge.append(population_sources[left_idx])
-                # Add right neighbor (with wraparound)
-                if len(populations_to_merge) < self.mate_distance:
-                    right_idx = (i + offset) % n_ga
-                    populations_to_merge.append(population_sources[right_idx])
-                offset += 1
-            
-            # Merge all collected populations into a single solution collection
-            if len(populations_to_merge)>0:
+            # Merge all connected populations into a single solution collection
+            if len(populations_to_merge) > 0:
                 first_pop, first_costs = populations_to_merge[0]
                 merged_sol = copy.deepcopy(first_pop.genotype)
                 merged_costs = [first_costs]
@@ -693,10 +692,37 @@ class GAMultiRing(GAMultiSimilar):
             else:
                 merged_sol, mate_weights, mate_costs = None, None, None
             
-            # Generate offspring for this GA using the merged mate population
+            # Generate offspring for this island using the merged mate population
             offspring_list.extend(ga.generate_offspring(merged_sol, mate_weights, mate_costs, generator))
-        # offspring_list is out of order - this is OK (child GAs cache their own offspring)
+        
         return offspring_list
+
+
+@dataclass
+class GAMultiRing(GAMultiIsland):
+    # Configuration
+    mate_distance: int = field(init=True, default=4)
+    def _get_connectivity_matrix(self) -> np.ndarray:
+        """Return connectivity matrix for ring topology with mate_distance.
+        
+        Each island can mate with islands at distances 1 to mate_distance in both directions,
+        with wraparound (periodic boundaries).
+        """
+        n_ga = len(self.ga_list)
+        connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
+        
+        for i in range(n_ga):
+            # Add connections to neighbors within mate_distance
+            for offset in range(1, min(self.mate_distance + 1, n_ga // 2 + 1)):
+                # Left neighbor (with wraparound)
+                left_idx = (i - offset) % n_ga
+                connectivity_matrix[i, left_idx] = True
+                
+                # Right neighbor (with wraparound) 
+                right_idx = (i + offset) % n_ga
+                connectivity_matrix[i, right_idx] = True
+        
+        return connectivity_matrix
 
 
 import pack_io
