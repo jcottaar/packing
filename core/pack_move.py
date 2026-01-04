@@ -342,7 +342,7 @@ class Crossover(Move):
         # Generate mate offsets
         if self.simple_mate_location:
             # Estimate how far we have to be from the edge for the selected number of trees
-            square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / N_trees)
+            square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / population.genotype.N_trees)
             h_sizes -= square_size
             #offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
             #offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
@@ -560,7 +560,7 @@ class CrossoverStripe(Move):
         
         # Decide how many trees swap hands and what transforms to apply to mates
         min_trees = min(self.min_N_trees, N_trees)
-        max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
+        max_trees = min(int(np.floor(self.max_N_trees_ratio * N_trees)), N_trees)
         if max_trees < min_trees:
             max_trees = min_trees
         n_trees_to_replace_all = generator.integers(min_trees, max_trees + 1, size=N_moves)
@@ -578,7 +578,6 @@ class CrossoverStripe(Move):
             mate_line_point_x = line_point_x - h_params[:, 1] + mate_h_params[:, 1]
             mate_line_point_y = line_point_y - h_params[:, 2] + mate_h_params[:, 2]
         else:
-            #print(mate_sol.N_trees)
             square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (mate_sol.N_trees))
             line_point_x, line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
             mate_line_point_x, mate_line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
@@ -648,8 +647,6 @@ class CrossoverStripe(Move):
         #     # Mirror that same point into mate coordinates after accounting for its square center
         #     mate_line_point_x = offset_x_all + mate_h_params[:, 1]
         #     mate_line_point_y = offset_y_all + mate_h_params[:, 2]     
-
-        #print(line_point_x, line_point_y, mate_line_point_x, mate_line_point_y)   
 
 
         # Fetch the full set of tree coordinates for both parents involved
@@ -913,26 +910,26 @@ class CrossoverStripe(Move):
         trees_to_write = mate_trees_all[move_indices_flat, tree_indices_flat, :]
 
         # Debug visualization of selected mating trees for solution 0
-        if move_indices_flat.shape[0] > 0 and move_indices_flat[0] == 0:
-            import pack_vis_sol
-            import matplotlib.pyplot as plt
+        # if move_indices_flat.shape[0] > 0 and move_indices_flat[0] == 0:
+        #     import pack_vis_sol
+        #     import matplotlib.pyplot as plt
             
-            # Get all trees for solution 0 from mate_trees_all
-            mask_sol0 = move_indices_flat == 0
-            trees_sol0 = trees_to_write[mask_sol0]
+        #     # Get all trees for solution 0 from mate_trees_all
+        #     mask_sol0 = move_indices_flat == 0
+        #     trees_sol0 = trees_to_write[mask_sol0]
             
-            # Create a temporary solution collection with just these selected trees
-            temp_sol = type(mate_sol)()
-            temp_sol.xyt = trees_sol0[cp.newaxis, :, :]  # Shape: (1, N_selected_trees, 3)
-            temp_sol.h = mate_sol.h[inds_mate[0:1]]  # Get h for solution 0
-            temp_sol.check_constraints()
+        #     # Create a temporary solution collection with just these selected trees
+        #     temp_sol = type(mate_sol)()
+        #     temp_sol.xyt = trees_sol0[cp.newaxis, :, :]  # Shape: (1, N_selected_trees, 3)
+        #     temp_sol.h = mate_sol.h[inds_mate[0:1]]  # Get h for solution 0
+        #     temp_sol.check_constraints()
             
-            # Visualize using pack_vis_sol
-            fig, ax = plt.subplots(figsize=(8, 8))
-            pack_vis_sol.pack_vis_sol(temp_sol, solution_idx=0, ax=ax)
-            ax.set_title(f'Selected Mating Trees (Solution 0, N={trees_sol0.shape[0]})')
-            plt.tight_layout()
-            plt.show()
+        #     # Visualize using pack_vis_sol
+        #     fig, ax = plt.subplots(figsize=(8, 8))
+        #     pack_vis_sol.pack_vis_sol(temp_sol, solution_idx=0, ax=ax)
+        #     ax.set_title(f'Selected Mating Trees (Solution 0, N={trees_sol0.shape[0]})')
+        #     plt.tight_layout()
+        #     plt.show()
         
         # Transform mate trees to proper coordinates (compensate for offset between mate and original points)
         if self.decouple_mate_location:
@@ -946,13 +943,13 @@ class CrossoverStripe(Move):
             trees_to_write[:, 0] += offset_x[move_indices_flat]
             trees_to_write[:, 1] += offset_y[move_indices_flat]
         
-        new_xyt[individual_ids_flat, tree_ids_flat, :] = 0*trees_to_write
+        # new_xyt[individual_ids_flat, tree_ids_flat, :] = 0*trees_to_write
 
-        pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
+        # pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
 
         new_xyt[individual_ids_flat, tree_ids_flat, :] = trees_to_write
 
-        pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
+        #pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
         
 
     def _apply_orientation_preselection(self, mate_trees_full: cp.ndarray,

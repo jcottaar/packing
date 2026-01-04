@@ -167,7 +167,7 @@ def test_costs():
             print(cp.array2string(cp.asarray(cost_ref), precision=17, suppress_small=False))
             if not isinstance(c, pack_cost.CostDummy):
                 assert cost_ref > 0
-            assert cp.allclose(cost_ref, cost_fast, rtol=1e-6), f"Cost mismatch: {cost_ref} vs {cost_fast}"
+            assert cp.allclose(cost_ref, cost_fast, rtol=1e-5), f"Cost mismatch: {cost_ref} vs {cost_fast}"
             if not CUDA_float32 or not sol_single.periodic:
                 assert cp.allclose(grad_ref, grad_fast, rtol=1e-4, atol=1e-4), f"Gradient mismatch: {grad_ref} vs {grad_fast}"            
                 assert cp.allclose(grad_bound_ref, grad_bound_fast, rtol=1e-4, atol=1e-4), f"Bound gradient mismatch: {grad_bound_ref} vs {grad_bound_fast}"

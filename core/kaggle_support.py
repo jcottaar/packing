@@ -1037,20 +1037,18 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
         move_centers_y = cp.zeros(N, dtype=dtype_cp)
         remaining_mask = cp.ones(N, dtype=bool)
         
-        print('start')
         while cp.any(remaining_mask):
             n_remaining = int(cp.sum(remaining_mask))
             candidate_x = generator.uniform(-size[remaining_mask] / 2, 0., size=n_remaining)
             candidate_y = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, size=n_remaining)
             # Accept if x <= -edge_clearance (left half-plane)
-            accept_mask = (candidate_x <= -edge_clearance[remaining_mask]) | (cp.abs(candidate_y) <= edge_clearance[remaining_mask])
+            accept_mask = (candidate_x <= -edge_clearance[remaining_mask]) | (cp.abs(candidate_y) > edge_clearance[remaining_mask])
             # Update only the accepted samples
             indices_remaining = cp.where(remaining_mask)[0]
             indices_accepted = indices_remaining[accept_mask]
             move_centers_x[indices_accepted] = candidate_x[accept_mask] + self.h[inds_to_do[indices_accepted], 1]
             move_centers_y[indices_accepted] = candidate_y[accept_mask] + self.h[inds_to_do[indices_accepted], 2]
             remaining_mask[indices_accepted] = False
-        print('end')
 
         return move_centers_x, move_centers_y
 

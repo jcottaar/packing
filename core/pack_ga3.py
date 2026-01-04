@@ -1530,7 +1530,7 @@ def baseline_symmetry_180():
     runner.ga.ga_base.initializer.base_solution = kgs.SolutionCollectionSquareSymmetric180()
     runner.ga.ga_base.move.moves = [m for m in runner.ga.ga_base.move.moves if m[1] not in ['Translate']]
     runner.ga.ga_base.move.moves.pop(-2) # remove square crossover
-    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square180'), 'CrossoverSquare', 2.0] )
-    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square180', decouple_mate_location=True), 
+    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square180', max_N_trees_ratio = 0.45), 'CrossoverSquare', 2.0] )
+    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square180', decouple_mate_location=True, max_N_trees_ratio = 0.45), 
                                           'CrossoverSquareDecoupled', 2.0] )
     return runner
