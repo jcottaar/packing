@@ -1519,6 +1519,8 @@ def baseline_symmetry_90():
     runner = baseline()
     runner.ga.ga_base.initializer.base_solution = kgs.SolutionCollectionSquareSymmetric90()
     runner.ga.ga_base.move.moves = [m for m in runner.ga.ga_base.move.moves if m[1] not in ['Translate']]
-    runner.ga.ga_base.move.moves[-1][0].distance_function = 'square90'
-    runner.filter_before_rough = 1.
+    runner.ga.ga_base.move.moves.pop(-2) # remove square crossover
+    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square90'), 'CrossoverSquare', 2.0] )
+    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square90', decouple_mate_location=True), 
+                                          'CrossoverSquareDecoupled', 2.0] )
     return runner

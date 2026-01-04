@@ -183,6 +183,8 @@ class JiggleCluster(Move):
         # Generate random centers (GPU-based RNG) - shape (N_moves, 1)
         center_x_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]
         center_y_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]
+        #center_x_all, center_y_all = population.genotype.generate_move_centers(edge_clearance=0.0, generator=generator)
+        #center_x_all = center_x_all*1.1
 
         # Generate n_trees_to_jiggle for all individuals (GPU-based RNG)
         max_jiggle = min(self.max_N_trees, N_trees)
@@ -347,7 +349,8 @@ class Crossover(Move):
             mate_offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
             mate_center_x_all = mate_offset_x_all + mate_h_params[:, 1]
             mate_center_y_all = mate_offset_y_all + mate_h_params[:, 2]        
-        else:            
+        else:          
+              
             offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
             offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
             # CuPy's generator doesn't have choice, use random binary values
@@ -542,6 +545,7 @@ class CrossoverStripe(Move):
     max_N_trees_ratio: float = field(init=True, default=0.5)
 
     distance_function: typing.Literal['stripe', 'square', 'square90'] = field(init=True, default='stripe')
+    decouple_mate_location: bool = field(init=True, default=False)
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
@@ -552,26 +556,7 @@ class CrossoverStripe(Move):
         N_moves = int(inds_to_do.shape[0])
         if N_moves == 0:
             return
-
-        # Gather boundary parameters for both parents involved in the move
-        h_params = new_h[inds_to_do]
-        mate_h_params = mate_sol.h[inds_mate]
-
-        # Sample a random point inside each square to anchor the crossover stripe
-        h_sizes = h_params[:, 0]
-        if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90):
-            offset_x_all = generator.uniform(-h_sizes / 2, 0.)
-            offset_y_all = generator.uniform(-h_sizes / 2, 0.)
-        else:
-            offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-            offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
-        line_point_x = offset_x_all + h_params[:, 1]
-        line_point_y = offset_y_all + h_params[:, 2]
-
-        # Mirror that same point into mate coordinates after accounting for its square center
-        mate_line_point_x = offset_x_all + mate_h_params[:, 1]
-        mate_line_point_y = offset_y_all + mate_h_params[:, 2]        
-
+        
         # Decide how many trees swap hands and what transforms to apply to mates
         min_trees = min(self.min_N_trees, N_trees)
         max_trees = min(int(np.round(self.max_N_trees_ratio * N_trees)), N_trees)
@@ -580,6 +565,82 @@ class CrossoverStripe(Move):
         n_trees_to_replace_all = generator.integers(min_trees, max_trees + 1, size=N_moves)
         rotation_choice_all = generator.integers(0, 4, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
+
+        # Gather boundary parameters for both parents involved in the move
+        h_params = new_h[inds_to_do]
+        mate_h_params = mate_sol.h[inds_mate]
+
+        # Sample a random point inside each square to anchor the crossover stripe
+        h_sizes = h_params[:, 0]
+        if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90):
+            if not self.decouple_mate_location:
+                offset_x_all = generator.uniform(-h_sizes / 2, 0.)
+                offset_y_all = generator.uniform(-h_sizes / 2, 0.)
+                line_point_x = offset_x_all + h_params[:, 1]
+                line_point_y = offset_y_all + h_params[:, 2]
+
+                # Mirror that same point into mate coordinates after accounting for its square center
+                mate_line_point_x = offset_x_all + mate_h_params[:, 1]
+                mate_line_point_y = offset_y_all + mate_h_params[:, 2]        
+            else:
+                square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (4*N_trees))
+                h_sizes -= square_size
+                
+                # Sample main point with rejection sampling to avoid the forbidden square
+                # Forbidden region: both x > -square_size/2 AND y > -square_size/2
+                offset_x_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
+                offset_y_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
+                remaining_mask = cp.ones(N_moves, dtype=bool)
+                
+                while cp.any(remaining_mask):
+                    n_remaining = int(cp.sum(remaining_mask))
+                    candidate_x = generator.uniform(-h_sizes[remaining_mask] / 2, 0., size=n_remaining)
+                    candidate_y = generator.uniform(-h_sizes[remaining_mask] / 2, 0., size=n_remaining)
+                    # Accept if NOT in forbidden region (i.e., at least one coord <= -square_size/2)
+                    accept_mask = (candidate_x <= -square_size[remaining_mask] / 2) | (candidate_y <= -square_size[remaining_mask] / 2)
+                    # Update only the accepted samples
+                    indices_remaining = cp.where(remaining_mask)[0]
+                    indices_accepted = indices_remaining[accept_mask]
+                    offset_x_all[indices_accepted] = candidate_x[accept_mask]
+                    offset_y_all[indices_accepted] = candidate_y[accept_mask]
+                    remaining_mask[indices_accepted] = False
+
+                line_point_x = offset_x_all + h_params[:, 1]
+                line_point_y = offset_y_all + h_params[:, 2]
+
+                # Sample mate point with rejection sampling
+                mate_h_sizes = mate_h_params[:, 0]
+                mate_h_sizes -= square_size
+                mate_offset_x_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
+                mate_offset_y_all = cp.zeros(N_moves, dtype=kgs.dtype_cp)
+                remaining_mask = cp.ones(N_moves, dtype=bool)
+                
+                while cp.any(remaining_mask):
+                    n_remaining = int(cp.sum(remaining_mask))
+                    candidate_x = generator.uniform(-mate_h_sizes[remaining_mask] / 2, 0., size=n_remaining)
+                    candidate_y = generator.uniform(-mate_h_sizes[remaining_mask] / 2, 0., size=n_remaining)
+                    accept_mask = (candidate_x <= -square_size[remaining_mask] / 2) | (candidate_y <= -square_size[remaining_mask] / 2)
+                    indices_remaining = cp.where(remaining_mask)[0]
+                    indices_accepted = indices_remaining[accept_mask]
+                    mate_offset_x_all[indices_accepted] = candidate_x[accept_mask]
+                    mate_offset_y_all[indices_accepted] = candidate_y[accept_mask]
+                    remaining_mask[indices_accepted] = False
+                    
+                mate_line_point_x = mate_offset_x_all + mate_h_params[:, 1]
+                mate_line_point_y = mate_offset_y_all + mate_h_params[:, 2]
+        else:
+            assert not self.decouple_mate_location
+            offset_x_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            offset_y_all = generator.uniform(-h_sizes / 2, h_sizes / 2)
+            line_point_x = offset_x_all + h_params[:, 1]
+            line_point_y = offset_y_all + h_params[:, 2]
+
+            # Mirror that same point into mate coordinates after accounting for its square center
+            mate_line_point_x = offset_x_all + mate_h_params[:, 1]
+            mate_line_point_y = offset_y_all + mate_h_params[:, 2]     
+
+       # print(line_point_x, line_point_y, mate_line_point_x, mate_line_point_y)   
+
 
         # Fetch the full set of tree coordinates for both parents involved
         tree_positions_all = new_xyt[inds_to_do, :, :2]
@@ -665,17 +726,77 @@ class CrossoverStripe(Move):
             # Take minimum distance across all 4 images
             distances_individual_all = cp.minimum(cp.minimum(dist_0, dist_1), cp.minimum(dist_2, dist_3))
 
-            # For mate population trees
+            # For mate population trees - compute distances for all 4 rotational images
             x_mate = mate_positions_all[:, :, 0]
             y_mate = mate_positions_all[:, :, 1]
+            theta_mate = mate_trees_full[:, :, 2]
             
             # Compute L-infinity distances for all 4 rotational images
+            # Image 0: (x, y)
             dist_0_mate = cp.maximum(cp.abs(x_mate - mate_line_point_x_2d), cp.abs(y_mate - mate_line_point_y_2d))
+            # Image 1: (-y, x) - 90° rotation
             dist_1_mate = cp.maximum(cp.abs(-y_mate - mate_line_point_x_2d), cp.abs(x_mate - mate_line_point_y_2d))
+            # Image 2: (-x, -y) - 180° rotation
             dist_2_mate = cp.maximum(cp.abs(-x_mate - mate_line_point_x_2d), cp.abs(-y_mate - mate_line_point_y_2d))
+            # Image 3: (y, -x) - 270° rotation
             dist_3_mate = cp.maximum(cp.abs(y_mate - mate_line_point_x_2d), cp.abs(-x_mate - mate_line_point_y_2d))
             
-            distances_mate_all = cp.minimum(cp.minimum(dist_0_mate, dist_1_mate), cp.minimum(dist_2_mate, dist_3_mate))
+            # Stack distances and find which image is closest for each tree
+            # Shape: (N_moves, N_trees, 4)
+            all_distances_mate = cp.stack([dist_0_mate, dist_1_mate, dist_2_mate, dist_3_mate], axis=2)
+            # Shape: (N_moves, N_trees) - indices 0-3 indicating which rotation is closest
+            closest_rotation_mate = cp.argmin(all_distances_mate, axis=2)
+            
+            # Original minimum distances (for assertion)
+            distances_mate_all_original = cp.minimum(cp.minimum(dist_0_mate, dist_1_mate), cp.minimum(dist_2_mate, dist_3_mate))
+            
+            # Apply the appropriate rotation to each tree based on which image was closest
+            # Create masks for each rotation choice
+            mask_rot0 = closest_rotation_mate == 0  # (N_moves, N_trees)
+            mask_rot1 = closest_rotation_mate == 1
+            mask_rot2 = closest_rotation_mate == 2
+            mask_rot3 = closest_rotation_mate == 3
+            
+            # Initialize transformed coordinates (will be modified in-place)
+            x_mate_transformed = cp.zeros_like(x_mate)
+            y_mate_transformed = cp.zeros_like(y_mate)
+            theta_mate_transformed = cp.zeros_like(theta_mate)
+            
+            # Apply transformations based on which rotation was chosen
+            # Rotation 0 (0°): (x, y) -> (x, y), theta -> theta
+            x_mate_transformed = cp.where(mask_rot0, x_mate, x_mate_transformed)
+            y_mate_transformed = cp.where(mask_rot0, y_mate, y_mate_transformed)
+            theta_mate_transformed = cp.where(mask_rot0, theta_mate, theta_mate_transformed)
+            
+            # Rotation 1 (90°): (x, y) -> (-y, x), theta -> theta + π/2
+            x_mate_transformed = cp.where(mask_rot1, -y_mate, x_mate_transformed)
+            y_mate_transformed = cp.where(mask_rot1, x_mate, y_mate_transformed)
+            theta_mate_transformed = cp.where(mask_rot1, theta_mate + cp.pi/2, theta_mate_transformed)
+            
+            # Rotation 2 (180°): (x, y) -> (-x, -y), theta -> theta + π
+            x_mate_transformed = cp.where(mask_rot2, -x_mate, x_mate_transformed)
+            y_mate_transformed = cp.where(mask_rot2, -y_mate, y_mate_transformed)
+            theta_mate_transformed = cp.where(mask_rot2, theta_mate + cp.pi, theta_mate_transformed)
+            
+            # Rotation 3 (270°): (x, y) -> (y, -x), theta -> theta + 3π/2
+            x_mate_transformed = cp.where(mask_rot3, y_mate, x_mate_transformed)
+            y_mate_transformed = cp.where(mask_rot3, -x_mate, y_mate_transformed)
+            theta_mate_transformed = cp.where(mask_rot3, theta_mate + 3*cp.pi/2, theta_mate_transformed)
+            
+            # Update mate_positions_all and mate_trees_full with transformed coordinates
+            mate_positions_all[:, :, 0] = x_mate_transformed
+            mate_positions_all[:, :, 1] = y_mate_transformed
+            mate_trees_full[:, :, 2] = theta_mate_transformed
+            
+            # Compute distances from transformed positions and verify they match
+            distances_mate_all = cp.maximum(
+                cp.abs(x_mate_transformed - mate_line_point_x_2d),
+                cp.abs(y_mate_transformed - mate_line_point_y_2d)
+            )
+            
+            # Assert that transformed distances match original minimum distances
+            distance_error = cp.max(cp.abs(distances_mate_all - distances_mate_all_original))
+            assert distance_error < 1e-4, f"Distance mismatch after transformation: max error = {distance_error}"
         else:
             raise Exception(f"Unknown distance function: {self.distance_function}")
 
@@ -701,7 +822,44 @@ class CrossoverStripe(Move):
         individual_ids_flat = inds_to_do[move_indices_flat]
         tree_ids_flat = individual_tree_ids_all[move_indices_flat, tree_indices_flat]
         trees_to_write = mate_trees_all[move_indices_flat, tree_indices_flat, :]
+
+        # # Debug visualization of selected mating trees for solution 0
+        # if move_indices_flat.shape[0] > 0 and move_indices_flat[0] == 0:
+        #     import pack_vis_sol
+        #     import matplotlib.pyplot as plt
+            
+        #     # Get all trees for solution 0 from mate_trees_all
+        #     mask_sol0 = move_indices_flat == 0
+        #     trees_sol0 = trees_to_write[mask_sol0]
+            
+        #     # Create a temporary solution collection with just these selected trees
+        #     temp_sol = type(mate_sol)()
+        #     temp_sol.xyt = trees_sol0[cp.newaxis, :, :]  # Shape: (1, N_selected_trees, 3)
+        #     temp_sol.h = mate_sol.h[inds_mate[0:1]]  # Get h for solution 0
+        #     temp_sol.check_constraints()
+            
+        #     # Visualize using pack_vis_sol
+        #     fig, ax = plt.subplots(figsize=(8, 8))
+        #     pack_vis_sol.pack_vis_sol(temp_sol, solution_idx=0, ax=ax)
+        #     ax.set_title(f'Selected Mating Trees (Solution 0, N={trees_sol0.shape[0]})')
+        #     plt.tight_layout()
+        #     plt.show()
+        
+        # Transform mate trees to proper coordinates (compensate for offset between mate and original points)
+        if self.decouple_mate_location:
+            # Get the offset between the mate selection center and the target selection center
+            # Shape: (N_moves,) for each unique move
+            offset_x = line_point_x - mate_line_point_x
+            offset_y = line_point_y - mate_line_point_y
+            
+            # Apply translation to the trees being written
+            # Need to map from move_indices_flat to the corresponding offset
+            trees_to_write[:, 0] += offset_x[move_indices_flat]
+            trees_to_write[:, 1] += offset_y[move_indices_flat]
+        
         new_xyt[individual_ids_flat, tree_ids_flat, :] = trees_to_write
+
+        
 
     def _apply_orientation_preselection(self, mate_trees_full: cp.ndarray,
                                         rotation_choice_all: cp.ndarray,
