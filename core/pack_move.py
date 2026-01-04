@@ -943,9 +943,10 @@ class CrossoverStripe(Move):
             trees_to_write[:, 0] += offset_x[move_indices_flat]
             trees_to_write[:, 1] += offset_y[move_indices_flat]
         
-        new_xyt[individual_ids_flat, tree_ids_flat, :] = 0*trees_to_write
+        #new_xyt[individual_ids_flat, tree_ids_flat, :] = 0*trees_to_write
 
-        pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
+        #import pack_vis_sol
+        #pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
 
         new_xyt[individual_ids_flat, tree_ids_flat, :] = trees_to_write
 
