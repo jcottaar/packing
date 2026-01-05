@@ -295,6 +295,20 @@ def set_jiggle_max_trees(ga, name, value):
             move[0].max_N_trees = value
     assert any_set, "No 'Jiggle' moves found to set JiggleMaxTrees."
 
+def set_jitter(ga, name, value):
+    import pack_move
+    any_set = False
+    for move in ga.ga.ga_base.move.moves:
+        if hasattr(move[0], 'jitter'):
+            any_set = True
+            move[0].jitter = value
+    assert any_set, "No moves with 'jitter' attribute found to set jitter."
+
+def set_rough_relax_max_step(ga, name, value):
+    if value>0:
+        for r in ga.rough_relaxers:
+            r.max_step = value
+
 
 
 
@@ -337,6 +351,7 @@ def baseline_runner(fast_mode=False):
     res.modifier_dict['JiggleClusterSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     res.modifier_dict['JiggleClusterBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     res.modifier_dict['Twist'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    res.modifier_dict['rough_relax_max_step'] = pm(-1e-1, lambda r:r.choice([-1e-1, 1e-1, 1e-2]).item(), set_rough_relax_max_step)
     
 
     
