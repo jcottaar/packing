@@ -358,6 +358,7 @@ def baseline_runner(fast_mode=False):
     # res.modifier_dict['JiggleClusterBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     # res.modifier_dict['Twist'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     res.modifier_dict['rough_relax_max_step'] = pm(-1e-1, lambda r:1e-1, set_rough_relax_max_step)
+    res.modifier_dict['jitter'] = pm(0., lambda r:max(0., r.uniform(-0.5,0.5)), set_jitter)
 
 
     #jitter
