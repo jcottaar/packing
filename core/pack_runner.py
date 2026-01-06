@@ -343,14 +343,14 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)    
+    res.modifier_dict['mate_distance'] = pm(6, lambda r:6, set_ga_prop)    
     res.modifier_dict['reset_approach'] = pm(1, lambda r:1, set_reset_approach) #
     res.modifier_dict['reset_check_generations'] = pm(100, lambda r:100, set_ga_base_ga_prop) 
     res.modifier_dict['diversity_reset_threshold'] = pm(-1., lambda r:0.01/40, set_ga_prop) 
     res.modifier_dict['scale_rough_iterations'] = pm(1.0, lambda r:1., scale_rough_iterations) 
-    res.modifier_dict['connectivity_pattern'] = pm(1, lambda r:r.choice([1,6]).item(), set_connectivity_pattern)
-    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.uniform(0.6,0.8), set_ga_base_ga_prop)
-    # res.modifier_dict['JiggleMaxTrees'] = pm(20, lambda r:r.choice([4,5,6,7,8,9,10]).item(), set_jiggle_max_trees)
+    res.modifier_dict['connectivity_pattern'] = pm(1, lambda r:1, set_connectivity_pattern)
+    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:0.7, set_ga_base_ga_prop)
+    res.modifier_dict['JiggleMaxTrees'] = pm(20, lambda r:5, set_jiggle_max_trees)
     # res.modifier_dict['MoveRandomTree'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     # res.modifier_dict['JiggleTreeSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     # res.modifier_dict['JiggleTreeBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
@@ -358,9 +358,10 @@ def baseline_runner(fast_mode=False):
     # res.modifier_dict['JiggleClusterBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     # res.modifier_dict['Twist'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     res.modifier_dict['rough_relax_max_step'] = pm(-1e-1, lambda r:1e-1, set_rough_relax_max_step)
-    res.modifier_dict['jitter'] = pm(0., lambda r:max(0., r.uniform(-0.5,0.5)), set_jitter)
-    res.modifier_dict['scale_N'] = pm(1., lambda r:r.choice([0.5,1.0,2.0]).item(), scale_N_and_pop_size)
-
+    res.modifier_dict['jitter'] = pm(0., lambda r:0., set_jitter)
+    #res.modifier_dict['scale_N'] = pm(1., lambda r:1., scale_N_and_pop_size)
+    res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(1.,3.), scale_population_size)
+    res.modifier_dict['N'] = pm(32, lambda r:r.choice([16,32]).item(), set_ga_prop)
 
     #jitter
     
