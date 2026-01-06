@@ -783,6 +783,9 @@ class CrossoverStripe(Move):
             dist_2_mate = cp.maximum(cp.abs(-mate_pos_jittered[:, :, 0] - mate_line_point_x_2d), cp.abs(-mate_pos_jittered[:, :, 1] - mate_line_point_y_2d))
             dist_3_mate = cp.maximum(cp.abs(mate_pos_jittered[:, :, 1] - mate_line_point_x_2d), cp.abs(-mate_pos_jittered[:, :, 0] - mate_line_point_y_2d))
 
+            # Original minimum distances
+            distances_mate_all = cp.minimum(cp.minimum(dist_0_mate, dist_1_mate), cp.minimum(dist_2_mate, dist_3_mate))
+
             if self.jitter > 0:
                 del tree_pos_jittered
                 del mate_pos_jittered
@@ -806,10 +809,7 @@ class CrossoverStripe(Move):
             # Shape: (N_moves, N_trees, 4)
             all_distances_mate = cp.stack([dist_0_mate, dist_1_mate, dist_2_mate, dist_3_mate], axis=2)
             # Shape: (N_moves, N_trees) - indices 0-3 indicating which rotation is closest
-            closest_rotation_mate = cp.argmin(all_distances_mate, axis=2)
-            
-            # Original minimum distances
-            distances_mate_all = cp.minimum(cp.minimum(dist_0_mate, dist_1_mate), cp.minimum(dist_2_mate, dist_3_mate))
+            closest_rotation_mate = cp.argmin(all_distances_mate, axis=2)   
             
             # Apply the appropriate rotation to each tree based on which image was closest
             # Create masks for each rotation choice
@@ -886,6 +886,9 @@ class CrossoverStripe(Move):
             # Compute L-infinity distances for both rotational images using jittered positions
             dist_0_mate = cp.maximum(cp.abs(mate_pos_jittered[:, :, 0] - mate_line_point_x_2d), cp.abs(mate_pos_jittered[:, :, 1] - mate_line_point_y_2d))
             dist_1_mate = cp.maximum(cp.abs(-mate_pos_jittered[:, :, 0] - mate_line_point_x_2d), cp.abs(-mate_pos_jittered[:, :, 1] - mate_line_point_y_2d))
+
+            # Original minimum distances
+            distances_mate_all = cp.minimum(dist_0_mate, dist_1_mate)
                 
             if self.jitter > 0:
                 # Clean up jittered copies immediately after distance calculation
@@ -905,11 +908,8 @@ class CrossoverStripe(Move):
             # Shape: (N_moves, N_trees, 2)
             all_distances_mate = cp.stack([dist_0_mate, dist_1_mate], axis=2)
             # Shape: (N_moves, N_trees) - indices 0-1 indicating which rotation is closest
-            closest_rotation_mate = cp.argmin(all_distances_mate, axis=2)
-            
-            # Original minimum distances
-            distances_mate_all = cp.minimum(dist_0_mate, dist_1_mate)
-            
+            closest_rotation_mate = cp.argmin(all_distances_mate, axis=2)            
+           
             # Apply the appropriate rotation to each tree based on which image was closest
             # Create masks for each rotation choice
             mask_rot0 = closest_rotation_mate == 0  # (N_moves, N_trees)

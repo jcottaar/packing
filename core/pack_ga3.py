@@ -835,6 +835,10 @@ class GAMultiTree(GAMultiIsland):
     Islands connect to parent, children, and siblings.
     """
     
+    connect_siblings: bool = field(init=True, default=True)  # Whether siblings are connected
+    parent_child_depth: int = field(init=True, default=1)  # How many levels of parent/child connections
+    parent_child_one_way: bool = field(init=True, default=False)  # If True, material only flows upward (child→parent)
+    
     def _initialize(self, generator):
         super()._initialize(generator)
         # Validate that number of islands is 2^k - 1
@@ -918,32 +922,31 @@ class GAMultiTree(GAMultiIsland):
         """Return connectivity matrix for binary tree with sibling connections.
         
         Tree layout: root=0, left_child=2*i+1, right_child=2*i+2, parent=(i-1)//2
-        Each node connects to parent, children, and sibling.
+        Each node connects to parent, children, and sibling (configurable).
         """
         n_ga = len(self.ga_list)
         connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
         
         for i in range(n_ga):
-            # Connect to parent (except root)
-            if i > 0:
-                parent = (i - 1) // 2
-                connectivity_matrix[i, parent] = True
-                connectivity_matrix[parent, i] = True
-            
-            # Connect to left child
-            left_child = 2 * i + 1
-            if left_child < n_ga:
-                connectivity_matrix[i, left_child] = True
-                connectivity_matrix[left_child, i] = True
-            
-            # Connect to right child
-            right_child = 2 * i + 2
-            if right_child < n_ga:
-                connectivity_matrix[i, right_child] = True
-                connectivity_matrix[right_child, i] = True
+            # Connect to ancestors up to parent_child_depth levels
+            # (This establishes all parent-child connections as we iterate through all nodes)
+            ancestor = i
+            for depth in range(self.parent_child_depth):
+                if ancestor == 0:  # Reached root
+                    break
+                ancestor = (ancestor - 1) // 2
+                
+                # Connect i to this ancestor
+                if self.parent_child_one_way:
+                    # Only child → parent (upward flow)
+                    connectivity_matrix[i, ancestor] = True
+                else:
+                    # Bidirectional
+                    connectivity_matrix[i, ancestor] = True
+                    connectivity_matrix[ancestor, i] = True
             
             # Connect to sibling
-            if i > 0:  # Skip root
+            if self.connect_siblings and i > 0:  # Skip root
                 if i % 2 == 1:  # i is left child
                     sibling = i + 1  # right sibling
                 else:  # i is right child
