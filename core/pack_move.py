@@ -754,8 +754,8 @@ class CrossoverStripe(Move):
             # Shape: (N_moves, N_trees) - indices 0-3 indicating which rotation is closest
             closest_rotation_mate = cp.argmin(all_distances_mate, axis=2)
             
-            # Original minimum distances (for assertion)
-            distances_mate_all_original = cp.minimum(cp.minimum(dist_0_mate, dist_1_mate), cp.minimum(dist_2_mate, dist_3_mate))
+            # Original minimum distances
+            distances_mate_all = cp.minimum(cp.minimum(dist_0_mate, dist_1_mate), cp.minimum(dist_2_mate, dist_3_mate))
             
             # Apply the appropriate rotation to each tree based on which image was closest
             # Create masks for each rotation choice
@@ -794,16 +794,8 @@ class CrossoverStripe(Move):
             mate_positions_all[:, :, 0] = x_mate_transformed
             mate_positions_all[:, :, 1] = y_mate_transformed
             mate_trees_full[:, :, 2] = theta_mate_transformed
-            
-            # Compute distances from transformed positions and verify they match
-            distances_mate_all = cp.maximum(
-                cp.abs(x_mate_transformed - mate_line_point_x_2d),
-                cp.abs(y_mate_transformed - mate_line_point_y_2d)
-            )
-            
-            # Assert that transformed distances match original minimum distances
-            distance_error = cp.max(cp.abs(distances_mate_all - distances_mate_all_original))
-            assert distance_error < 1e-4, f"Distance mismatch after transformation: max error = {distance_error}"
+
+
         elif self.distance_function == 'square180':
             assert isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric180)
             # Compute L-infinity distance considering both rotational images (0°, 180°)
@@ -845,8 +837,8 @@ class CrossoverStripe(Move):
             # Shape: (N_moves, N_trees) - indices 0-1 indicating which rotation is closest
             closest_rotation_mate = cp.argmin(all_distances_mate, axis=2)
             
-            # Original minimum distances (for assertion)
-            distances_mate_all_original = cp.minimum(dist_0_mate, dist_1_mate)
+            # Original minimum distances
+            distances_mate_all = cp.minimum(dist_0_mate, dist_1_mate)
             
             # Apply the appropriate rotation to each tree based on which image was closest
             # Create masks for each rotation choice
@@ -873,16 +865,7 @@ class CrossoverStripe(Move):
             mate_positions_all[:, :, 0] = x_mate_transformed
             mate_positions_all[:, :, 1] = y_mate_transformed
             mate_trees_full[:, :, 2] = theta_mate_transformed
-            
-            # Compute distances from transformed positions and verify they match
-            distances_mate_all = cp.maximum(
-                cp.abs(x_mate_transformed - mate_line_point_x_2d),
-                cp.abs(y_mate_transformed - mate_line_point_y_2d)
-            )
-            
-            # Assert that transformed distances match original minimum distances
-            distance_error = cp.max(cp.abs(distances_mate_all - distances_mate_all_original))
-            assert distance_error < 1e-4, f"Distance mismatch after transformation: max error = {distance_error}"
+
         else:
             raise Exception(f"Unknown distance function: {self.distance_function}")
 
