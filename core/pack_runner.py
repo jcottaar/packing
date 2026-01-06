@@ -310,8 +310,9 @@ def set_rough_relax_max_step(ga, name, value):
             r.max_step = value
 
 def scale_N_and_pop_size(ga, name, value):
-    ga.ga.N = int(ga.ga.N * value)
-    ga.ga.ga_base.population_size = int(32*value)-1
+    assert ga.ga.N in [31,32]
+    ga.ga.N = int(32*value)-1
+    ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size / value)
 
 
 
