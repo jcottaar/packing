@@ -309,6 +309,10 @@ def set_rough_relax_max_step(ga, name, value):
         for r in ga.rough_relaxers:
             r.max_step = value
 
+def scale_N_and_pop_size(ga, name, value):
+    ga.ga.N = int(ga.ga.N * value)
+    ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size / value)
+
 
 
 
@@ -338,20 +342,25 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['reset_approach'] = pm(1, lambda r:r.choice([1,4]).item(), set_reset_approach) #
-    res.modifier_dict['reset_check_generations'] = pm(100, lambda r:r.choice([50,100]).item(), set_ga_base_ga_prop) 
-    res.modifier_dict['diversity_reset_threshold'] = pm(-1., lambda r:r.choice([0.01/40, -1.]).item(), set_ga_prop) 
-    res.modifier_dict['scale_rough_iterations'] = pm(1.0, lambda r:r.choice([1.0, 2.0]).item(), scale_rough_iterations) 
+    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
+    res.modifier_dict['scale_N'] = pm(1., lambda r:r.choice([0.5,1.0,2.0]).item(), scale_N_and_pop_size)
+    res.modifier_dict['reset_approach'] = pm(1, lambda r:1, set_reset_approach) #
+    res.modifier_dict['reset_check_generations'] = pm(100, lambda r:100, set_ga_base_ga_prop) 
+    res.modifier_dict['diversity_reset_threshold'] = pm(-1., lambda r:0.01/40, set_ga_prop) 
+    res.modifier_dict['scale_rough_iterations'] = pm(1.0, lambda r:1., scale_rough_iterations) 
     res.modifier_dict['connectivity_pattern'] = pm(1, lambda r:r.choice([1,6]).item(), set_connectivity_pattern)
-    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.uniform(0.0001,1.), set_ga_base_ga_prop)
-    res.modifier_dict['JiggleMaxTrees'] = pm(20, lambda r:r.choice([5,10,20]).item(), set_jiggle_max_trees)
-    res.modifier_dict['MoveRandomTree'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    res.modifier_dict['JiggleTreeSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    res.modifier_dict['JiggleTreeBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    res.modifier_dict['JiggleClusterSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    res.modifier_dict['JiggleClusterBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    res.modifier_dict['Twist'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    res.modifier_dict['rough_relax_max_step'] = pm(-1e-1, lambda r:r.choice([-1e-1, 1e-1, 1e-2]).item(), set_rough_relax_max_step)
+    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:r.uniform(0.6,0.8), set_ga_base_ga_prop)
+    # res.modifier_dict['JiggleMaxTrees'] = pm(20, lambda r:r.choice([4,5,6,7,8,9,10]).item(), set_jiggle_max_trees)
+    # res.modifier_dict['MoveRandomTree'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # res.modifier_dict['JiggleTreeSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # res.modifier_dict['JiggleTreeBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # res.modifier_dict['JiggleClusterSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # res.modifier_dict['JiggleClusterBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # res.modifier_dict['Twist'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    res.modifier_dict['rough_relax_max_step'] = pm(-1e-1, lambda r:1e-1, set_rough_relax_max_step)
+
+
+    #jitter
     
 
     
