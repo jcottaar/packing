@@ -838,6 +838,7 @@ class GAMultiTree(GAMultiIsland):
     connect_siblings: bool = field(init=True, default=True)  # Whether siblings are connected
     parent_child_depth: int = field(init=True, default=1)  # How many levels of parent/child connections
     parent_child_one_way: bool = field(init=True, default=False)  # If True, material only flows upward (child→parent)
+    scale_reset_by_level: bool = field(init=True, default=False)  # If True, scale reset_check_generations by 2^(depth-level)
     
     def _initialize(self, generator):
         super()._initialize(generator)
@@ -846,6 +847,18 @@ class GAMultiTree(GAMultiIsland):
         if n_ga <= 0 or not self._is_complete_binary_tree_size(n_ga):
             powers = [2**k - 1 for k in range(1, 10)]
             raise ValueError(f"GAMultiTree requires number of islands to be 2^k - 1 (complete binary tree), got {n_ga}. Valid sizes: {powers[:6]}...")
+        
+        # Scale reset_check_generations based on tree level if enabled
+        if self.scale_reset_by_level:
+            depth = int(np.log2(n_ga + 1)) - 1  # Max level (0-indexed)
+            for i, ga in enumerate(self.ga_list):
+                if ga.reset_check_generations is not None:
+                    node_level = int(np.floor(np.log2(i + 1)))  # Level of node i
+                    distance_from_leaf = depth - node_level
+                    multiplier = 2 ** distance_from_leaf
+                    ga.reset_check_generations = int(ga.reset_check_generations * multiplier)
+        print([g.reset_check_generations for g in self.ga_list])
+        
         self.display_structure()
     
     def _is_complete_binary_tree_size(self, n: int) -> bool:
@@ -863,7 +876,7 @@ class GAMultiTree(GAMultiIsland):
         
         print(f"\nGAMultiTree structure ({n_ga} islands, depth {depth}):")
         
-        if n_ga <= 31:  # Only show ASCII art for reasonably sized trees
+        if n_ga <= 1000:  # Only show ASCII art for reasonably sized trees
             # Use a simpler, cleaner ASCII representation
             def print_subtree(node_idx, prefix="", is_last=True):
                 if node_idx >= n_ga:
@@ -896,10 +909,10 @@ class GAMultiTree(GAMultiIsland):
             # Show connectivity info
             print("\nConnectivity (each island connects to parent, children, and sibling):")
             connectivity_matrix = self._get_connectivity_matrix()
-            for i in range(min(n_ga, 15)):  # Show first 15 islands to avoid clutter
-                connections = [j for j in range(n_ga) if connectivity_matrix[i, j]]
+            for i in range(min(n_ga, 1000)):  # Show first 15 islands to avoid clutter
+                connections = [j for j in range(n_ga) if connectivity_matrix[j, i]]
                 print(f"  Island {i}: → {connections}")
-            if n_ga > 15:
+            if n_ga > 1000:
                 print(f"  ... (showing first 15 of {n_ga} islands)")
                 
         else:
@@ -939,7 +952,7 @@ class GAMultiTree(GAMultiIsland):
                 # Connect i to this ancestor
                 if self.parent_child_one_way:
                     # Only child → parent (upward flow)
-                    connectivity_matrix[i, ancestor] = True
+                    connectivity_matrix[ancestor, i] = True
                 else:
                     # Bidirectional
                     connectivity_matrix[i, ancestor] = True
