@@ -311,7 +311,7 @@ def set_rough_relax_max_step(ga, name, value):
 
 def scale_N_and_pop_size(ga, name, value):
     ga.ga.N = int(ga.ga.N * value)
-    ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size / value)
+    ga.ga.ga_base.population_size = int(32*value)-1
 
 
 
@@ -342,8 +342,7 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)
-    res.modifier_dict['scale_N'] = pm(1., lambda r:r.choice([0.5,1.0,2.0]).item(), scale_N_and_pop_size)
+    res.modifier_dict['mate_distance'] = pm(6, lambda r:r.choice([4,6,8]).item(), set_ga_prop)    
     res.modifier_dict['reset_approach'] = pm(1, lambda r:1, set_reset_approach) #
     res.modifier_dict['reset_check_generations'] = pm(100, lambda r:100, set_ga_base_ga_prop) 
     res.modifier_dict['diversity_reset_threshold'] = pm(-1., lambda r:0.01/40, set_ga_prop) 
@@ -359,6 +358,7 @@ def baseline_runner(fast_mode=False):
     # res.modifier_dict['Twist'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
     res.modifier_dict['rough_relax_max_step'] = pm(-1e-1, lambda r:1e-1, set_rough_relax_max_step)
     res.modifier_dict['jitter'] = pm(0., lambda r:max(0., r.uniform(-0.5,0.5)), set_jitter)
+    res.modifier_dict['scale_N'] = pm(1., lambda r:r.choice([0.5,1.0,2.0]).item(), scale_N_and_pop_size)
 
 
     #jitter
