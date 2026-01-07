@@ -167,7 +167,7 @@ class JiggleCluster(Move):
     max_xy_move: float = field(init=True, default=0.1)
     max_theta_move: float = field(init=True, default=np.pi)
     min_N_trees: int = field(init=True, default=2)
-    max_N_trees: int = field(init=True, default=20)
+    max_N_trees: int = field(init=True, default=8)
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Fully vectorized version: jiggle variable numbers of trees in clusters."""

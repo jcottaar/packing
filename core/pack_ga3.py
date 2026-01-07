@@ -1549,6 +1549,7 @@ class Orchestrator(kgs.BaseClass):
         self.rough_relaxers = []
         relaxer = pack_dynamics.OptimizerBFGS()
         relaxer.cost = self.fitness_cost
+        relaxer.max_step = 1e-1
         relaxer.n_iterations = 80
         self.rough_relaxers.append(relaxer)
 
@@ -1735,15 +1736,15 @@ class Orchestrator(kgs.BaseClass):
 
 def baseline():
     runner = Orchestrator(n_generations=60000)
-    runner.ga = GAMultiRing(N=32)
-    runner.ga.diversity_reset_threshold = -1.
+    runner.ga = GAMultiRing(N=16)
+    runner.ga.diversity_reset_threshold = 0.01/40
     runner.ga.mate_distance=6
 
     ga_base = GASinglePopulationOld(N_trees_to_do=-1)
     #value = 0.125
     #ga_base.population_size = int(ga_base.population_size * value)
     #ga_base.selection_size = [int( (s-1) * value)+1 for s in ga_base.selection_size]
-    ga_base.population_size = 500 
+    ga_base.population_size = 1500 
     #ga_base.selection_size = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 23, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 225, 250]
     ga_base.reset_check_generations = 100
     ga_base.reset_check_threshold = 0.5
