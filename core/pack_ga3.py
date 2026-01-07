@@ -521,7 +521,7 @@ class GAMulti(GA):
             # Apply allow_reset_ratio - only allow worst X% of GAs to reset
             if self.allow_reset_ratio < 1.0:
                 sorted_indices = kgs.lexicographic_argsort(costs_per_ga)
-                n_allowed_to_reset = int(np.ceil(len(self.ga_list) * self.allow_reset_ratio))
+                n_allowed_to_reset = int(np.floor(len(self.ga_list) * self.allow_reset_ratio))
                 # Worst performers are at the end of the sorted list
                 for i, idx in enumerate(sorted_indices):
                     if i < len(self.ga_list) - n_allowed_to_reset:
