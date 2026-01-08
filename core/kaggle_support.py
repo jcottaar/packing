@@ -1903,5 +1903,90 @@ def find_best_transformation(xyt1: cp.ndarray, xyt2: cp.ndarray) -> tuple:
 
     return best_transformed_xyt2_reordered, best_rotation_angle, best_mirrored
 
+def copy_inner_part(xyt1, xyt2, N):
+    # Copies the inner N trees from xyt2 to xyt1, modifying in place
+    assert xyt1.shape[1] == 3
+    assert xyt2.shape[1] == 3
+    assert N<=xyt2.shape[0]
+    assert N<=xyt1.shape[0]
 
+    # Find trees to copy
+    distance_from_center = xyt2[:, :2]# - cp.mean(xyt2[:, :2], axis=0, keepdims=True)
+    distances = cp.linalg.norm(distance_from_center, axis=1, ord=cp.inf)  # (N_trees,)
+    sorted_indices = cp.argsort(distances)
+    selected_indices = sorted_indices[:N]
+    xyt_to_copy = xyt2[selected_indices]
+
+    # Reorder sol1 to match sol2
+    #reorder_to_match(xyt1, xyt2)
+
+    # Copy into sol1
+    xyt1[:N] = xyt_to_copy
+
+def reorder_to_match(xyt1: cp.ndarray, xyt2: cp.ndarray):
+    """
+    Reorders xyt1 in-place to minimize the distance to xyt2.
+    xyt2 can be smaller than xyt1.
+    This solves the rectangular assignment problem to find the best subset
+    of xyt1 that matches xyt2.
+
+    Parameters
+    ----------
+    xyt1 : cp.ndarray
+        Shape (N1, 3) - array to be reordered in-place.
+    xyt2 : cp.ndarray
+        Shape (N2, 3) - array to match against, where N2 <= N1.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    N1 = xyt1.shape[0]
+    N2 = xyt2.shape[0]
+
+    if N1 < N2:
+        raise ValueError(f"xyt1 ({N1} trees) cannot be smaller than xyt2 ({N2} trees).")
+
+    if N1 == 0 or N2 == 0:
+        return # Nothing to do
+
+    # Compute the pairwise distance matrix (cost matrix)
+    # Shape: (N1, N2)
+    dist_matrix = cp.sum((xyt1[:, cp.newaxis, :2] - xyt2[cp.newaxis, :, :2])**2, axis=2)
+
+    # Solve the rectangular assignment problem using scipy
+    # scipy requires numpy arrays, so convert from cupy to numpy
+    dist_matrix_np = cp.asnumpy(dist_matrix)
+    
+    # row_ind corresponds to indices in xyt1, col_ind to indices in xyt2
+    row_ind, col_ind = linear_sum_assignment(dist_matrix_np)
+    
+    # Convert back to cupy arrays
+    row_ind = cp.asarray(row_ind)
+    col_ind = cp.asarray(col_ind)
+
+    # The assignment gives us N2 pairs.
+    # We need to reorder xyt1 so that the chosen N2 trees are first,
+    # and in the correct order to match xyt2.
+
+    # Create a mapping from the original xyt1 index to its new position
+    new_order = -cp.ones(N1, dtype=cp.int32)
+    
+    # The trees from xyt1 that are matched (row_ind) should be ordered
+    # according to their corresponding match in xyt2 (col_ind).
+    # Example: if xyt1[i] is matched with xyt2[j], then xyt1[i] should go to position j.
+    new_order[row_ind] = col_ind
+
+    # Get the indices of unassigned trees in xyt1
+    unassigned_mask = cp.ones(N1, dtype=bool)
+    unassigned_mask[row_ind] = False
+    unassigned_indices = cp.where(unassigned_mask)[0]
+
+    # Place unassigned trees at the end
+    new_order[unassigned_indices] = cp.arange(N2, N1)
+
+    # Create the permutation index to reorder xyt1
+    permutation = cp.argsort(new_order)
+
+    # Reorder xyt1 in-place
+    original_xyt1 = xyt1.copy()
+    xyt1[:] = original_xyt1[permutation]
 set_float32(True)

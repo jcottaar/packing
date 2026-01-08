@@ -194,6 +194,8 @@ class InitializerRandomJiggled(Initializer):
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array    
     use_fixed_h_for_size_setup: bool = field(init=True, default=True)
+    ref_sol: kgs.SolutionCollection = field(init=True, default=None)
+    ref_N: int = field(init=True, default=None)
 
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
@@ -220,6 +222,14 @@ class InitializerRandomJiggled(Initializer):
         else:
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
         sol.canonicalize()
+        #pack_vis_sol.pack_vis_sol(sol)
+        #print('1')
+        if not self.ref_sol is None:
+            for i in range(N_individuals):
+                kgs.copy_inner_part(sol.xyt[i], self.ref_sol.xyt[0], self.ref_N)
+        #print('2')
+        #pack_vis_sol.pack_vis_sol(sol)
+        #raise 'stop'
         sol = self.jiggler.run_simulation(sol)
         sol.canonicalize()
         sol.snap()
