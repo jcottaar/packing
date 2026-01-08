@@ -315,10 +315,11 @@ def scale_N_and_pop_size(ga, name, value):
     ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size / value)
 
 def set_crystal(ga, name, value):
-    crystal_1_offset = 0.5*(value in [1,3])
-    crystal_2_offset = 0.5*(value in [1,2])
-    ga.ga.ga_base.initializer.ref_sol = kgs.create_tiled_solution('Perfect dimer', 15, make_symmetric=True, axis1_offset=crystal_1_offset, axis2_offset=crystal_2_offset)
-    ga.ga.ga_base.initializer.ref_N = int(ga.ga.ga_base.N_trees_to_do*20/68)
+    pass
+    #crystal_1_offset = 0.5*(value in [1,3])
+    #crystal_2_offset = 0.5*(value in [1,2])
+    #ga.ga.ga_base.initializer.ref_sol = kgs.create_tiled_solution('Perfect dimer', 15, make_symmetric=True, axis1_offset=crystal_1_offset, axis2_offset=crystal_2_offset)
+    #ga.ga.ga_base.initializer.ref_N = int(ga.ga.ga_base.N_trees_to_do*25/68)
 
 
 
@@ -334,10 +335,14 @@ def baseline_runner(fast_mode=False):
 
 
     runner = pack_ga3.baseline_symmetry_180()
-    runner.n_generations = 500 if not fast_mode else 2
+    runner.n_generations = 200 if not fast_mode else 2
+    runner.ga.target_score = 0.34
     runner.diagnostic_plot = False
     runner.ga.do_legalize = not fast_mode
     runner.ga.stop_check_generations = 1000000
+    runner.ga.ga_base.initializer.ref_sol_crystal_type = 'Perfect dimer'
+    runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
+    runner.ga.ga_base.initializer.ref_sol_axis2_offset = None
     #runner.ga.ga_base.alternative_selection = True
     #runner.ga.ga_base.search_depth = 1.
     
@@ -348,8 +353,10 @@ def baseline_runner(fast_mode=False):
     # print(DeepDiff(runner,runner2,ignore_order=True).pretty())
 
     res.base_ga = runner
+    #base_runner = pack_ga3.baseline_symmetry_180()
 
-    res.modifier_dict['crystal_offset'] = pm(1, lambda r: r.choice([1,2,3,4]), set_crystal)
+    res.modifier_dict['N_trees_to_do'] = pm(68, lambda r: r.choice([60,68,70,76]).item(), set_ga_base_ga_prop)
+    #res.modifier_dict['crystal_offset'] = pm(1, lambda r: r.choice([1,2,3,4]), set_crystal)
 
     # res.modifier_dict['mate_distance'] = pm(6, lambda r:6, set_ga_prop)    
     # res.modifier_dict['reset_approach'] = pm(1, lambda r:1, set_reset_approach) #

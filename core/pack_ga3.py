@@ -194,8 +194,13 @@ class InitializerRandomJiggled(Initializer):
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array    
     use_fixed_h_for_size_setup: bool = field(init=True, default=True)
+    ref_sol_crystal_type: str = field(init=True, default=None)
+    ref_sol_axis1_offset: float = field(init=True, default=0.)
+    ref_sol_axis2_offset: float = field(init=True, default=0.)
     ref_sol: kgs.SolutionCollection = field(init=True, default=None)
+    ref_N_scaling: float = field(init=True, default=25./68.)
     ref_N: int = field(init=True, default=None)
+    ref_rotate: float = field(init=True, default=0.) # in radians
 
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
@@ -203,7 +208,8 @@ class InitializerRandomJiggled(Initializer):
         size_setup_scaled = self.size_setup * np.sqrt(N_trees)
         if self.use_fixed_h_for_size_setup:
             size_setup_scaled = float(cp.asnumpy(self.fixed_h[0]))
-        xyt = np.random.default_rng(seed=self.seed).uniform(-0.5, 0.5, size=sol.xyt.shape)
+        generator = np.random.default_rng(seed=self.seed)
+        xyt = generator.uniform(-0.5, 0.5, size=sol.xyt.shape)
         xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
         xyt = cp.array(xyt, dtype=kgs.dtype_np)    
         sol = copy.deepcopy(self.base_solution)
@@ -224,9 +230,30 @@ class InitializerRandomJiggled(Initializer):
         sol.canonicalize()
         #pack_vis_sol.pack_vis_sol(sol)
         #print('1')
+        if not self.ref_sol_crystal_type is None:
+            if self.ref_sol_axis1_offset is None:
+                axis1_offset = generator.choice([0.,0.5])
+            else:
+                axis1_offset = self.ref_sol_axis1_offset
+            if self.ref_sol_axis2_offset is None:
+                axis2_offset = generator.choice([0.,0.5])
+            else:
+                axis2_offset = self.ref_sol_axis2_offset
+            print(axis1_offset, axis2_offset)
+            self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
+                                                     axis1_offset=axis1_offset, axis2_offset=axis2_offset)
+        if not self.ref_N_scaling is None:
+            self.ref_N = int(self.ref_N_scaling * N_trees)
         if not self.ref_sol is None:
+            ref_sol_use = copy.deepcopy(self.ref_sol)
+            if self.ref_rotate is None:
+                ref_rotate = generator.uniform(0., 2*np.pi)
+            else:
+                ref_rotate = self.ref_rotate
+            ref_sol_use.rotate(cp.array([ref_rotate], dtype=kgs.dtype_cp))
+            ref_sol_use.canonicalize()
             for i in range(N_individuals):
-                kgs.copy_inner_part(sol.xyt[i], self.ref_sol.xyt[0], self.ref_N)
+                kgs.copy_inner_part(sol.xyt[i], ref_sol_use.xyt[0], self.ref_N)
         #print('2')
         #pack_vis_sol.pack_vis_sol(sol)
         #raise 'stop'
