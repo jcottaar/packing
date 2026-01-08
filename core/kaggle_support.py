@@ -524,8 +524,8 @@ class SolutionCollection(BaseClass):
 
         x = xyt_cp[:, :, 0]
         y = xyt_cp[:, :, 1]
-        cx = cp.mean(x, axis=1)[:, None]
-        cy = cp.mean(y, axis=1)[:, None]
+        cx = 0#cp.mean(x, axis=1)[:, None]
+        cy = 0#cp.mean(y, axis=1)[:, None]
 
         x0 = x - cx
         y0 = y - cy
@@ -536,6 +536,8 @@ class SolutionCollection(BaseClass):
         xyt_cp[:, :, 0] = x_rot + cx
         xyt_cp[:, :, 1] = y_rot + cy
         xyt_cp[:, :, 2] = (xyt_cp[:, :, 2] - angle[:, None]) % (2 * np.pi)
+
+        self.canonicalize()
     
     def get_crystal_axes_allocate(self):
         """Get crystal axes for each solution. Returns (N_solutions, 2, 2) array."""        
@@ -700,8 +702,8 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
         return 4*self.xyt.shape[1]
     
     
-    def rotate(self):
-        raise Exception('rotate not implemented for SolutionCollectionSquare')
+    #def rotate(self):
+    #    raise Exception('rotate not implemented for SolutionCollectionSquare')
     
     def canonicalize_xyt(self, xyt:cp.ndarray):
         """Canonicalize genotype to x<=0, y<=0 quadrant.
@@ -905,8 +907,8 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
             return 0
         return 2*self.xyt.shape[1]
     
-    def rotate(self):
-        raise Exception('rotate not implemented for SolutionCollectionSquareSymmetric180')
+    #def rotate(self):
+   #     raise Exception('rotate not implemented for SolutionCollectionSquareSymmetric180')
     
     def canonicalize_xyt(self, xyt:cp.ndarray):
         """Canonicalize genotype to one half-plane.
@@ -1989,4 +1991,37 @@ def reorder_to_match(xyt1: cp.ndarray, xyt2: cp.ndarray):
     # Reorder xyt1 in-place
     original_xyt1 = xyt1.copy()
     xyt1[:] = original_xyt1[permutation]
+
+packings = dill_load(code_dir + '/../res/packings_optimized_unique.pickle')
+def create_tiled_solution(name, n_tilings, make_symmetric=False, axis1_offset = 0., axis2_offset=0.):
+    """Create a tiled solution from a periodic lattice solution."""
+    sol = copy.deepcopy(packings[name])
+    crystal_axes = sol.get_crystal_axes_allocate()
+    a_vec, b_vec = crystal_axes[0, 0, :], crystal_axes[0, 1, :]
+    
+    original_xyt = sol.xyt[0]
+    N_trees_per_cell = original_xyt.shape[0]
+    tiled_xyt = cp.zeros((N_trees_per_cell * n_tilings**2, 3), dtype=dtype_cp)
+    
+    half = n_tilings // 2
+    tile_idx = 0
+    for i in range(-half, n_tilings - half):
+        for j in range(-half, n_tilings - half):
+            lattice_offset = (i + axis1_offset) * a_vec + (j + axis2_offset) * b_vec
+            idx = tile_idx * N_trees_per_cell
+            tiled_xyt[idx:idx + N_trees_per_cell, :2] = original_xyt[:, :2] + lattice_offset
+            tiled_xyt[idx:idx + N_trees_per_cell, 2] = original_xyt[:, 2]
+            tile_idx += 1
+    
+    if make_symmetric:
+        sol_output = SolutionCollectionSquareSymmetric180()
+        sol_output.xyt = tiled_xyt.reshape(1, -1, 3)
+        sol_output.xyt = sol_output.xyt[:, sol_output.xyt[0,:,0] < 0, :]
+    else:
+        sol_output = SolutionCollectionSquare()
+        sol_output.xyt = tiled_xyt.reshape(1, -1, 3)
+    sol_output.h = cp.array([[1., 0., 0.]], dtype=dtype_cp)  # dummy
+    sol_output.check_constraints()
+    return sol_output
+
 set_float32(True)

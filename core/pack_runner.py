@@ -314,6 +314,12 @@ def scale_N_and_pop_size(ga, name, value):
     ga.ga.N = int(32*value)-1
     ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size / value)
 
+def set_crystal(ga, name, value):
+    crystal_1_offset = 0.5*(value in [1,3])
+    crystal_2_offset = 0.5*(value in [1,2])
+    ga.ga.ga_base.initializer.ref_sol = kgs.create_tiled_solution('Perfect dimer', 15, make_symmetric=True, axis1_offset=crystal_1_offset, axis2_offset=crystal_2_offset)
+    ga.ga.ga_base.initializer.ref_N = int(ga.ga.ga_base.N_trees_to_do*20/68)
+
 
 
 
@@ -328,7 +334,7 @@ def baseline_runner(fast_mode=False):
 
 
     runner = pack_ga3.baseline_symmetry_180()
-    runner.n_generations = 2000 if not fast_mode else 2
+    runner.n_generations = 500 if not fast_mode else 2
     runner.diagnostic_plot = False
     runner.ga.do_legalize = not fast_mode
     runner.ga.stop_check_generations = 1000000
@@ -343,25 +349,27 @@ def baseline_runner(fast_mode=False):
 
     res.base_ga = runner
 
-    res.modifier_dict['mate_distance'] = pm(6, lambda r:6, set_ga_prop)    
-    res.modifier_dict['reset_approach'] = pm(1, lambda r:1, set_reset_approach) #
-    res.modifier_dict['reset_check_generations'] = pm(100, lambda r:100, set_ga_base_ga_prop) 
-    res.modifier_dict['diversity_reset_threshold'] = pm(-1., lambda r:0.01/40, set_ga_prop) 
-    res.modifier_dict['scale_rough_iterations'] = pm(1.0, lambda r:1., scale_rough_iterations) 
-    res.modifier_dict['connectivity_pattern'] = pm(1, lambda r:1, set_connectivity_pattern)
-    res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:0.7, set_ga_base_ga_prop)
-    res.modifier_dict['JiggleMaxTrees'] = pm(20, lambda r:5, set_jiggle_max_trees)
-    # res.modifier_dict['MoveRandomTree'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    # res.modifier_dict['JiggleTreeSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    # res.modifier_dict['JiggleTreeBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    # res.modifier_dict['JiggleClusterSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    # res.modifier_dict['JiggleClusterBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    # res.modifier_dict['Twist'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
-    res.modifier_dict['rough_relax_max_step'] = pm(-1e-1, lambda r:1e-1, set_rough_relax_max_step)
-    res.modifier_dict['jitter'] = pm(0., lambda r:0., set_jitter)
-    #res.modifier_dict['scale_N'] = pm(1., lambda r:1., scale_N_and_pop_size)
-    res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(1.,3.), scale_population_size)
-    res.modifier_dict['N'] = pm(32, lambda r:r.choice([16,32]).item(), set_ga_prop)
+    res.modifier_dict['crystal_offset'] = pm(1, lambda r: r.choice([1,2,3,4]), set_crystal)
+
+    # res.modifier_dict['mate_distance'] = pm(6, lambda r:6, set_ga_prop)    
+    # res.modifier_dict['reset_approach'] = pm(1, lambda r:1, set_reset_approach) #
+    # res.modifier_dict['reset_check_generations'] = pm(100, lambda r:100, set_ga_base_ga_prop) 
+    # res.modifier_dict['diversity_reset_threshold'] = pm(-1., lambda r:0.01/40, set_ga_prop) 
+    # res.modifier_dict['scale_rough_iterations'] = pm(1.0, lambda r:1., scale_rough_iterations) 
+    # res.modifier_dict['connectivity_pattern'] = pm(1, lambda r:1, set_connectivity_pattern)
+    # res.modifier_dict['prob_mate_own'] = pm(0.7, lambda r:0.7, set_ga_base_ga_prop)
+    # res.modifier_dict['JiggleMaxTrees'] = pm(20, lambda r:5, set_jiggle_max_trees)
+    # # res.modifier_dict['MoveRandomTree'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # # res.modifier_dict['JiggleTreeSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # # res.modifier_dict['JiggleTreeBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # # res.modifier_dict['JiggleClusterSmall'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # # res.modifier_dict['JiggleClusterBig'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # # res.modifier_dict['Twist'] = pm(True, lambda r:r.choice([True, False]).item(), remove_move_by_name)
+    # res.modifier_dict['rough_relax_max_step'] = pm(-1e-1, lambda r:1e-1, set_rough_relax_max_step)
+    # res.modifier_dict['jitter'] = pm(0., lambda r:0., set_jitter)
+    # #res.modifier_dict['scale_N'] = pm(1., lambda r:1., scale_N_and_pop_size)
+    # res.modifier_dict['scale_population_size'] = pm(1.0, lambda r:r.uniform(1.,3.), scale_population_size)
+    # res.modifier_dict['N'] = pm(32, lambda r:r.choice([16,32]).item(), set_ga_prop)
 
     #jitter
     
