@@ -263,6 +263,7 @@ class GA(kgs.BaseClass):
     freeze_duration: int = field(init=True, default=100)
     always_allow_mate_with_better: bool = field(init=True, default=True)
     allow_mate_with_better_controls_all: bool = field(init=True, default=False) # if true, no mating allowed at all if _allow_mate_with_better is false
+    target_score: float = field(init=True, default=0.) # stop if reached
     
     make_own_fig = None # input to plt.subplots()
     make_own_fig_size = None
@@ -330,6 +331,8 @@ class GA(kgs.BaseClass):
                 b = self.best_ever[i]
                 if kgs.lexicographic_less_than(c.fitness[0], b.fitness[0]):
                     self.best_ever[i] = copy.deepcopy(c)
+            if self.best_costs_per_generation[0][-1][0]<=self.target_score:
+                self._stopped = True
             if not self.stop_check_generations is None and len(self.champions)>0:
                 assert len(self.best_costs_per_generation)==1
                 effective_stop_check_generations = self.stop_check_generations + self.champions[0].phenotype.N_trees * self.stop_check_generations_scale 
