@@ -453,12 +453,12 @@ class EdgeSpacerBasic(EdgeSpacer):
         half_side = h[:,:1]/2 - margin
         # Calculate distance to each corner: (±half_side, ±half_side)
         corner_distances = cp.stack([
-            ((xyt[:,:,0] - half_side)**2 + (xyt[:,:,1] - half_side)**2),  # top-right
-            ((xyt[:,:,0] + half_side)**2 + (xyt[:,:,1] - half_side)**2),  # top-left  
-            ((xyt[:,:,0] - half_side)**2 + (xyt[:,:,1] + half_side)**2),  # bottom-right
-            ((xyt[:,:,0] + half_side)**2 + (xyt[:,:,1] + half_side)**2)   # bottom-left
+            (cp.abs(xyt[:,:,0] - half_side) + cp.abs(xyt[:,:,1] - half_side)),  # top-right
+            (cp.abs(xyt[:,:,0] + half_side) + cp.abs(xyt[:,:,1] - half_side)),  # top-left  
+            (cp.abs(xyt[:,:,0] - half_side) + cp.abs(xyt[:,:,1] + half_side)),  # bottom-right
+            (cp.abs(xyt[:,:,0] + half_side) + cp.abs(xyt[:,:,1] + half_side))   # bottom-left
         ], axis=-1)
-        is_valid_corner = cp.any(corner_distances <= self.dist_corner**2, axis=-1)
+        is_valid_corner = cp.any(corner_distances <= self.dist_corner, axis=-1)
         
         return is_valid_x | is_valid_y | is_valid_corner
     
@@ -473,7 +473,7 @@ class SolutionCollection(BaseClass):
     override_phenotype: bool = field(default=False, init=True) # for testing
     edge_spacer: EdgeSpacer = field(default_factory=EdgeSpacerDummy)
     filter_move_locations_with_edge_spacer: bool = field(default=False)
-    filter_move_locations_margin: float = field(default=0.5)
+    filter_move_locations_margin: float = field(default=0.25)
 
     _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
     _prepped_for_phenotype: bool = field(default=False, init=False, repr=False)

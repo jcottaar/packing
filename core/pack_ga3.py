@@ -190,7 +190,7 @@ class Initializer(kgs.BaseClass):
 @dataclass
 class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
-    do_jiggle: bool = field(init=True, default=True)
+    do_jiggle: bool = field(init=True, default=False)
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array    
@@ -1091,7 +1091,7 @@ class GASinglePopulation(GA):
     reduce_h_threshold: float = field(init=True, default=1e-5/40) # scaled by N_trees
     reduce_h_amount: float = field(init=True, default=2e-3/np.sqrt(40)) # scaled by sqrt(N_trees)
     reduce_h_per_individual: bool = field(init=True, default=False)
-    use_new_ref_score: bool = field(init=True, default=False)
+    use_new_ref_score: bool = field(init=True, default=True)
     ref_score_scale: float = field(init=True, default=1.1)
 
     plot_diversity_ax = None
@@ -1912,9 +1912,10 @@ def baseline_symmetry_180_tesselated(adapt_moves=False):
     runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
     runner.ga.ga_base.initializer.ref_sol_axis2_offset = 'set!'
     runner.ga.stop_check_generations_scale = 10
+    runner.ga.ga_base.reset_check_generations_ratio = 0.1
 
     runner.ga.ga_base.initializer.new_tree_placer = True
-    runner.ga.ga_base.initializer.base_solution.edge_spacer = kgs.EdgeSpacerBasic(dist_x = 0.75, dist_y = 0.5)
+    runner.ga.ga_base.initializer.base_solution.edge_spacer = kgs.EdgeSpacerBasic(dist_x = 0.75, dist_y = 0.5, dist_corner = 0.)
 
     if adapt_moves:
         runner.ga.ga_base.initializer.base_solution.filter_move_locations_with_edge_spacer = True
