@@ -426,17 +426,17 @@ class TreeList(BaseClass):
     
 @dataclass
 class EdgeSpacer(BaseClass):
-    def check_valid(self, xyt, h, margin_x=0.):
+    def check_valid(self, xyt, h, margin=0.):
         # Checks if xyt is valid, also given bounds h
         assert xyt.shape[0] ==  h.shape[0]
         assert xyt.shape[2] == 3
-        is_valid = self._check_valid(xyt, h, margin_x)
+        is_valid = self._check_valid(xyt, h, margin)
         assert is_valid.shape == xyt.shape[:2]
         return is_valid
 
 @dataclass
 class EdgeSpacerDummy(EdgeSpacer):
-    def _check_valid(self,xyt,h,margin_x):
+    def _check_valid(self,xyt,h,margin):
         return cp.ones(xyt.shape[:2], dtype=bool)
 
 @dataclass
@@ -444,9 +444,9 @@ class EdgeSpacerBasic(EdgeSpacer):
     dist_x: float = field(default=0.5)
     dist_y: float = field(default=0.5)
 
-    def _check_valid(self,xyt,h,margin_x):
-        is_valid_x = cp.abs(xyt[:,:,0])> (h[:,:1]/2-self.dist_x-margin_x) 
-        is_valid_y = cp.abs(xyt[:,:,1])> (h[:,:1]/2-self.dist_y) 
+    def _check_valid(self,xyt,h,margin):
+        is_valid_x = cp.abs(xyt[:,:,0])> (h[:,:1]/2-self.dist_x-margin) 
+        is_valid_y = cp.abs(xyt[:,:,1])> (h[:,:1]/2-self.dist_y-margin) 
         return is_valid_x | is_valid_y
     
 '''Metric'''
@@ -1153,7 +1153,7 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
                 candidate_xyt[:, 0, 0] = cand_x
                 candidate_xyt[:, 0, 1] = cand_y
                 if self.filter_move_locations_with_edge_spacer:                    
-                    valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset[remaining_mask], margin_x=self.filter_move_locations_margin)[:, 0]
+                    valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset[remaining_mask], margin=self.filter_move_locations_margin)[:, 0]
                 else:
                     valid_mask = cp.ones(n_remaining, dtype=bool)
 

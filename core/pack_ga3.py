@@ -1911,7 +1911,6 @@ def baseline_symmetry_180_tesselated(adapt_moves=False):
 
     runner.ga.ga_base.initializer.new_tree_placer = True
     runner.ga.ga_base.initializer.base_solution.edge_spacer = kgs.EdgeSpacerBasic(dist_x = 0.75, dist_y = 0.5)
-    print('adapt numbers')
 
     if adapt_moves:
         runner.ga.ga_base.initializer.base_solution.filter_move_locations_with_edge_spacer = True
