@@ -1076,7 +1076,7 @@ class GAMultiTree(GAMultiIsland):
 
 import pack_io
 import pandas as pd
-ref_solution = pack_io.dataframe_to_solution_list(pd.read_csv(kgs.code_dir + '../res/71.01.csv'))
+ref_solution = None
 
 @dataclass
 class GASinglePopulation(GA):
@@ -1089,6 +1089,7 @@ class GASinglePopulation(GA):
     reduce_h_threshold: float = field(init=True, default=1e-5/40) # scaled by N_trees
     reduce_h_amount: float = field(init=True, default=2e-3/np.sqrt(40)) # scaled by sqrt(N_trees)
     reduce_h_per_individual: bool = field(init=True, default=False)
+    use_new_ref_score: bool = field(init=True, default=False)
 
     plot_diversity_ax = None
     plot_diversity_alt_ax = None
@@ -1128,8 +1129,15 @@ class GASinglePopulation(GA):
         self.initializer.seed = generator.integers(0, 2**30).get().item()
         if self.fixed_h is not None:
             if self.fixed_h == -1.:
-                ref_score = ref_solution[1][self.N_trees_to_do-1]
-                ref_h = max(np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.055)), np.sqrt(0.37*self.N_trees_to_do))
+                if not self.use_new_ref_score:  
+                    global ref_solution
+                    if ref_solution is None:
+                        ref_solution = pack_io.dataframe_to_solution_list(pd.read_csv(kgs.code_dir + '../res/71.01.csv'))                  
+                    ref_score = ref_solution[1][self.N_trees_to_do-1]
+                    ref_h = max(np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.055)), np.sqrt(0.37*self.N_trees_to_do))
+                else:
+                    ref_score = 0.317 + 0.206/np.sqrt(self.N_trees_to_do)
+                    ref_h = np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.1))         
                 self.initializer.fixed_h = cp.array([ref_h,0,0],dtype=kgs.dtype_cp)
             else:
                 self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)

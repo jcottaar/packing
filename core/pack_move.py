@@ -131,6 +131,8 @@ class MoveRandomTree(Move):
 
         # Generate all random values at once (GPU-based RNG)
         trees_to_mutate_gpu = generator.integers(0, N_trees, size=N_moves)
+        new_x_gpu, new_y_gpu = population.genotype.generate_move_centers(None, inds_to_do, generator)
+        #print('hi')
         new_x_gpu = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1]
         new_y_gpu = generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2]
         new_theta_gpu = generator.uniform(-cp.pi, cp.pi, size=N_moves)
