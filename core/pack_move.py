@@ -701,16 +701,16 @@ class CrossoverStripe(Move):
 
         # Build edge-spacer validity masks up front so they can be reused throughout
         if population.genotype.filter_move_locations_with_edge_spacer:
-            margin_x = population.genotype.filter_move_locations_margin
+            margin = population.genotype.filter_move_locations_margin
             valid_ind_mask = population.genotype.edge_spacer.check_valid(
                 population.genotype.xyt[inds_to_do],
                 h_params,
-                margin_x=margin_x,
+                margin=margin,
             )
             valid_mate_mask = population.genotype.edge_spacer.check_valid(
                 mate_trees_full,
                 mate_h_params,
-                margin_x=margin_x,
+                margin=margin,
             )
         else:
             valid_ind_mask = cp.ones((N_moves, N_trees), dtype=bool)
