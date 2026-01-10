@@ -424,6 +424,31 @@ class TreeList(BaseClass):
             trees.append(tree)
         return trees
     
+@dataclass
+class EdgeSpacer(BaseClass):
+    def check_valid(self, xyt, h):
+        # Checks if xyt is valid, also given bounds h
+        assert xyt.shape[0] ==  h.shape[0]
+        assert xyt.shape[2] == 3
+        is_valid = self._check_valid(xyt, h)
+        assert is_valid.shape == xyt.shape[:2]
+        return is_valid
+
+@dataclass
+class EdgeSpacerDummy(EdgeSpacer):
+    def _check_valid(self,xyt,h):
+        return cp.ones(xyt.shape[:2], dtype=bool)
+
+@dataclass
+class EdgeSpacerBasic(EdgeSpacer):
+    dist_x: float = field(default=0.5)
+    dist_y: float = field(default=0.5)
+
+    def _check_valid(self,xyt,h):
+        is_valid_x = cp.abs(xyt[:,:,0])> (h[:,0]/2-self.dist_x) 
+        is_valid_y = cp.abs(xyt[:,:,1])> (h[:,0]/2-self.dist_y) 
+        return is_valid_x | is_valid_y
+    
 '''Metric'''
 @dataclass
 class SolutionCollection(BaseClass):
@@ -433,6 +458,7 @@ class SolutionCollection(BaseClass):
     periodic: bool = field(default=False)  # whether to use periodic boundaries
     N_periodic: int = field(default=2)  # number of periodic images in each direction
     override_phenotype: bool = field(default=False, init=True) # for testing
+    edge_spacer: EdgeSpacer = field(default_factory=EdgeSpacerDummy)
 
     _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
     _prepped_for_phenotype: bool = field(default=False, init=False, repr=False)
@@ -568,9 +594,10 @@ class SolutionCollection(BaseClass):
         self.h[inds] = other.h[parent_ids]
 
     def create_empty(self, N_solutions: int, N_trees: int):
-        xyt = cp.zeros((N_solutions, N_trees, 3), dtype=dtype_cp)
-        h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
-        return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, periodic=self.periodic)
+        res = copy.deepcopy(self)
+        res.xyt = cp.zeros((N_solutions, N_trees, 3), dtype=dtype_cp)
+        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
+        return res
     # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
 
     def generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):
@@ -845,9 +872,10 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
  
     def create_empty(self, N_solutions: int, N_trees: int):
         assert(N_trees % 4 == 0)
-        xyt = cp.zeros((N_solutions, N_trees//4, 3), dtype=dtype_cp)
-        h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
-        return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, periodic=self.periodic)
+        res=copy.deepcopy(self)
+        res.xyt = cp.zeros((N_solutions, N_trees//4, 3), dtype=dtype_cp)
+        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
+        return res
     # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
 
     def snap(self):
@@ -1009,9 +1037,10 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
     
     def create_empty(self, N_solutions: int, N_trees: int):
         assert(N_trees % 2 == 0)
-        xyt = cp.zeros((N_solutions, N_trees//2, 3), dtype=dtype_cp)
-        h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
-        return type(self)(xyt=xyt, h=h, use_fixed_h=self.use_fixed_h, periodic=self.periodic)
+        res = copy.deepcopy(self)
+        res.xyt = cp.zeros((N_solutions, N_trees//2, 3), dtype=dtype_cp)
+        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
+        return res
 
     def snap(self):
         phenotype = self.convert_to_phenotype()
@@ -1412,6 +1441,8 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
         if self.angles is None:
             self.angles = cp.full((self.N_solutions,), np.pi / 2, dtype=dtype_cp)
         return self.angles
+    
+
 
 
 # ============================================================

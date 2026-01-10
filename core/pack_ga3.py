@@ -202,6 +202,8 @@ class InitializerRandomJiggled(Initializer):
     ref_N: int = field(init=True, default=None)
     ref_rotate: float = field(init=True, default=0.) # in radians
 
+    new_tree_placer: bool = field(init=True, default=False)
+
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
         sol = self.base_solution.create_empty(N_individuals, N_trees)
@@ -209,53 +211,114 @@ class InitializerRandomJiggled(Initializer):
         if self.use_fixed_h_for_size_setup:
             size_setup_scaled = float(cp.asnumpy(self.fixed_h[0]))
         generator = np.random.default_rng(seed=self.seed)
-        xyt = generator.uniform(-0.5, 0.5, size=sol.xyt.shape)
-        xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
-        xyt = cp.array(xyt, dtype=kgs.dtype_np)    
-        sol = copy.deepcopy(self.base_solution)
-        sol.xyt = xyt   
-        if self.fixed_h is None:
-            if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
-                sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
-            elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
-                sol.h = cp.array([[size_setup_scaled,size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)         
-            elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeFixed):
-                sol.h = cp.array([[size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)  
-                sol.aspect_ratios = cp.array([sol.aspect_ratios[0]]*N_individuals, dtype=kgs.dtype_cp)       
+        if not self.new_tree_placer:
+            xyt = generator.uniform(-0.5, 0.5, size=sol.xyt.shape)
+            xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
+            xyt = cp.array(xyt, dtype=kgs.dtype_np)    
+            #sol = copy.deepcopy(self.base_solution)
+            sol.xyt = xyt   
+            if self.fixed_h is None:
+                if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
+                    sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
+                elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
+                    sol.h = cp.array([[size_setup_scaled,size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)         
+                elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeFixed):
+                    sol.h = cp.array([[size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)  
+                    sol.aspect_ratios = cp.array([sol.aspect_ratios[0]]*N_individuals, dtype=kgs.dtype_cp)       
+                else:
+                    assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
+                    sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)     
             else:
-                assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
-                sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)     
+                sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
+            sol.canonicalize()
+            #pack_vis_sol.pack_vis_sol(sol)
+            #print('1')
+            if not self.ref_sol_crystal_type is None:
+                if self.ref_sol_axis1_offset is None:
+                    axis1_offset = generator.choice([0.,0.5])
+                else:
+                    axis1_offset = self.ref_sol_axis1_offset
+                if self.ref_sol_axis2_offset is None:
+                    axis2_offset = generator.choice([0.,0.5])
+                else:
+                    axis2_offset = self.ref_sol_axis2_offset
+                print(self.seed, axis1_offset, axis2_offset)
+                self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
+                                                        axis1_offset=axis1_offset, axis2_offset=axis2_offset)
+            if not self.ref_N_scaling is None:
+                self.ref_N = int(self.ref_N_scaling * N_trees)
+            if not self.ref_sol is None:
+                ref_sol_use = copy.deepcopy(self.ref_sol)
+                if self.ref_rotate is None:
+                    ref_rotate = generator.uniform(0., 2*np.pi)
+                else:
+                    ref_rotate = self.ref_rotate
+                ref_sol_use.rotate(cp.array([ref_rotate], dtype=kgs.dtype_cp))
+                ref_sol_use.canonicalize()
+                for i in range(N_individuals):
+                    kgs.copy_inner_part(sol.xyt[i], ref_sol_use.xyt[0], self.ref_N)
         else:
-            sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
-        sol.canonicalize()
-        #pack_vis_sol.pack_vis_sol(sol)
-        #print('1')
-        if not self.ref_sol_crystal_type is None:
-            if self.ref_sol_axis1_offset is None:
-                axis1_offset = generator.choice([0.,0.5])
+            assert not self.fixed_h is None
+            sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))      
+            if not self.ref_sol_crystal_type is None:
+                if self.ref_sol_axis1_offset is None:
+                    axis1_offset = generator.choice([0.,0.5])
+                else:
+                    axis1_offset = self.ref_sol_axis1_offset
+                if self.ref_sol_axis2_offset is None:
+                    axis2_offset = generator.choice([0.,0.5])
+                else:
+                    axis2_offset = self.ref_sol_axis2_offset
+                print(self.seed, axis1_offset, axis2_offset)
+                self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
+                                                        axis1_offset=axis1_offset, axis2_offset=axis2_offset)            
+            if not self.ref_sol is None:
+                ref_sol_use = copy.deepcopy(self.ref_sol)
+                if self.ref_rotate is None:
+                    ref_rotate = generator.uniform(0., 2*np.pi)
+                else:
+                    ref_rotate = self.ref_rotate
+                ref_sol_use.rotate(cp.array([ref_rotate], dtype=kgs.dtype_cp))
+                ref_sol_use.canonicalize()
+                expected_score = 0.317 + 0.206/np.sqrt(N_trees)
+                expected_h = cp.array([[np.sqrt(expected_score*N_trees),0.,0.]], dtype=kgs.dtype_cp)
+                to_keep = ~sol.edge_spacer.check_valid(ref_sol_use.xyt, expected_h)[0]
+                ref_sol_use.xyt = ref_sol_use.xyt[:,to_keep,:]
+                N1 = ref_sol_use.xyt.shape[1]
+                assert N1<=sol.xyt.shape[1]
+                sol.xyt[:,:ref_sol_use.xyt.shape[1],:] = cp.tile(ref_sol_use.xyt[0:1,:,:], (N_individuals,1,1))
             else:
-                axis1_offset = self.ref_sol_axis1_offset
-            if self.ref_sol_axis2_offset is None:
-                axis2_offset = generator.choice([0.,0.5])
-            else:
-                axis2_offset = self.ref_sol_axis2_offset
-            print(axis1_offset, axis2_offset)
-            self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
-                                                     axis1_offset=axis1_offset, axis2_offset=axis2_offset)
-        if not self.ref_N_scaling is None:
-            self.ref_N = int(self.ref_N_scaling * N_trees)
-        if not self.ref_sol is None:
-            ref_sol_use = copy.deepcopy(self.ref_sol)
-            if self.ref_rotate is None:
-                ref_rotate = generator.uniform(0., 2*np.pi)
-            else:
-                ref_rotate = self.ref_rotate
-            ref_sol_use.rotate(cp.array([ref_rotate], dtype=kgs.dtype_cp))
-            ref_sol_use.canonicalize()
-            for i in range(N_individuals):
-                kgs.copy_inner_part(sol.xyt[i], ref_sol_use.xyt[0], self.ref_N)
+                raise 'no ref sol branch todo'
+            # now add trees up to N_trees using vectorized rejection sampling
+            N_remaining = sol.xyt.shape[1] - N1
+            if N_remaining > 0:
+                # Track which trees still need placement for each individual
+                needs_placement = np.ones((N_individuals, N_remaining), dtype=bool)
+                
+                while np.any(needs_placement):
+                    # Generate candidates for all trees that need placement
+                    for i_individual in range(N_individuals):
+                        n_to_place = np.sum(needs_placement[i_individual])
+                        if n_to_place == 0:
+                            continue
+                        
+                        # Generate random candidates
+                        h_value = float(sol.h[i_individual, 0].get())
+                        candidates_xy = generator.uniform(-0.5 * h_value, 0.5 * h_value, (n_to_place, 2))
+                        candidates_theta = generator.uniform(0., 2 * np.pi, (n_to_place, 1))
+                        candidates = np.concatenate([candidates_xy, candidates_theta], axis=1)
+                        candidates_cp = cp.array(candidates[np.newaxis, :, :], dtype=kgs.dtype_cp)
+                        
+                        # Check validity
+                        valid_mask = sol.edge_spacer.check_valid(candidates_cp, sol.h[i_individual:i_individual+1])[0].get()
+                     
+                        # Place valid candidates
+                        if np.any(valid_mask):
+                            tree_indices = np.where(needs_placement[i_individual])[0]
+                            valid_tree_indices = tree_indices[valid_mask]
+                            sol.xyt[i_individual, N1 + valid_tree_indices, :] = candidates_cp[0, valid_mask, :]
+                            needs_placement[i_individual, valid_tree_indices] = False
         #print('2')
-        #pack_vis_sol.pack_vis_sol(sol)
         #raise 'stop'
         sol = self.jiggler.run_simulation(sol)
         sol.canonicalize()
