@@ -426,17 +426,17 @@ class TreeList(BaseClass):
     
 @dataclass
 class EdgeSpacer(BaseClass):
-    def check_valid(self, xyt, h):
+    def check_valid(self, xyt, h, margin_x=0.):
         # Checks if xyt is valid, also given bounds h
         assert xyt.shape[0] ==  h.shape[0]
         assert xyt.shape[2] == 3
-        is_valid = self._check_valid(xyt, h)
+        is_valid = self._check_valid(xyt, h, margin_x)
         assert is_valid.shape == xyt.shape[:2]
         return is_valid
 
 @dataclass
 class EdgeSpacerDummy(EdgeSpacer):
-    def _check_valid(self,xyt,h):
+    def _check_valid(self,xyt,h,margin_x):
         return cp.ones(xyt.shape[:2], dtype=bool)
 
 @dataclass
@@ -444,9 +444,9 @@ class EdgeSpacerBasic(EdgeSpacer):
     dist_x: float = field(default=0.5)
     dist_y: float = field(default=0.5)
 
-    def _check_valid(self,xyt,h):
-        is_valid_x = cp.abs(xyt[:,:,0])> (h[:,0]/2-self.dist_x) 
-        is_valid_y = cp.abs(xyt[:,:,1])> (h[:,0]/2-self.dist_y) 
+    def _check_valid(self,xyt,h,margin_x):
+        is_valid_x = cp.abs(xyt[:,:,0])> (h[:,:1]/2-self.dist_x-margin_x) 
+        is_valid_y = cp.abs(xyt[:,:,1])> (h[:,:1]/2-self.dist_y) 
         return is_valid_x | is_valid_y
     
 '''Metric'''
@@ -459,6 +459,8 @@ class SolutionCollection(BaseClass):
     N_periodic: int = field(default=2)  # number of periodic images in each direction
     override_phenotype: bool = field(default=False, init=True) # for testing
     edge_spacer: EdgeSpacer = field(default_factory=EdgeSpacerDummy)
+    filter_move_locations_with_edge_spacer: bool = field(default=False)
+    filter_move_locations_margin: float = field(default=0.5)
 
     _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
     _prepped_for_phenotype: bool = field(default=False, init=False, repr=False)
@@ -705,7 +707,8 @@ class SolutionCollectionSquare(SolutionCollection):
         else:
             self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
 
-    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):        
+    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):     
+        assert not self.filter_move_locations_with_edge_spacer   
         size = self.h[inds_to_do,0].copy()  # (N,)
         if edge_clearance is not None:
             size -= edge_clearance*2
@@ -883,7 +886,8 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
         phenotype.snap()
         self.h[:] = phenotype.h[:]
 
-    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):        
+    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):  
+        assert not self.filter_move_locations_with_edge_spacer        
         original_size = self.h[inds_to_do,0].copy()  # (N,)
         size = original_size.copy()
         if edge_clearance is not None:
@@ -1047,79 +1051,117 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
         phenotype.snap()
         self.h[:] = phenotype.h[:]
 
-    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):        
+    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):   
+        
         original_size = self.h[inds_to_do,0].copy()  # (N,)
         size = original_size.copy()
         if edge_clearance is not None:
             size -= edge_clearance*2
+            
+            # Assert no infinite loop: need original_size >= 2*edge_clearance for acceptance to be possible
+            # For 180° symmetry, only need to avoid x > -edge_clearance (single constraint)
+            assert cp.all(original_size >= 4*edge_clearance), \
+                f"Infinite loop risk: original_size must be >= 4*edge_clearance. " \
+                f"Min ratio: {float(cp.min(original_size / (edge_clearance + 1e-10)))}"
+        
+            # Direct sampling from the valid L-shaped region (no rejection sampling needed)
+            # Valid region: x ∈ [-size/2, 0], y ∈ [-size/2, size/2], excluding {x > -edge_clearance AND |y| <= edge_clearance}
+            #
+            # Decompose into 3 rectangles:
+            # Region A: x ∈ [-size/2, -edge_clearance], y ∈ [-size/2, size/2]  (left strip)
+            # Region B: x ∈ [-edge_clearance, 0], y ∈ (edge_clearance, size/2]  (top right)
+            # Region C: x ∈ [-edge_clearance, 0], y ∈ [-size/2, -edge_clearance) (bottom right)
+            
+            N = len(inds_to_do)
+            half_size = size / 2  # (N,)
+            
+            # Compute widths and heights for each region
+            width_A = half_size - edge_clearance  # x extent of region A
+            height_A = size                        # y extent of region A
+            width_BC = edge_clearance              # x extent of regions B and C
+            height_B = half_size - edge_clearance  # y extent of region B (top)
+            height_C = half_size - edge_clearance  # y extent of region C (bottom)
+            
+            # Compute areas of each region
+            area_A = width_A * height_A
+            area_B = width_BC * height_B
+            area_C = width_BC * height_C
+            total_area = area_A + area_B + area_C
+            
+            # Cumulative probabilities for region selection
+            prob_A = area_A / total_area
+            prob_AB = (area_A + area_B) / total_area
+            # prob_ABC = 1.0 (implicit)
+            
+            # Generate uniform random values for region selection
+            region_selector = generator.uniform(0., 1., size=N)
+            
+            # Determine which region each sample falls into
+            in_A = region_selector < prob_A
+            in_B = (region_selector >= prob_A) & (region_selector < prob_AB)
+            in_C = region_selector >= prob_AB
+            
+            # Generate x and y coordinates based on region
+            move_centers_x = cp.zeros(N, dtype=dtype_cp)
+            move_centers_y = cp.zeros(N, dtype=dtype_cp)
+            
+            # Region A: x ∈ [-size/2, -edge_clearance], y ∈ [-size/2, size/2]
+            if cp.any(in_A):
+                move_centers_x[in_A] = generator.uniform(-half_size[in_A], -edge_clearance[in_A])
+                move_centers_y[in_A] = generator.uniform(-half_size[in_A], half_size[in_A])
+            
+            # Region B: x ∈ [-edge_clearance, 0], y ∈ (edge_clearance, size/2]
+            if cp.any(in_B):
+                move_centers_x[in_B] = generator.uniform(-edge_clearance[in_B], cp.zeros_like(edge_clearance[in_B]))
+                move_centers_y[in_B] = generator.uniform(edge_clearance[in_B], half_size[in_B])
+            
+            # Region C: x ∈ [-edge_clearance, 0], y ∈ [-size/2, -edge_clearance)
+            if cp.any(in_C):
+                move_centers_x[in_C] = generator.uniform(-edge_clearance[in_C], cp.zeros_like(edge_clearance[in_C]))
+                move_centers_y[in_C] = generator.uniform(-half_size[in_C], -edge_clearance[in_C])
+            
+            # Add offsets
+            move_centers_x += self.h[inds_to_do, 1]
+            move_centers_y += self.h[inds_to_do, 2]
         else:
-            edge_clearance = 0*size
-       
-        # Assert no infinite loop: need original_size >= 2*edge_clearance for acceptance to be possible
-        # For 180° symmetry, only need to avoid x > -edge_clearance (single constraint)
-        assert cp.all(original_size >= 4*edge_clearance), \
-            f"Infinite loop risk: original_size must be >= 4*edge_clearance. " \
-            f"Min ratio: {float(cp.min(original_size / (edge_clearance + 1e-10)))}"
-       
-        # Direct sampling from the valid L-shaped region (no rejection sampling needed)
-        # Valid region: x ∈ [-size/2, 0], y ∈ [-size/2, size/2], excluding {x > -edge_clearance AND |y| <= edge_clearance}
-        #
-        # Decompose into 3 rectangles:
-        # Region A: x ∈ [-size/2, -edge_clearance], y ∈ [-size/2, size/2]  (left strip)
-        # Region B: x ∈ [-edge_clearance, 0], y ∈ (edge_clearance, size/2]  (top right)
-        # Region C: x ∈ [-edge_clearance, 0], y ∈ [-size/2, -edge_clearance) (bottom right)
+            # No edge clearance - return move locations that are valid according to the edge spacer
+            size = original_size  # no shrink when edge_clearance is None
+
+            N = len(inds_to_do)
+            move_centers_x = cp.zeros(N, dtype=dtype_cp)
+            move_centers_y = cp.zeros(N, dtype=dtype_cp)
+            remaining_mask = cp.ones(N, dtype=bool)
+
+            # Use rejection sampling so every sampled center passes the edge spacer check
+            h_subset = self.h[inds_to_do]
+            offset_x = h_subset[:, 1]
+            offset_y = h_subset[:, 2]
+
         
-        N = len(inds_to_do)
-        half_size = size / 2  # (N,)
-        
-        # Compute widths and heights for each region
-        width_A = half_size - edge_clearance  # x extent of region A
-        height_A = size                        # y extent of region A
-        width_BC = edge_clearance              # x extent of regions B and C
-        height_B = half_size - edge_clearance  # y extent of region B (top)
-        height_C = half_size - edge_clearance  # y extent of region C (bottom)
-        
-        # Compute areas of each region
-        area_A = width_A * height_A
-        area_B = width_BC * height_B
-        area_C = width_BC * height_C
-        total_area = area_A + area_B + area_C
-        
-        # Cumulative probabilities for region selection
-        prob_A = area_A / total_area
-        prob_AB = (area_A + area_B) / total_area
-        # prob_ABC = 1.0 (implicit)
-        
-        # Generate uniform random values for region selection
-        region_selector = generator.uniform(0., 1., size=N)
-        
-        # Determine which region each sample falls into
-        in_A = region_selector < prob_A
-        in_B = (region_selector >= prob_A) & (region_selector < prob_AB)
-        in_C = region_selector >= prob_AB
-        
-        # Generate x and y coordinates based on region
-        move_centers_x = cp.zeros(N, dtype=dtype_cp)
-        move_centers_y = cp.zeros(N, dtype=dtype_cp)
-        
-        # Region A: x ∈ [-size/2, -edge_clearance], y ∈ [-size/2, size/2]
-        if cp.any(in_A):
-            move_centers_x[in_A] = generator.uniform(-half_size[in_A], -edge_clearance[in_A])
-            move_centers_y[in_A] = generator.uniform(-half_size[in_A], half_size[in_A])
-        
-        # Region B: x ∈ [-edge_clearance, 0], y ∈ (edge_clearance, size/2]
-        if cp.any(in_B):
-            move_centers_x[in_B] = generator.uniform(-edge_clearance[in_B], cp.zeros_like(edge_clearance[in_B]))
-            move_centers_y[in_B] = generator.uniform(edge_clearance[in_B], half_size[in_B])
-        
-        # Region C: x ∈ [-edge_clearance, 0], y ∈ [-size/2, -edge_clearance)
-        if cp.any(in_C):
-            move_centers_x[in_C] = generator.uniform(-edge_clearance[in_C], cp.zeros_like(edge_clearance[in_C]))
-            move_centers_y[in_C] = generator.uniform(-half_size[in_C], -edge_clearance[in_C])
-        
-        # Add offsets
-        move_centers_x += self.h[inds_to_do, 1]
-        move_centers_y += self.h[inds_to_do, 2]
+            while cp.any(remaining_mask):
+                n_remaining = int(cp.sum(remaining_mask))
+
+                # Sample within canonical half-plane (x ≤ 0) and full height
+                cand_x = generator.uniform(-size[remaining_mask] / 2, 0.0, size=n_remaining)
+                cand_y = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, size=n_remaining)                
+
+                cand_x += offset_x[remaining_mask]
+                cand_y += offset_y[remaining_mask]
+
+                # Validate against the configured edge spacer
+                candidate_xyt = cp.zeros((n_remaining, 1, 3), dtype=dtype_cp)
+                candidate_xyt[:, 0, 0] = cand_x
+                candidate_xyt[:, 0, 1] = cand_y
+                if self.filter_move_locations_with_edge_spacer:                    
+                    valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset[remaining_mask], margin_x=self.filter_move_locations_margin)[:, 0]
+                else:
+                    valid_mask = cp.ones(n_remaining, dtype=bool)
+
+                indices_remaining = cp.where(remaining_mask)[0]
+                indices_accepted = indices_remaining[valid_mask]
+                move_centers_x[indices_accepted] = cand_x[valid_mask]
+                move_centers_y[indices_accepted] = cand_y[valid_mask]
+                remaining_mask[indices_accepted] = False
 
         return move_centers_x, move_centers_y
 
