@@ -1901,3 +1901,26 @@ def baseline_symmetry_180():
                                           'CrossoverSquareDecoupled', 2.0] )
     runner.ga.stop_check_generations_scale = 35
     return runner
+
+def baseline_symmetry_180_tesselated(adapt_moves=False):
+    runner = baseline_symmetry_180()
+    runner.ga.ga_base.initializer.ref_sol_crystal_type = 'Perfect dimer'
+    runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
+    runner.ga.ga_base.initializer.ref_sol_axis2_offset = 'set!'
+    runner.ga.stop_check_generations_scale = 10
+
+    runner.ga.ga_base.initializer.new_tree_placer = True
+    runner.ga.ga_base.initializer.base_solution.edge_spacer = kgs.EdgeSpacerBasic(dist_x = 0.75, dist_y = 0.5)
+    print('adapt numbers')
+
+    if adapt_moves:
+        runner.ga.ga_base.initializer.base_solution.filter_move_locations_with_edge_spacer = True
+        for m in runner.ga.ga_base.move.moves:
+            if isinstance(m[0], pack_move.CrossoverStripe):
+                m[0].do_rotation = False
+                m[0].use_edge_clearance_when_decoupled = False
+                if m[0].distance_function == 'stripe':
+                    m[0].respect_edge_spacer_filter = False
+                if m[0].decouple_mate_location:
+                    m[0].max_N_trees_ratio = 0.25
+    return runner

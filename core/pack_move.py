@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 # ============================================================
 @dataclass
 class Move(kgs.BaseClass):
+    respect_edge_spacer_filter: bool = field(init=True, default=True)
 
     def do_move(self, population:'Population', mate_sol:kgs.SolutionCollection, individual_id:int,
                 mate_id:int, generator:cp.random.Generator):
@@ -34,6 +35,7 @@ class Move(kgs.BaseClass):
         generator : cp.random.Generator
             Random number generator (GPU-based)
         """
+        raise 'obsolete'
         # Convert to GPU arrays and call vectorized version
         inds_to_do = cp.array([individual_id], dtype=cp.int32)
         inds_mate = cp.array([mate_id], dtype=cp.int32)
@@ -57,7 +59,11 @@ class Move(kgs.BaseClass):
         generator : cp.random.Generator
             Random number generator (GPU-based)
         """
+        old_val = population.genotype.filter_move_locations_with_edge_spacer
+        if not self.respect_edge_spacer_filter:
+            population.genotype.filter_move_locations_with_edge_spacer = False
         self._do_move_vec(population, inds_to_do, mate_sol, inds_mate, generator)
+        population.genotype.filter_move_locations_with_edge_spacer = old_val
 
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
@@ -71,6 +77,42 @@ class Move(kgs.BaseClass):
         for ind_to_do, ind_mate in zip(inds_to_do_cpu, inds_mate_cpu):
             self._do_move(population, mate_sol, ind_to_do, ind_mate, generator)    
     
+
+def _sample_trees_to_mutate(population: 'Population', inds_to_do: cp.ndarray, generator: cp.random.Generator) -> cp.ndarray:
+    """Sample tree indices, honoring edge spacer filtering when enabled."""
+    xyt = population.genotype.xyt
+    N_trees = xyt.shape[1]
+    N_moves = int(inds_to_do.shape[0])
+
+    if not population.genotype.filter_move_locations_with_edge_spacer:
+        return generator.integers(0, N_trees, size=N_moves)
+
+    trees_out = cp.full(N_moves, -1, dtype=cp.int32)
+    remaining = cp.ones(N_moves, dtype=bool)
+    h_subset = population.genotype.h[inds_to_do]
+
+    max_tries = 100
+    for _ in range(max_tries):
+        if not cp.any(remaining):
+            break
+        n_remaining = int(cp.sum(remaining))
+        candidates = generator.integers(0, N_trees, size=n_remaining)
+        indices_remaining = cp.where(remaining)[0]
+        candidate_xyt = xyt[inds_to_do[indices_remaining], candidates, :]
+        valid_mask = population.genotype.edge_spacer.check_valid(
+            candidate_xyt[:, None, :], h_subset[indices_remaining]
+        )[:, 0]
+        accepted = indices_remaining[valid_mask]
+        trees_out[accepted] = candidates[valid_mask]
+        remaining[accepted] = False
+
+    if cp.any(remaining):
+        n_remaining = int(cp.sum(remaining))
+        indices_remaining = cp.where(remaining)[0]
+        trees_out[indices_remaining] = generator.integers(0, N_trees, size=n_remaining)
+
+    return trees_out
+
 class NoOp(Move):
     def _do_move(self, population, mate_sol, individual_id, mate_id, generator):
         return None
@@ -130,7 +172,7 @@ class MoveRandomTree(Move):
         h_sizes = h_params[:, 0]
 
         # Generate all random values at once (GPU-based RNG)
-        trees_to_mutate_gpu = generator.integers(0, N_trees, size=N_moves)
+        trees_to_mutate_gpu = _sample_trees_to_mutate(population, inds_to_do, generator)
         new_x_gpu, new_y_gpu = population.genotype.generate_move_centers(None, inds_to_do, generator)
         new_theta_gpu = generator.uniform(-cp.pi, cp.pi, size=N_moves)
 
@@ -151,7 +193,7 @@ class JiggleRandomTree(Move):
         N_moves = int(inds_to_do.shape[0])
 
         # Generate all random values at once (GPU-based RNG)
-        trees_to_mutate_gpu = generator.integers(0, N_trees, size=N_moves)
+        trees_to_mutate_gpu = _sample_trees_to_mutate(population, inds_to_do, generator)
         offset_x_gpu = generator.uniform(-self.max_xy_move, self.max_xy_move, size=N_moves)
         offset_y_gpu = generator.uniform(-self.max_xy_move, self.max_xy_move, size=N_moves)
         offset_theta_gpu = generator.uniform(-self.max_theta_move, self.max_theta_move, size=N_moves)
@@ -547,6 +589,8 @@ class CrossoverStripe(Move):
     jitter: float = field(init=True, default=0.0)
     distance_function: typing.Literal['stripe', 'square', 'square90'] = field(init=True, default='stripe')
     decouple_mate_location: bool = field(init=True, default=False)
+    use_edge_clearance_when_decoupled: bool = field(init=True, default=True)
+    do_rotation: bool = field(init=True, default=True)
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
@@ -560,11 +604,10 @@ class CrossoverStripe(Move):
         
         # Decide how many trees swap hands and what transforms to apply to mates
         min_trees = min(self.min_N_trees, N_trees)
-        max_trees = min(int(np.floor(self.max_N_trees_ratio * N_trees)), N_trees)
-        if max_trees < min_trees:
-            max_trees = min_trees
-        n_trees_to_replace_all = generator.integers(min_trees, max_trees + 1, size=N_moves)
-        rotation_choice_all = generator.integers(0, 4, size=N_moves)
+        if self.do_rotation:
+            rotation_choice_all = generator.integers(0, 4, size=N_moves)
+        else:
+            rotation_choice_all = cp.zeros(N_moves, dtype=cp.int32)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
 
         # Gather boundary parameters for both parents involved in the move
@@ -573,14 +616,6 @@ class CrossoverStripe(Move):
 
         # Sample a random point inside each square to anchor the crossover stripe
         h_sizes = h_params[:, 0]
-        if not self.decouple_mate_location:
-            line_point_x, line_point_y = population.genotype.generate_move_centers(None, inds_to_do, generator)
-            mate_line_point_x = line_point_x - h_params[:, 1] + mate_h_params[:, 1]
-            mate_line_point_y = line_point_y - h_params[:, 2] + mate_h_params[:, 2]
-        else:
-            square_size = population.genotype.h[inds_to_do,0]*np.sqrt(n_trees_to_replace_all / (mate_sol.N_trees))
-            line_point_x, line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
-            mate_line_point_x, mate_line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
         # if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90):
         #     if not self.decouple_mate_location:
         #         offset_x_all = generator.uniform(-h_sizes / 2, 0.)
@@ -663,6 +698,57 @@ class CrossoverStripe(Move):
 
         # Drop the theta channel for distance computations
         mate_positions_all = mate_trees_full[:, :, :2]
+
+        # Build edge-spacer validity masks up front so they can be reused throughout
+        if population.genotype.filter_move_locations_with_edge_spacer:
+            margin_x = population.genotype.filter_move_locations_margin
+            valid_ind_mask = population.genotype.edge_spacer.check_valid(
+                population.genotype.xyt[inds_to_do],
+                h_params,
+                margin_x=margin_x,
+            )
+            valid_mate_mask = population.genotype.edge_spacer.check_valid(
+                mate_trees_full,
+                mate_h_params,
+                margin_x=margin_x,
+            )
+        else:
+            valid_ind_mask = cp.ones((N_moves, N_trees), dtype=bool)
+            valid_mate_mask = valid_ind_mask
+
+        # Ensure we never request more trees than are valid in either parent
+        usable_counts = cp.minimum(
+            valid_ind_mask.sum(axis=1),
+            valid_mate_mask.sum(axis=1),
+        ).astype(cp.int32)
+        usable_counts = cp.maximum(usable_counts, 0)
+
+        # Determine per-move min/max based on filtered availability
+        min_trees_available = cp.minimum(min_trees, usable_counts)
+        max_trees_available = cp.minimum(
+            cp.floor(self.max_N_trees_ratio * usable_counts).astype(cp.int32),
+            usable_counts,
+        )
+        max_trees_available = cp.maximum(max_trees_available, min_trees_available)
+
+        # Sample n_trees uniformly per move within [min, max]
+        span = max_trees_available - min_trees_available + 1
+        rand_uniform = generator.random(size=N_moves)
+        n_trees_to_replace_all = (min_trees_available + cp.floor(rand_uniform * span)).astype(cp.int32)
+
+        # Sample a random point inside each square to anchor the crossover stripe
+        if not self.decouple_mate_location:
+            line_point_x, line_point_y = population.genotype.generate_move_centers(None, inds_to_do, generator)
+            mate_line_point_x = line_point_x - h_params[:, 1] + mate_h_params[:, 1]
+            mate_line_point_y = line_point_y - h_params[:, 2] + mate_h_params[:, 2]
+        else:
+            if self.use_edge_clearance_when_decoupled:
+                square_size = population.genotype.h[inds_to_do,0]*cp.sqrt(n_trees_to_replace_all / (mate_sol.N_trees))
+                line_point_x, line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
+                mate_line_point_x, mate_line_point_y = population.genotype.generate_move_centers(square_size/2, inds_to_do, generator)
+            else:
+                line_point_x, line_point_y = population.genotype.generate_move_centers(None, inds_to_do, generator)
+                mate_line_point_x, mate_line_point_y = population.genotype.generate_move_centers(None, inds_to_do, generator)
 
         if self.distance_function == 'stripe':
             # Draw random line orientations and compute their normals for distance tests
@@ -937,6 +1023,10 @@ class CrossoverStripe(Move):
 
         else:
             raise Exception(f"Unknown distance function: {self.distance_function}")
+
+        # Mask out invalid trees before ranking
+        distances_individual_all = cp.where(valid_ind_mask, distances_individual_all, cp.inf)
+        distances_mate_all = cp.where(valid_mate_mask, distances_mate_all, cp.inf)
 
         # Rank trees by proximity to the stripe for both populations
         sorted_individual_tree_ids = cp.argsort(distances_individual_all, axis=1)

@@ -1163,6 +1163,7 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
                 move_centers_y[indices_accepted] = cand_y[valid_mask]
                 remaining_mask[indices_accepted] = False
 
+        #print(move_centers_x, move_centers_y)
         return move_centers_x, move_centers_y
 
 
