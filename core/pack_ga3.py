@@ -190,6 +190,7 @@ class Initializer(kgs.BaseClass):
 @dataclass
 class InitializerRandomJiggled(Initializer):
     jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
+    do_jiggle: bool = field(init=True, default=True)
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array    
@@ -320,9 +321,10 @@ class InitializerRandomJiggled(Initializer):
                             needs_placement[i_individual, valid_tree_indices] = False
         #print('2')
         #raise 'stop'
-        sol = self.jiggler.run_simulation(sol)
+        if self.do_jiggle:
+            sol = self.jiggler.run_simulation(sol)
         sol.canonicalize()
-        sol.snap()
+        #sol.snap()
         population = Population(genotype=sol)
         return population
     
@@ -1090,6 +1092,7 @@ class GASinglePopulation(GA):
     reduce_h_amount: float = field(init=True, default=2e-3/np.sqrt(40)) # scaled by sqrt(N_trees)
     reduce_h_per_individual: bool = field(init=True, default=False)
     use_new_ref_score: bool = field(init=True, default=False)
+    ref_score_scale: float = field(init=True, default=1.1)
 
     plot_diversity_ax = None
     plot_diversity_alt_ax = None
@@ -1137,7 +1140,7 @@ class GASinglePopulation(GA):
                     ref_h = max(np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.055)), np.sqrt(0.37*self.N_trees_to_do))
                 else:
                     ref_score = 0.317 + 0.206/np.sqrt(self.N_trees_to_do)
-                    ref_h = np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.1))         
+                    ref_h = np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(self.ref_score_scale))         
                 self.initializer.fixed_h = cp.array([ref_h,0,0],dtype=kgs.dtype_cp)
             else:
                 self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
@@ -1889,6 +1892,7 @@ def baseline_symmetry_90():
     runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square90'), 'CrossoverSquare', 2.0] )
     runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square90', decouple_mate_location=True), 
                                           'CrossoverSquareDecoupled', 2.0] )
+    runner.ga.stop_check_generations_scale = 25
     return runner
 
 def baseline_symmetry_180():
@@ -1916,7 +1920,7 @@ def baseline_symmetry_180_tesselated(adapt_moves=False):
         runner.ga.ga_base.initializer.base_solution.filter_move_locations_with_edge_spacer = True
         for m in runner.ga.ga_base.move.moves:
             if isinstance(m[0], pack_move.CrossoverStripe):
-                m[0].do_rotation = False
+                m[0].do_90_rotation = False
                 m[0].use_edge_clearance_when_decoupled = False
                 if m[0].distance_function == 'stripe':
                     m[0].respect_edge_spacer_filter = False

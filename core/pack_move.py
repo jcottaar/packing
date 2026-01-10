@@ -590,7 +590,7 @@ class CrossoverStripe(Move):
     distance_function: typing.Literal['stripe', 'square', 'square90'] = field(init=True, default='stripe')
     decouple_mate_location: bool = field(init=True, default=False)
     use_edge_clearance_when_decoupled: bool = field(init=True, default=True)
-    do_rotation: bool = field(init=True, default=True)
+    do_90_rotation: bool = field(init=True, default=True)
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
@@ -604,10 +604,10 @@ class CrossoverStripe(Move):
         
         # Decide how many trees swap hands and what transforms to apply to mates
         min_trees = min(self.min_N_trees, N_trees)
-        if self.do_rotation:
+        if self.do_90_rotation:
             rotation_choice_all = generator.integers(0, 4, size=N_moves)
         else:
-            rotation_choice_all = cp.zeros(N_moves, dtype=cp.int32)
+            rotation_choice_all = 2*generator.integers(0, 2, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
 
         # Gather boundary parameters for both parents involved in the move

@@ -443,11 +443,24 @@ class EdgeSpacerDummy(EdgeSpacer):
 class EdgeSpacerBasic(EdgeSpacer):
     dist_x: float = field(default=0.5)
     dist_y: float = field(default=0.5)
+    dist_corner: float = field(default=0.0)
 
     def _check_valid(self,xyt,h,margin):
         is_valid_x = cp.abs(xyt[:,:,0])> (h[:,:1]/2-self.dist_x-margin) 
         is_valid_y = cp.abs(xyt[:,:,1])> (h[:,:1]/2-self.dist_y-margin) 
-        return is_valid_x | is_valid_y
+        
+        # add a valid check: valid if within distance "dist_corner" of a corner of the square
+        half_side = h[:,:1]/2 - margin
+        # Calculate distance to each corner: (±half_side, ±half_side)
+        corner_distances = cp.stack([
+            ((xyt[:,:,0] - half_side)**2 + (xyt[:,:,1] - half_side)**2),  # top-right
+            ((xyt[:,:,0] + half_side)**2 + (xyt[:,:,1] - half_side)**2),  # top-left  
+            ((xyt[:,:,0] - half_side)**2 + (xyt[:,:,1] + half_side)**2),  # bottom-right
+            ((xyt[:,:,0] + half_side)**2 + (xyt[:,:,1] + half_side)**2)   # bottom-left
+        ], axis=-1)
+        is_valid_corner = cp.any(corner_distances <= self.dist_corner**2, axis=-1)
+        
+        return is_valid_x | is_valid_y | is_valid_corner
     
 '''Metric'''
 @dataclass

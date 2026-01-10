@@ -6,6 +6,7 @@ import pack_ga3
 import pack_cost
 import pack_dynamics
 import kaggle_support as kgs
+import pack_move
 
 
 @dataclass
@@ -107,6 +108,13 @@ def set_ga_base_ga_prop(ga,name,value):
     """Generic setter for GA properties - sets ga.ga.{name} = value"""
     # Handle special case where modifier name differs from property name
     setattr(ga.ga.ga_base, name, value)
+
+def set_spacer_prop(ga, name, value):
+    """Set spacer distances in initializer"""
+    setattr(ga.ga.ga_base.initializer.base_solution.edge_spacer, name, value)
+
+def set_pop_prop(ga, name, value):
+    setattr(ga.ga.ga_base.initializer.base_solution, name, value)
 
 def scale_population_size(ga, name, value):
     """Scale population size by given factor"""
@@ -295,24 +303,21 @@ def set_jiggle_max_trees(ga, name, value):
             move[0].max_N_trees = value
     assert any_set, "No 'Jiggle' moves found to set JiggleMaxTrees."
 
-def set_jitter(ga, name, value):
+def set_crossover_weights(ga, name, value):
     import pack_move
-    any_set = False
     for move in ga.ga.ga_base.move.moves:
-        if hasattr(move[0], 'jitter'):
-            any_set = True
-            move[0].jitter = value
-    assert any_set, "No moves with 'jitter' attribute found to set jitter."
+        if isinstance(move[0], pack_move.CrossoverStripe) or isinstance(move[0], pack_move.Crossover):
+            move[2]=value           
 
 def set_rough_relax_max_step(ga, name, value):
     if value>0:
         for r in ga.rough_relaxers:
             r.max_step = value
 
-def scale_N_and_pop_size(ga, name, value):
-    assert ga.ga.N in [31,32]
-    ga.ga.N = int(32*value)-1
-    ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size / value)
+def scale_pop_size(ga, name, value):
+    #assert ga.ga.N in [31,32]
+    #ga.ga.N = int(32*value)-1
+    ga.ga.ga_base.population_size = int(ga.ga.ga_base.population_size * value)
 
 def set_crystal(ga, name, value):
     pass
@@ -320,6 +325,20 @@ def set_crystal(ga, name, value):
     #crystal_2_offset = 0.5*(value in [1,2])
     #ga.ga.ga_base.initializer.ref_sol = kgs.create_tiled_solution('Perfect dimer', 15, make_symmetric=True, axis1_offset=crystal_1_offset, axis2_offset=crystal_2_offset)
     #ga.ga.ga_base.initializer.ref_N = int(ga.ga.ga_base.N_trees_to_do*25/68)
+
+def adapt_moves(ga, name, value):
+    if value>-0.5:
+        runner = ga
+        runner.ga.ga_base.initializer.base_solution.filter_move_locations_with_edge_spacer = True
+        runner.ga.ga_base.initializer.base_solution.filter_move_locations_margin = value
+        for m in runner.ga.ga_base.move.moves:
+            if isinstance(m[0], pack_move.CrossoverStripe):
+                m[0].do_90_rotation = False
+                m[0].use_edge_clearance_when_decoupled = False
+                if m[0].distance_function == 'stripe':
+                    m[0].respect_edge_spacer_filter = False
+                if m[0].decouple_mate_location:
+                    m[0].max_N_trees_ratio = 0.25
 
 
 
@@ -334,15 +353,13 @@ def baseline_runner(fast_mode=False):
     res.label = 'Baseline'
 
 
-    runner = pack_ga3.baseline_symmetry_180()
-    runner.n_generations = 200 if not fast_mode else 2
-    runner.ga.target_score = 0.34
+    runner = pack_ga3.baseline_symmetry_180_tesselated(adapt_moves=False)
+    runner.n_generations = 300 if not fast_mode else 2
+    #runner.ga.target_score = 0.
     runner.diagnostic_plot = False
     runner.ga.do_legalize = not fast_mode
-    runner.ga.stop_check_generations = 1000000
-    runner.ga.ga_base.initializer.ref_sol_crystal_type = 'Perfect dimer'
-    runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
-    runner.ga.ga_base.initializer.ref_sol_axis2_offset = None
+    runner.ga.stop_check_generations = 1000000    
+    runner.ga.ga_base.initializer.ref_sol_axis2_offset = 0.
     #runner.ga.ga_base.alternative_selection = True
     #runner.ga.ga_base.search_depth = 1.
     
@@ -355,7 +372,19 @@ def baseline_runner(fast_mode=False):
     res.base_ga = runner
     #base_runner = pack_ga3.baseline_symmetry_180()
 
-    res.modifier_dict['N_trees_to_do'] = pm(68, lambda r: r.choice([60,68,70,76]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['N_trees_to_do'] = pm(68, lambda r:156, set_ga_base_ga_prop)
+    res.modifier_dict['dist_x'] = pm(0.5, lambda r: r.choice([0.25,0.5,0.75]).item(), set_spacer_prop)
+    res.modifier_dict['dist_y'] = pm(0.5, lambda r: r.choice([0.25,0.5,0.75]).item(), set_spacer_prop)
+    res.modifier_dict['corner'] = pm(0., lambda r: np.sqrt(2)*r.choice([0.,1.,1.5]).item(), set_spacer_prop)
+    #res.modifier_dict['filter_move_locations_margin'] = pm(0.5, lambda r: r.choice([0.,0.25,0.5]).item(), set_pop_prop)
+    res.modifier_dict['reset_check_generations'] = pm(100, lambda r: r.choice([50,100,150]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['reset_check_generations_ratio'] = pm(0.1, lambda r: r.choice([0.,0.1]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['crossover_weights'] = pm(2., lambda r: r.choice([1.,2.,4.]).item(), set_crossover_weights)
+    res.modifier_dict['use_new_ref_score'] = pm(False, lambda r: r.choice([True, False]).item(), set_ga_base_ga_prop)
+    res.modifier_dict['adapt_moves'] = pm(False, lambda r: r.choice([-1., 0., 0.25, 0.5]).item(), adapt_moves)
+    res.modifier_dict['N'] = pm(16, lambda r: r.choice([10, 16]).item(), set_ga_prop)
+    res.modifier_dict['population_size'] = pm(1., lambda r: r.choice([0.5,1.]).item(), scale_pop_size)
+    res.modifier_dict['do_jiggle'] = pm(True, lambda r: r.choice([True, False]).item(), lambda ga, name, value: setattr(ga.ga.ga_base.initializer, 'do_jiggle', value))
     #res.modifier_dict['crystal_offset'] = pm(1, lambda r: r.choice([1,2,3,4]), set_crystal)
 
     # res.modifier_dict['mate_distance'] = pm(6, lambda r:6, set_ga_prop)    
