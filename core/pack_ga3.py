@@ -1908,7 +1908,17 @@ def baseline_symmetry_180():
     return runner
 
 def baseline_tesselated(adapt_moves=True):
-    pass
+    runner = baseline()
+    runner.ga.ga_base.move.moves.pop(-2) # remove square crossover
+    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square', max_N_trees_ratio = 0.45), 'CrossoverSquare', 2.0] )
+    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square', decouple_mate_location=True, max_N_trees_ratio = 0.45), 
+                                          'CrossoverSquareDecoupled', 2.0] )
+    runner.ga.stop_check_generations_scale = 20
+
+    runner.ga.ga_base.initializer.ref_sol_crystal_type = 'Perfect dimer'
+    runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
+    runner.ga.ga_base.initializer.ref_sol_axis2_offset = 'set!'
+    raise 'fix'
 
 def baseline_symmetry_180_tesselated(adapt_moves=True):
     runner = baseline_symmetry_180()
@@ -1916,7 +1926,7 @@ def baseline_symmetry_180_tesselated(adapt_moves=True):
     runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
     runner.ga.ga_base.initializer.ref_sol_axis2_offset = 'set!'
     runner.ga.stop_check_generations_scale = 10
-    runner.ga.ga_base.reset_check_generations_ratio = 0.1
+    runner.ga.ga_base.reset_check_generations_ratio = 0.
 
     runner.ga.ga_base.initializer.new_tree_placer = True
     runner.ga.ga_base.initializer.base_solution.edge_spacer = kgs.EdgeSpacerBasic(dist_x = 0.75, dist_y = 0.5, dist_corner = 0.)
