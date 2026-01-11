@@ -28,17 +28,17 @@ def run_all_tests(regenerate_reference=False):
     print("All tests passed.")
 
 def test_ga(regenerate_reference, do_resume):
-    ga = pack_ga3.baseline_symmetry_180()
+    ga = pack_ga3.baseline_symmetry_180_tesselated()
     ga.save_every = 1
     ga.filename = 'ga_test'
     ga.n_generations = 5       
-    ga.ga.ga_base.N_trees_to_do = 12
+    ga.ga.ga_base.N_trees_to_do = 20
     ga.rough_relaxers[0].cost.costs[2].lut_N_theta = 50
     ga.ga.ga_base.population_size = 100
     ga.ga.ga_base.search_depth = 0.8
     ga.ga.ga_base.elitism_fraction = 0.5
-    ga.ga.ga_base.survival_rate = 0.7
-    ga.ga.N = 4    
+    ga.ga.ga_base.survival_rate = 0.7 
+    ga.ga.ga_base.initializer.ref_sol_axis2_offset = 0.5
     ga.use_atomic_save = False
     ga.ga.do_legalize = False
     if not do_resume:
