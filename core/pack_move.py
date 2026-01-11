@@ -87,31 +87,32 @@ def _sample_trees_to_mutate(population: 'Population', inds_to_do: cp.ndarray, ge
     if not population.genotype.filter_move_locations_with_edge_spacer:
         return generator.integers(0, N_trees, size=N_moves)
 
-    trees_out = cp.full(N_moves, -1, dtype=cp.int32)
-    remaining = cp.ones(N_moves, dtype=bool)
+    # Check which trees are valid for each solution
     h_subset = population.genotype.h[inds_to_do]
-
-    max_tries = 100
-    for _ in range(max_tries):
-        if not cp.any(remaining):
-            break
-        n_remaining = int(cp.sum(remaining))
-        candidates = generator.integers(0, N_trees, size=n_remaining)
-        indices_remaining = cp.where(remaining)[0]
-        candidate_xyt = xyt[inds_to_do[indices_remaining], candidates, :]
-        valid_mask = population.genotype.edge_spacer.check_valid(
-            candidate_xyt[:, None, :], h_subset[indices_remaining]
-        )[:, 0]
-        accepted = indices_remaining[valid_mask]
-        trees_out[accepted] = candidates[valid_mask]
-        remaining[accepted] = False
-
-    if cp.any(remaining):
-        n_remaining = int(cp.sum(remaining))
-        indices_remaining = cp.where(remaining)[0]
-        trees_out[indices_remaining] = generator.integers(0, N_trees, size=n_remaining)
-
-    return trees_out
+    valid_mask = population.genotype.edge_spacer.check_valid(
+        xyt[inds_to_do], h_subset, margin=population.genotype.filter_move_locations_margin
+    )  # Shape: (N_moves, N_trees)
+    
+    # Fallback: for solutions with no valid trees, make all trees valid
+    valid_counts = cp.sum(valid_mask, axis=1)  # (N_moves,)
+    no_valid_mask = valid_counts == 0
+    valid_mask[no_valid_mask, :] = True
+    valid_counts = cp.sum(valid_mask, axis=1)  # Recalculate after fallback
+    
+    # Generate random indices within the valid tree count for each solution
+    random_indices = generator.integers(0, 1, size=N_moves)  # Will be scaled below
+    random_indices = (generator.uniform(0, 1, size=N_moves) * valid_counts).astype(cp.int32)
+    
+    # Find the tree at the random position within valid trees for each solution
+    # Use cumulative sum to convert random index to actual tree ID
+    cumsum = cp.cumsum(valid_mask, axis=1)  # (N_moves, N_trees)
+    target_positions = random_indices[:, cp.newaxis] + 1  # (N_moves, 1)
+    
+    # Find first tree where cumsum >= target_position
+    matches = cumsum >= target_positions  # (N_moves, N_trees)
+    tree_indices = cp.argmax(matches, axis=1)  # (N_moves,)
+    
+    return tree_indices
 
 class NoOp(Move):
     def _do_move(self, population, mate_sol, individual_id, mate_id, generator):
