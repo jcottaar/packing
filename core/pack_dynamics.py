@@ -15,7 +15,8 @@ import copy
 from IPython.display import HTML, display, clear_output
 from scipy import stats
 from typeguard import typechecked
-from torch.utils.dlpack import to_dlpack, from_dlpack
+from torch.utils.dlpack import to_dlpack
+import torch
 
 @dataclass
 class OptimizerBFGS(kgs.BaseClass):
@@ -58,7 +59,7 @@ class OptimizerBFGS(kgs.BaseClass):
         x0 = cp.concatenate((sol_tmp.xyt.reshape(sol_tmp.N_solutions,-1), sol_tmp.h.reshape(sol_tmp.N_solutions,-1)),axis=1)
         tmp_x = cp.zeros_like(x0, dtype=kgs.dtype_cp)
         tmp_res = cp.zeros_like(x0, dtype=kgs.dtype_cp)
-        x0 = from_dlpack(x0.toDlpack())
+        x0 = torch.from_dlpack(x0.__dlpack__())
         
         tmp_xyt = copy.deepcopy(sol.xyt)
         tmp_h = copy.deepcopy(sol.h)
@@ -90,7 +91,7 @@ class OptimizerBFGS(kgs.BaseClass):
             res[:,N_split:] = tmp_grad_h[:N, :].reshape(sol_tmp.N_solutions,-1)
             if kgs.profiling:
                 cp.cuda.Device().synchronize()
-            return from_dlpack(tmp_cost[:N].toDlpack()), from_dlpack(res.toDlpack())
+            return torch.from_dlpack(tmp_cost[:N].__dlpack__()), torch.from_dlpack(res.__dlpack__())
         
         
 

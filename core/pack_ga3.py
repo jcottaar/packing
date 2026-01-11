@@ -1906,9 +1906,8 @@ def baseline_tesselated(adapt_moves=True):
     runner.ga.ga_base.reset_check_generations_ratio = 0.
 
     runner.ga.ga_base.initializer.ref_sol_crystal_type = 'Perfect dimer'
-    runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
-    runner.ga.ga_base.initializer.ref_sol_axis2_offset = 'set!'
-    raise 'fix'
+    runner.ga.ga_base.initializer.ref_sol_axis1_offset = lambda r:r.uniform(-1.,1.)
+    runner.ga.ga_base.initializer.ref_sol_axis2_offset = lambda r:r.uniform(-1.,1.)
 
     runner.ga.ga_base.initializer.new_tree_placer = True
     runner.ga.ga_base.initializer.base_solution.edge_spacer = kgs.EdgeSpacerBasic(dist_x = 0.75, dist_y = 0.5, dist_corner = 0.)
@@ -1923,6 +1922,8 @@ def baseline_tesselated(adapt_moves=True):
                     m[0].respect_edge_spacer_filter = False
                 if m[0].decouple_mate_location:
                     m[0].max_N_trees_ratio = 0.25
+
+    return runner
 
 def baseline_symmetry_180_tesselated(adapt_moves=True):
     runner = baseline_symmetry_180()
