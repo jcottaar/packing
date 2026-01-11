@@ -1729,6 +1729,7 @@ class Orchestrator(kgs.BaseClass):
         conf_list = [s.phenotype for s in sol_list]        
         for relaxer in self.fine_relaxers:
             pack_dynamics.run_simulation_list(relaxer, conf_list)
+        s.genotype.snap()
 
 
 
@@ -1906,7 +1907,10 @@ def baseline_symmetry_180():
     runner.ga.stop_check_generations_scale = 35
     return runner
 
-def baseline_symmetry_180_tesselated(adapt_moves=False):
+def baseline_tesselated(adapt_moves=True):
+    pass
+
+def baseline_symmetry_180_tesselated(adapt_moves=True):
     runner = baseline_symmetry_180()
     runner.ga.ga_base.initializer.ref_sol_crystal_type = 'Perfect dimer'
     runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
