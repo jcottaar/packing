@@ -721,13 +721,141 @@ class SolutionCollectionSquare(SolutionCollection):
             self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
 
     def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):     
-        assert not self.filter_move_locations_with_edge_spacer   
-        size = self.h[inds_to_do,0].copy()  # (N,)
+        original_size = self.h[inds_to_do,0].copy()  # (N,)
+        size = original_size.copy()
         if edge_clearance is not None:
+            if edge_clearance is None: edge_clearance = 0.0
             size -= edge_clearance*2
        
-        move_centers_x = generator.uniform(-size/2, size/2) + self.h[inds_to_do, 1]  # (N,)
-        move_centers_y = generator.uniform(-size/2, size/2) + self.h[inds_to_do, 2]  # (N,)
+            move_centers_x = generator.uniform(-size/2, size/2, dtype=dtype_cp) + self.h[inds_to_do, 1]  # (N,)
+            move_centers_y = generator.uniform(-size/2, size/2, dtype=dtype_cp) + self.h[inds_to_do, 2]  # (N,)
+            #dill_save(temp_dir + '/debug_move_centers.pkl', (move_centers_x, move_centers_y))
+            #print(move_centers_x, move_centers_y)
+            #raise 'stop'
+        else:
+            # No edge clearance - use analytical sampling for EdgeSpacerBasic when possible
+            size = original_size  # no shrink when edge_clearance is None
+
+            N = len(inds_to_do)
+            move_centers_x = cp.zeros(N, dtype=dtype_cp)
+            move_centers_y = cp.zeros(N, dtype=dtype_cp)
+            h_subset = self.h[inds_to_do]
+            offset_x = h_subset[:, 1]
+            offset_y = h_subset[:, 2]
+
+            # Check if we can use analytical sampling for EdgeSpacerBasic with dist_corner=0
+            can_use_analytical = (isinstance(self.edge_spacer, EdgeSpacerBasic) and 
+                                self.edge_spacer.dist_corner == 0.0 and 
+                                self.filter_move_locations_with_edge_spacer)
+            
+            if can_use_analytical:
+                # Analytical sampling for EdgeSpacerBasic with dist_corner=0
+                # Valid region: |x| > (h/2 - dist_x - margin) OR |y| > (h/2 - dist_y - margin)
+                # This forms an "O-ring" or frame around the edges
+                
+                half_size = size / 2  # (N,)
+                margin = self.filter_move_locations_margin
+                x_threshold = half_size - self.edge_spacer.dist_x - margin  # |x| > this
+                y_threshold = half_size - self.edge_spacer.dist_y - margin  # |y| > this
+                
+                # Decompose into 4 rectangles (O-ring frame):
+                # Region A: x ∈ [-size/2, -x_threshold], y ∈ [-size/2, size/2]  (left strip)
+                # Region B: x ∈ [x_threshold, size/2], y ∈ [-size/2, size/2]  (right strip)
+                # Region C: x ∈ [-x_threshold, x_threshold], y ∈ [y_threshold, size/2]  (top strip, no corners)
+                # Region D: x ∈ [-x_threshold, x_threshold], y ∈ [-size/2, -y_threshold]  (bottom strip, no corners)
+                
+                # Compute widths and heights for each region
+                width_AB = half_size - x_threshold  # x extent of regions A and B
+                height_AB = size                    # y extent of regions A and B
+                width_CD = 2 * x_threshold          # x extent of regions C and D
+                height_CD = half_size - y_threshold # y extent of regions C and D
+                
+                # Compute areas of each region
+                area_A = width_AB * height_AB
+                area_B = width_AB * height_AB
+                area_C = width_CD * height_CD
+                area_D = width_CD * height_CD
+                total_area = area_A + area_B + area_C + area_D
+                
+                # Handle edge case where total_area is very small or zero
+                total_area_safe = cp.maximum(total_area, 1e-10)
+                
+                # Cumulative probabilities for region selection
+                prob_A = area_A / total_area_safe
+                prob_AB = (area_A + area_B) / total_area_safe
+                prob_ABC = (area_A + area_B + area_C) / total_area_safe
+                # prob_ABCD = 1.0 (implicit)
+                
+                # Generate uniform random values for region selection
+                region_selector = generator.uniform(0., 1., size=N)
+                
+                # Determine which region each sample falls into
+                in_A = region_selector < prob_A
+                in_B = (region_selector >= prob_A) & (region_selector < prob_AB)
+                in_C = (region_selector >= prob_AB) & (region_selector < prob_ABC)
+                in_D = region_selector >= prob_ABC
+                
+                # Region A: x ∈ [-size/2, -x_threshold], y ∈ [-size/2, size/2]
+                if cp.any(in_A):
+                    move_centers_x[in_A] = generator.uniform(-half_size[in_A], -x_threshold[in_A])
+                    move_centers_y[in_A] = generator.uniform(-half_size[in_A], half_size[in_A])
+                
+                # Region B: x ∈ [x_threshold, size/2], y ∈ [-size/2, size/2]
+                if cp.any(in_B):
+                    move_centers_x[in_B] = generator.uniform(x_threshold[in_B], half_size[in_B])
+                    move_centers_y[in_B] = generator.uniform(-half_size[in_B], half_size[in_B])
+                
+                # Region C: x ∈ [-x_threshold, x_threshold], y ∈ [y_threshold, size/2]
+                if cp.any(in_C):
+                    move_centers_x[in_C] = generator.uniform(-x_threshold[in_C], x_threshold[in_C])
+                    move_centers_y[in_C] = generator.uniform(y_threshold[in_C], half_size[in_C])
+                
+                # Region D: x ∈ [-x_threshold, x_threshold], y ∈ [-size/2, -y_threshold]
+                if cp.any(in_D):
+                    move_centers_x[in_D] = generator.uniform(-x_threshold[in_D], x_threshold[in_D])
+                    move_centers_y[in_D] = generator.uniform(-half_size[in_D], -y_threshold[in_D])
+                
+                # Add offsets
+                move_centers_x += offset_x
+                move_centers_y += offset_y
+
+                # Validate that all sampled points are indeed valid+
+                if debugging_mode>=2:
+                    candidate_xyt = cp.zeros((N, 1, 3), dtype=dtype_cp)
+                    candidate_xyt[:, 0, 0] = move_centers_x
+                    candidate_xyt[:, 0, 1] = move_centers_y
+                    valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset, margin=self.filter_move_locations_margin)[:, 0]
+                    assert cp.all(valid_mask), "Analytical sampling produced invalid points"
+            else:
+                # Fall back to rejection sampling
+                remaining_mask = cp.ones(N, dtype=bool)
+                
+                while cp.any(remaining_mask):
+                    n_remaining = int(cp.sum(remaining_mask))
+
+                    # Sample within full square
+                    cand_x = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, dtype=dtype_cp) + offset_x[remaining_mask]
+                    cand_y = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, dtype=dtype_cp) + offset_y[remaining_mask]
+                    #ref_x,ref_y = dill_load(temp_dir + '/debug_move_centers.pkl')
+                    #print(ref_x-cand_x, ref_y-cand_y)
+                    #print(cand_x, cand_y)
+                    #raise 'stop'    
+
+
+                    # Validate against the configured edge spacer
+                    candidate_xyt = cp.zeros((n_remaining, 1, 3), dtype=dtype_cp)
+                    candidate_xyt[:, 0, 0] = cand_x
+                    candidate_xyt[:, 0, 1] = cand_y
+                    if self.filter_move_locations_with_edge_spacer:                    
+                        valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset[remaining_mask], margin=self.filter_move_locations_margin)[:, 0]
+                    else:
+                        valid_mask = cp.ones(n_remaining, dtype=bool)
+
+                    indices_remaining = cp.where(remaining_mask)[0]
+                    indices_accepted = indices_remaining[valid_mask]
+                    move_centers_x[indices_accepted] = cand_x[valid_mask]
+                    move_centers_y[indices_accepted] = cand_y[valid_mask]
+                    remaining_mask[indices_accepted] = False
 
         return move_centers_x, move_centers_y
 
@@ -1214,6 +1342,14 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
                 # Add offsets
                 move_centers_x += offset_x
                 move_centers_y += offset_y
+
+                # Validate that all sampled points are indeed valid
+                if debugging_mode>=2:
+                    candidate_xyt = cp.zeros((N, 1, 3), dtype=dtype_cp)
+                    candidate_xyt[:, 0, 0] = move_centers_x
+                    candidate_xyt[:, 0, 1] = move_centers_y
+                    valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset, margin=self.filter_move_locations_margin)[:, 0]
+                    assert cp.all(valid_mask), "Analytical sampling produced invalid points"
             else:
                 # Fall back to rejection sampling
                 remaining_mask = cp.ones(N, dtype=bool)
