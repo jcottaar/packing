@@ -1,3 +1,4 @@
+from unittest import case
 import pandas as pd
 import numpy as np
 import scipy as sp
@@ -21,14 +22,20 @@ pack_cuda._ensure_initialized()
 
 def run_all_tests(regenerate_reference=False):
     kgs.debugging_mode = 2   
-    test_ga(regenerate_reference, False)
-    test_ga(False, True)      
+    test_ga(regenerate_reference, 0, False)
+    test_ga(regenerate_reference, 1, False)
+    test_ga(False, 0, True)      
     test_costs()               
     pack_cuda_primitives_test.run_all_tests()    
     print("All tests passed.")
 
-def test_ga(regenerate_reference, do_resume):
-    ga = pack_ga3.baseline_symmetry_180_tesselated()
+def test_ga(regenerate_reference, test_case, do_resume):
+    match test_case:
+        case 0:
+            ga = pack_ga3.baseline()
+        case 1:
+            ga = pack_ga3.baseline_symmetry_180_tesselated()
+            ga.ga.ga_base.initializer.ref_sol_axis2_offset = lambda r:0.5            
     ga.save_every = 1
     ga.filename = 'ga_test'
     ga.n_generations = 5       
@@ -37,8 +44,7 @@ def test_ga(regenerate_reference, do_resume):
     ga.ga.ga_base.population_size = 100
     ga.ga.ga_base.search_depth = 0.8
     ga.ga.ga_base.elitism_fraction = 0.5
-    ga.ga.ga_base.survival_rate = 0.7 
-    ga.ga.ga_base.initializer.ref_sol_axis2_offset = lambda r:0.5
+    ga.ga.ga_base.survival_rate = 0.7     
     ga.use_atomic_save = False
     ga.ga.do_legalize = False
     if not do_resume:
@@ -53,8 +59,8 @@ def test_ga(regenerate_reference, do_resume):
     for g in ga.ga.ga_list[1:]:
         res = np.concatenate((res, g.population.fitness))
     if regenerate_reference:
-        kgs.dill_save(kgs.code_dir + 'ref_ga.pickle', res)
-    ref = kgs.dill_load(kgs.code_dir + 'ref_ga.pickle')
+        kgs.dill_save(kgs.code_dir + f'ref_ga_{test_case}.pickle', res)
+    ref = kgs.dill_load(kgs.code_dir + f'ref_ga_{test_case}.pickle')
     assert np.all(ref==res), "GA test failed: final fitness does not match reference."
 
 def test_costs():

@@ -61,7 +61,7 @@ class Move(kgs.BaseClass):
         """
         old_val = population.genotype.filter_move_locations_with_edge_spacer
         if not self.respect_edge_spacer_filter:
-            population.genotype.filter_move_locations_with_edge_spacer = False
+            population.genotype.filter_move_locations_with_edge_spacer = False        
         self._do_move_vec(population, inds_to_do, mate_sol, inds_mate, generator)
         population.genotype.filter_move_locations_with_edge_spacer = old_val
 
