@@ -38,7 +38,7 @@ def test_ga(regenerate_reference, do_resume):
     ga.ga.ga_base.search_depth = 0.8
     ga.ga.ga_base.elitism_fraction = 0.5
     ga.ga.ga_base.survival_rate = 0.7 
-    ga.ga.ga_base.initializer.ref_sol_axis2_offset = 0.5
+    ga.ga.ga_base.initializer.ref_sol_axis2_offset = lambda r:0.5
     ga.use_atomic_save = False
     ga.ga.do_legalize = False
     if not do_resume:

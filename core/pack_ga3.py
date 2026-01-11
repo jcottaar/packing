@@ -197,8 +197,8 @@ class InitializerRandomJiggled(Initializer):
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array    
     use_fixed_h_for_size_setup: bool = field(init=True, default=True)
     ref_sol_crystal_type: str = field(init=True, default=None)
-    ref_sol_axis1_offset: float = field(init=True, default=0.)
-    ref_sol_axis2_offset: float = field(init=True, default=0.)
+    ref_sol_axis1_offset: object = field(init=True, default=None)
+    ref_sol_axis2_offset: object = field(init=True, default=None)
     ref_sol: kgs.SolutionCollection = field(init=True, default=None)
     ref_N_scaling: float = field(init=True, default=25./68.)
     ref_N: int = field(init=True, default=None)
@@ -236,14 +236,8 @@ class InitializerRandomJiggled(Initializer):
             #pack_vis_sol.pack_vis_sol(sol)
             #print('1')
             if not self.ref_sol_crystal_type is None:
-                if self.ref_sol_axis1_offset is None:
-                    axis1_offset = generator.choice([0.,0.5])
-                else:
-                    axis1_offset = self.ref_sol_axis1_offset
-                if self.ref_sol_axis2_offset is None:
-                    axis2_offset = generator.choice([0.,0.5])
-                else:
-                    axis2_offset = self.ref_sol_axis2_offset
+                axis1_offset = self.ref_sol_axis1_offset(generator)
+                axis2_offset = self.ref_sol_axis2_offset(generator)
                 print(self.seed, axis1_offset, axis2_offset)
                 self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
                                                         axis1_offset=axis1_offset, axis2_offset=axis2_offset)
@@ -263,14 +257,8 @@ class InitializerRandomJiggled(Initializer):
             assert not self.fixed_h is None
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))      
             if not self.ref_sol_crystal_type is None:
-                if self.ref_sol_axis1_offset is None:
-                    axis1_offset = generator.choice([0.,0.5])
-                else:
-                    axis1_offset = self.ref_sol_axis1_offset
-                if self.ref_sol_axis2_offset is None:
-                    axis2_offset = generator.choice([0.,0.5])
-                else:
-                    axis2_offset = self.ref_sol_axis2_offset
+                axis1_offset = self.ref_sol_axis1_offset(generator)
+                axis2_offset = self.ref_sol_axis2_offset(generator)
                 print(self.seed, axis1_offset, axis2_offset)
                 self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
                                                         axis1_offset=axis1_offset, axis2_offset=axis2_offset)            
@@ -1939,7 +1927,7 @@ def baseline_tesselated(adapt_moves=True):
 def baseline_symmetry_180_tesselated(adapt_moves=True):
     runner = baseline_symmetry_180()
     runner.ga.ga_base.initializer.ref_sol_crystal_type = 'Perfect dimer'
-    runner.ga.ga_base.initializer.ref_sol_axis1_offset = None
+    runner.ga.ga_base.initializer.ref_sol_axis1_offset = lambda r:r.choice([0.,0.5]).item()
     runner.ga.ga_base.initializer.ref_sol_axis2_offset = 'set!'
     runner.ga.stop_check_generations_scale = 10
     runner.ga.ga_base.reset_check_generations_ratio = 0.
