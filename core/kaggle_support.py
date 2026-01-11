@@ -446,8 +446,8 @@ class EdgeSpacerBasic(EdgeSpacer):
     dist_corner: float = field(default=0.0)
 
     def _check_valid(self,xyt,h,margin):
-        is_valid_x = cp.abs(xyt[:,:,0])> (h[:,:1]/2-self.dist_x-margin) 
-        is_valid_y = cp.abs(xyt[:,:,1])> (h[:,:1]/2-self.dist_y-margin) 
+        is_valid_x = cp.abs(xyt[:,:,0])>= (h[:,:1]/2-self.dist_x-margin) 
+        is_valid_y = cp.abs(xyt[:,:,1])>= (h[:,:1]/2-self.dist_y-margin) 
         
         # add a valid check: valid if within distance "dist_corner" of a corner of the square
         half_side = h[:,:1]/2 - margin

@@ -1898,6 +1898,7 @@ def baseline_symmetry_180():
 
 def baseline_tesselated(adapt_moves=True):
     runner = baseline()
+    runner.ga.ga_base.move.moves = [m for m in runner.ga.ga_base.move.moves if m[1] not in ['Translate']]
     runner.ga.ga_base.move.moves.pop(-2) # remove square crossover
     runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square', max_N_trees_ratio = 0.45), 'CrossoverSquare', 2.0] )
     runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square', decouple_mate_location=True, max_N_trees_ratio = 0.45), 
