@@ -238,7 +238,7 @@ class InitializerRandomJiggled(Initializer):
             if not self.ref_sol_crystal_type is None:
                 axis1_offset = self.ref_sol_axis1_offset(generator)
                 axis2_offset = self.ref_sol_axis2_offset(generator)
-                print(self.seed, axis1_offset, axis2_offset)
+                #print(self.seed, axis1_offset, axis2_offset)
                 self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
                                                         axis1_offset=axis1_offset, axis2_offset=axis2_offset)
             if not self.ref_N_scaling is None:
@@ -259,7 +259,7 @@ class InitializerRandomJiggled(Initializer):
             if not self.ref_sol_crystal_type is None:
                 axis1_offset = self.ref_sol_axis1_offset(generator)
                 axis2_offset = self.ref_sol_axis2_offset(generator)
-                print(self.seed, axis1_offset, axis2_offset)
+                #print(self.seed, axis1_offset, axis2_offset)
                 self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
                                                         axis1_offset=axis1_offset, axis2_offset=axis2_offset)            
             if not self.ref_sol is None:
