@@ -1826,6 +1826,8 @@ class Orchestrator(kgs.BaseClass):
             self._save_checkpoint(save_filename)
             self._generator = None
             self.ga.finalize()
+            self.ga.abbreviate()
+            self._generator = None
             self._is_finalized = True
 
         if not self.filename == '':
