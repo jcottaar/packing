@@ -483,6 +483,7 @@ class GA(kgs.BaseClass):
         if self._is_frozen2:
             return
         self._merge_offspring()
+        self._cached_offspring = None
 
     def get_list_for_simulation(self):
         if self._is_frozen2:
@@ -504,6 +505,7 @@ class GA(kgs.BaseClass):
                 champion.phenotype = pack_io.legalize(champion.phenotype)
     
     def abbreviate(self):
+        self.fitness_cost = None
         self._abbreviate()
 
     def diagnostic_plots(self, i_gen, plot_ax):
