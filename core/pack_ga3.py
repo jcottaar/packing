@@ -1088,6 +1088,7 @@ class GASinglePopulation(GA):
     plot_diversity_ax = None
     plot_diversity_alt_ax = None
     plot_population_fitness_ax = None
+    remove_population_after_abbreviate: bool = field(init=True, default=True)
 
     # Results
     population: Population = field(init=True, default=None)
@@ -1186,7 +1187,8 @@ class GASinglePopulation(GA):
         pass
 
     def _abbreviate(self):
-        self.population = None
+        if self.remove_population_after_abbreviate:
+            self.population = None
 
     def _diagnostic_plots(self, i_gen,plot_ax):
         if self.plot_diversity_ax is not None:

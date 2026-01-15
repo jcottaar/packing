@@ -47,6 +47,7 @@ def test_ga(regenerate_reference, test_case, do_resume):
     ga.ga.ga_base.survival_rate = 0.7     
     ga.use_atomic_save = False
     ga.ga.do_legalize = False
+    ga.ga.ga_base.remove_population_after_abbreviate = False
     if not do_resume:
         ga.run()        
     else:
