@@ -352,6 +352,10 @@ def set_ref_sol_mode(ga, name, value):
             ga.ga.ga_base.initializer.ref_sol_crystal_type = None
             ga.ga.ga_base.initializer.ref_sol = kgs.dill_load(kgs.code_dir + '/../res/mine.pickle')[0][75]
 
+def set_adapt_convergence(ga,name,value):
+    if value:
+        ga.ga.ga_base.reduce_h_threshold /= 10
+        ga.ga.ga_base.reduce_h_amount /= 10
 
 
 
@@ -365,7 +369,7 @@ def baseline_runner(fast_mode=False):
     res.label = 'Baseline'
 
 
-    runner = pack_ga3.baseline_tesselated(adapt_moves=False)
+    runner = pack_ga3.baseline_symmetry_180_tesselated(adapt_moves=False)
     runner.n_generations = 500 if not fast_mode else 2
     #runner.ga.target_score = 0.
     runner.diagnostic_plot = False
@@ -384,7 +388,7 @@ def baseline_runner(fast_mode=False):
     res.base_ga = runner
     #base_runner = pack_ga3.baseline_symmetry_180()
 
-    res.modifier_dict['N_trees_to_do'] = pm(68, lambda r:77, set_ga_base_ga_prop)
+    res.modifier_dict['N_trees_to_do'] = pm(68, lambda r:78, set_ga_base_ga_prop)
     #res.modifier_dict['dist_x'] = pm(0.75, lambda r: r.choice([0.75,1.25]).item(), set_spacer_prop)
     #res.modifier_dict['dist_y'] = pm(0.5, lambda r: r.choice([0.5,1.]).item(), set_spacer_prop)
     #res.modifier_dict['dist_corner'] = pm(0., lambda r: np.sqrt(2)*r.choice([0.,1.,1.5]).item(), set_spacer_prop)
@@ -400,7 +404,8 @@ def baseline_runner(fast_mode=False):
     #res.modifier_dict['do_jiggle'] = pm(True, lambda r: r.choice([True, False]).item(), lambda ga, name, value: setattr(ga.ga.ga_base.initializer, 'do_jiggle', value))
     #res.modifier_dict['crystal_offset'] = pm(1, lambda r: r.choice([1,2,3,4]), set_crystal)
 
-    res.modifier_dict['ref_sol_mode'] = pm(1, lambda r: r.choice([1,2,3,4]).item(), set_ref_sol_mode)
+    #res.modifier_dict['ref_sol_mode'] = pm(1, lambda r: r.choice([1,2,3,4]).item(), set_ref_sol_mode)
+    res.modifier_dict['adapt_convergence'] = pm(False, lambda r: r.choice([False,True]), set_adapt_convergence)
 
     # res.modifier_dict['mate_distance'] = pm(6, lambda r:6, set_ga_prop)    
     # res.modifier_dict['reset_approach'] = pm(1, lambda r:1, set_reset_approach) #
