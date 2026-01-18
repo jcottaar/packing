@@ -313,6 +313,8 @@ class InitializerRandomJiggled(Initializer):
         if self.do_jiggle:
             sol = self.jiggler.run_simulation(sol)
         sol.canonicalize()
+        pack_vis_sol.pack_vis_sol(sol)
+        plt.pause(0.001)
         #sol.snap()
         population = Population(genotype=sol)
         return population
