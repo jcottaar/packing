@@ -376,7 +376,7 @@ def baseline_runner(fast_mode=False):
     res.raise_error= fast_mode
 
 
-    runner = pack_ga3.baseline_symmetry_180_tesselated(adapt_moves=False)
+    runner = pack_ga3.baseline_symmetry_180_tesselated(adapt_moves=True)
     runner.n_generations = 500 if not fast_mode else 2
     
     #runner.ga.target_score = 0.
