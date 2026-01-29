@@ -418,9 +418,11 @@ def _ensure_initialized() -> None:
     
     # Persist the CUDA source to a stable .cu file inside kgs.temp_dir
     # and compile from that file so profilers can correlate source lines.
+    # Use PID to avoid conflicts when multiple processes compile simultaneously
     persist_dir = os.fspath(kgs.temp_dir)
-    persist_path = os.path.join(persist_dir, 'lap_batch_saved.cu')
-    cubin_path = os.path.join(persist_dir, 'lap_batch.cubin')
+    pid = os.getpid()
+    persist_path = os.path.join(persist_dir, f'lap_batch_saved_{pid}.cu')
+    cubin_path = os.path.join(persist_dir, f'lap_batch_{pid}.cubin')
     
     # Overwrite the file each time to ensure it matches the compiled source.
     with open(persist_path, 'w', encoding='utf-8') as f:

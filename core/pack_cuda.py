@@ -1119,8 +1119,10 @@ def _ensure_initialized() -> None:
 
     # Persist the CUDA source to a stable .cu file inside kgs.temp_dir
     # and compile from that file so profilers can correlate source lines.
+    # Use PID to avoid conflicts when multiple processes compile simultaneously
     persist_dir = os.fspath(kgs.temp_dir)
-    persist_path = os.path.join(persist_dir, 'pack_cuda_saved.cu')
+    pid = os.getpid()
+    persist_path = os.path.join(persist_dir, f'pack_cuda_saved_{pid}.cu')
 
     # Perform search-replace to switch between float32 and float64
     cuda_src = _CUDA_SRC
@@ -1166,7 +1168,7 @@ def _ensure_initialized() -> None:
     # Helper function to compile a kernel variant with specific preprocessor defines
     def compile_kernel_variant(variant_name: str, defines: list[str]) -> cp.RawModule:
         """Compile a kernel variant with specific -D flags directly to CUBIN."""
-        cubin_path = os.path.join(persist_dir, f'pack_cuda_{variant_name}.cubin')
+        cubin_path = os.path.join(persist_dir, f'pack_cuda_{variant_name}_{pid}.cubin')
 
         # Build nvcc command with -D flags for preprocessor defines
         define_flags = [f"-D{define}" for define in defines]
