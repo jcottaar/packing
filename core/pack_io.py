@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_metric
 
-def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True):
+def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True, line_search=False):
     assert sol.is_phenotype()
     solx = copy.deepcopy(sol)
     solx.use_fixed_h = False
@@ -37,7 +37,7 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
     optimizer.tolerance_rel_change = tolerance_rel_change
     optimizer.track_cost = do_plot
     optimizer.plot_cost = do_plot
-    optimizer.use_line_search = False
+    optimizer.use_line_search = line_search
     optimizer.stop_on_cost_increase = stop_on_cost_increase
     print("Before optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
     for _ in range(n_iter):
