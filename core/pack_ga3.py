@@ -187,6 +187,22 @@ class Initializer(kgs.BaseClass):
         assert population.phenotype.N_trees == N_trees        
         population.check_constraints()
         return population        
+    
+@dataclass
+class InitializerFixed(Initializer):
+    is_done: bool = field(default=False)
+    fixed_sol: kgs.SolutionCollection = field(default=None)
+    def _initialize_population(self, N_individuals, N_trees):
+        assert not self.is_done
+        self.is_done = True
+        assert N_trees == self.fixed_sol.N_trees
+        sol = copy.deepcopy(self.fixed_sol)
+        sol.select_ids([1]*N_individuals)
+
+        pop = Population()
+        pop.genotype = sol
+        return pop
+
 
 @dataclass
 class InitializerRandomJiggled(Initializer):
@@ -577,6 +593,7 @@ class GAMulti(GA):
     allow_reset_ratio: float = field(init=True, default=1.) # allow only the worst X% of subpopulations to reset
     diversity_reset_threshold: float = field(init=True, default=np.inf) # diversity required to avoid reset
     diversity_reset_check_frequency: int = field(init=True, default=5) # in generations
+    diversity_delete_instead_of_reset: bool = field(init=True, default=False)
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -653,14 +670,18 @@ class GAMulti(GA):
                             else:
                                 worse_idx = max(i, j)
                             to_reset.add(worse_idx)
-                    for idx in sorted(to_reset):
-                        ga_to_reset = self.ga_list[idx]
-                        if ga_to_reset.best_costs_per_generation and ga_to_reset.best_costs_per_generation[0]:
-                            ga_to_reset.best_costs_per_generation[0].pop(-1)
-                        ga_to_reset.reset(generator)
-                        ga_to_reset.score(generator, register_best=True)
-                        ga_to_reset._skip_next_selection = True
-                        costs_per_ga[idx] = ga_to_reset.champions[0].fitness[0]
+                    for idx in sorted(to_reset)[::-1]:
+                        print(idx)
+                        if self.diversity_delete_instead_of_reset:
+                            del self.ga_list[idx]
+                        else:
+                            ga_to_reset = self.ga_list[idx]
+                            if ga_to_reset.best_costs_per_generation and ga_to_reset.best_costs_per_generation[0]:
+                                ga_to_reset.best_costs_per_generation[0].pop(-1)
+                            ga_to_reset.reset(generator)
+                            ga_to_reset.score(generator, register_best=True)
+                            ga_to_reset._skip_next_selection = True
+                            costs_per_ga[idx] = ga_to_reset.champions[0].fitness[0]
 
     def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         return sum([
@@ -713,14 +734,14 @@ class GAMulti(GA):
             # Compute diversity matrix
             N_sols = champions_pop.N_solutions
             diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(champions_pop.xyt), cp.array(champions_pop.xyt)).get()
-            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
+            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix)*0+0.1, interpolation='none')
             if not hasattr(ax, '_colorbar') or ax._colorbar is None:
                 ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
             else:
                 ax._colorbar.update_normal(im)
             plt.title('Diversity Matrix Across GA Subpopulations')
             plt.xlabel('Individual')
-            plt.ylabel('Individual')
+            plt.ylabel('Individual')            
         for ga in self.ga_list:
             ga.diagnostic_plots(i_gen, plot_ax)
 
@@ -731,10 +752,11 @@ class GAMultiSimilar(GAMulti):
     N: int = field(init=True, default=4)
 
     def _initialize(self, generator):
-        self.ga_list = []        
-        for i in range(self.N):
-            ga_copy = copy.deepcopy(self.ga_base)            
-            self.ga_list.append(ga_copy)     
+        if self.ga_list is None:
+            self.ga_list = []        
+            for i in range(self.N):
+                ga_copy = copy.deepcopy(self.ga_base)            
+                self.ga_list.append(ga_copy)     
         super()._initialize(generator)    
 
 @dataclass
@@ -1113,7 +1135,8 @@ class GASinglePopulation(GA):
         super().__post_init__()
 
     def _check_constraints(self):
-        self.initializer.check_constraints()
+        if self.initializer is not None:
+            self.initializer.check_constraints()
         self.move.check_constraints()
         if self.population is not None:
             self.population.check_constraints()
