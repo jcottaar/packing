@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_metric
 
-def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True, line_search=False):
+def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True, line_search=False, verbose=True):
     assert sol.is_phenotype()
     solx = copy.deepcopy(sol)
     solx.use_fixed_h = False
@@ -39,13 +39,15 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
     optimizer.plot_cost = do_plot
     optimizer.use_line_search = line_search
     optimizer.stop_on_cost_increase = stop_on_cost_increase
-    print("Before optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
+    if verbose:
+        print("Before optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
     for _ in range(n_iter):
         optimizer.cost.costs[0].scaling*=0.5
         optimizer.max_step*=np.sqrt(0.5)    
         solx = optimizer.run_simulation(solx)
         optimizer.n_iterations = np.round(200*move_factor).astype(int)
-        print("After optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
+        if verbose:
+            print("After optimization: ", cost.compute_cost_allocate(solx)[0].get().item(), cost_overlap.compute_cost_allocate(solx)[0].get().item(), solx.h[0,0])
         if cost_overlap.compute_cost_allocate(solx)[0].get().item()<target:
             break   
     try:
@@ -61,8 +63,9 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
             return legalize(solx, do_plot=do_plot, move_factor=move_factor, tolerance_rel_change=0., stop_on_cost_increase=stop_on_cost_increase, n_iter=n_iter, target=target, validate=validate)
 
 
-def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1.):
+def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1., return_scores=False, print_score=True):
     res_df_list = []
+    scores = []
     score = 0.0
 
     for sol in sol_list:
@@ -115,14 +118,19 @@ def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1.):
         for col in submission.columns[1:]:
             submission[col] = 's' + submission[col].astype('string')
         res_df_list.append(submission)
-        score += pack_metric.score(submission, submission, '', allow_error=False)
+        score = pack_metric.score(submission, submission, '', allow_error=False)
+        scores.append(score)
 
     # merge res_df_list into a single dataframe
     res_df = pd.concat(res_df_list, ignore_index=True)\
 
-    print('Score of generated dataframe:', score)
+    if print_score:
+        print('Score of generated dataframe:', sum(scores))
 
-    return res_df
+    if return_scores:
+        return res_df, scores
+    else:
+        return res_df
 
 def dataframe_to_solution_list(df):
     """
