@@ -520,7 +520,7 @@ __device__ double boundary_area_piece(
 
 // Compute total boundary violation area for a list of trees
 // Each tree consists of 4 convex pieces
-// Uses N*4 threads: one thread per piece of each tree
+// Uses N*2 threads: each thread handles 2 pieces of each tree
 __device__ void boundary_list_total(
     const double* __restrict__ xyt_Nx3,  // flattened: [n, 3] in C-contiguous layout
     const int n,
@@ -529,11 +529,12 @@ __device__ void boundary_list_total(
     double* __restrict__ out_grads,  // if non-NULL, write gradients [n*3]
     double* __restrict__ out_grad_h)  // if non-NULL, write gradient w.r.t. h
 {
-    // Thread organization: 4 threads per tree
-    // tid = tree_idx * 4 + piece_idx
+    // Thread organization: 2 threads per tree, each handles 2 pieces
+    // tid = tree_idx * 2 + half_idx
     int tid = threadIdx.x;
-    int tree_idx = tid / 4;  // which tree (0 to n-1)
-    int piece_idx = tid % 4; // which piece of that tree (0 to 3)
+    int tree_idx = tid / 2;       // which tree (0 to n-1)
+    int half_idx = tid % 2;       // which half (0 = pieces 0,1; 1 = pieces 2,3)
+    int piece_idx_base = half_idx * 2;  // starting piece index for this thread
     
     double local_area = 0.0;
     
@@ -544,31 +545,37 @@ __device__ void boundary_list_total(
         pose.y = xyt_Nx3[tree_idx * 3 + 1];
         pose.z = xyt_Nx3[tree_idx * 3 + 2];
         
-        // Compute gradients if requested
-        double3 d_pose;
-        double d_h_local;
-        
-        // Each thread computes area outside boundary for one piece with gradients
-        local_area = boundary_area_piece(pose, h, piece_idx, 
-                                          (out_grads != NULL) ? &d_pose : NULL,
-                                          (out_grad_h != NULL) ? &d_h_local : NULL);
+        // Process 2 pieces sequentially
+        for (int p = 0; p < 2; ++p) {
+            int piece_idx = piece_idx_base + p;
+            
+            // Compute gradients if requested
+            double3 d_pose;
+            double d_h_local;
+            
+            // Each thread computes area outside boundary for one piece with gradients
+            double piece_area = boundary_area_piece(pose, h, piece_idx, 
+                                              (out_grads != NULL) ? &d_pose : NULL,
+                                              (out_grad_h != NULL) ? &d_h_local : NULL);
+            local_area += piece_area;
+            
+            // Accumulate gradients if computed
+            if (out_grads != NULL) {
+                // Each of the 2 threads for this tree contributes gradient from its 2 pieces
+                // Write to [tree_idx, component] layout
+                atomicAdd(&out_grads[tree_idx * 3 + 0], d_pose.x);
+                atomicAdd(&out_grads[tree_idx * 3 + 1], d_pose.y);
+                atomicAdd(&out_grads[tree_idx * 3 + 2], d_pose.z);
+            }
+            
+            if (out_grad_h != NULL) {
+                // All threads contribute to d/dh
+                atomicAdd(out_grad_h, d_h_local);
+            }
+        }
         
         // Atomic add for total area
         atomicAdd(out_total, local_area);
-        
-        // Accumulate gradients if computed
-        if (out_grads != NULL) {
-            // Each of the 4 threads for this tree contributes gradient from its piece
-            // Write to [tree_idx, component] layout
-            atomicAdd(&out_grads[tree_idx * 3 + 0], d_pose.x);
-            atomicAdd(&out_grads[tree_idx * 3 + 1], d_pose.y);
-            atomicAdd(&out_grads[tree_idx * 3 + 2], d_pose.z);
-        }
-        
-        if (out_grad_h != NULL) {
-            // All threads contribute to d/dh
-            atomicAdd(out_grad_h, d_h_local);
-        }
     }
 }
 
@@ -579,8 +586,8 @@ __device__ void boundary_list_total(
 // Computes gradients for all trees in xyt1 if out_grads is non-NULL.
 // When xyt1 == xyt2 (same pointer), also accumulates gradients from the "other" side.
 //
-// Uses 4 threads per reference tree, one for each polygon piece.
-// Thread organization: tid = tree_idx * 4 + piece_idx
+// Uses 2 threads per reference tree, each handling 2 polygon pieces sequentially.
+// Thread organization: tid = tree_idx * 2 + half_idx (half_idx selects pieces 0-1 or 2-3)
 __device__ void overlap_list_total(
     const double* __restrict__ xyt1_Nx3,
     const int n1,
@@ -594,11 +601,12 @@ __device__ void overlap_list_total(
     const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
     const int N_periodic) // number of periodic images in each direction
 {
-    // Thread organization: 4 threads per tree
-    // tid = tree_idx * 4 + piece_idx
+    // Thread organization: 2 threads per tree, each handles 2 pieces
+    // tid = tree_idx * 2 + half_idx
     int tid = threadIdx.x;
-    int tree_idx = tid / 4;  // which reference tree (0 to n1-1)
-    int piece_idx = tid % 4; // which piece of that tree (0 to 3)
+    int tree_idx = tid / 2;       // which reference tree (0 to n1-1)
+    int half_idx = tid % 2;       // which half (0 = pieces 0,1; 1 = pieces 2,3)
+    int piece_idx_base = half_idx * 2;  // starting piece index for this thread
 
     double local_sum = 0.0;
 
@@ -612,8 +620,8 @@ __device__ void overlap_list_total(
         // Determine if we need to compute gradients
         int compute_grads = (out_grads != NULL) ? 1 : 0;
 
-        // Initialize gradient to zero (only first thread does this)
-        if (compute_grads && piece_idx == 0) {
+        // Initialize gradient to zero (only first thread for this tree does this)
+        if (compute_grads && half_idx == 0) {
             out_grads[tree_idx * 3 + 0] = 0.0;
             out_grads[tree_idx * 3 + 1] = 0.0;
             out_grads[tree_idx * 3 + 2] = 0.0;
@@ -622,9 +630,14 @@ __device__ void overlap_list_total(
         // Ensure initialization is complete before all threads start accumulating
         __syncthreads();
 
-        // Each thread computes overlap (or separation) for one piece of the reference tree
+        // Each thread computes overlap (or separation) for 2 pieces of the reference tree sequentially
         double3* d_ref_output = compute_grads ? (double3*)(&out_grads[tree_idx * 3]) : NULL;
-        local_sum = overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx, d_ref_output, use_separation, tree_idx, compute_grads, use_crystal, crystal_axes, only_self_interactions, N_periodic);
+        
+        // Process first piece (piece_idx_base)
+        local_sum += overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx_base, d_ref_output, use_separation, tree_idx, compute_grads, use_crystal, crystal_axes, only_self_interactions, N_periodic);
+        
+        // Process second piece (piece_idx_base + 1)
+        local_sum += overlap_ref_with_list_piece(ref, xyt2_Nx3, n2, piece_idx_base + 1, d_ref_output, use_separation, tree_idx, compute_grads, use_crystal, crystal_axes, only_self_interactions, N_periodic);
 
         // Atomic add for overlap sum
         // If only_self_interactions, don't divide by 2 since we're not double-counting
@@ -708,7 +721,7 @@ __global__ void multi_overlap_list_total(
     // Initialize gradient buffer
     if (out_grads != NULL) {
         int tid = threadIdx.x;
-        int max_tid = n_trees * 4;
+        int max_tid = n_trees * 2;  // 2 threads per tree
         for (int idx = tid; idx < n_trees * 3; idx += max_tid) {
             out_grads[idx] = 0.0;
         }
@@ -769,7 +782,7 @@ __global__ void multi_boundary_list_total(
     // Initialize gradient buffer
     if (out_grads != NULL) {
         int tid = threadIdx.x;
-        int max_tid = n_trees * 4;
+        int max_tid = n_trees * 2;  // 2 threads per tree
         for (int idx = tid; idx < n_trees * 3; idx += max_tid) {
             out_grads[idx] = 0.0;
         }
@@ -1379,9 +1392,10 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
     if out_grads is not None:
         out_grads[:] = 0
 
-    # Launch kernel: one block per ensemble, n_trees * 4 threads per block
+    # Launch kernel: one block per ensemble, n_trees * 2 threads per block
+    # (each thread handles 2 polygon pieces to reduce register pressure)
     blocks = num_ensembles
-    threads_per_block = n_trees * 4
+    threads_per_block = n_trees * 2
 
     # Pass null pointers for optional parameters
     out_grads_ptr = out_grads if out_grads is not None else np.intp(0)
@@ -1502,9 +1516,10 @@ def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray
     if out_grad_h is not None:
         out_grad_h[:] = 0
     
-    # Launch kernel: one block per ensemble, n_trees * 4 threads per block
+    # Launch kernel: one block per ensemble, n_trees * 2 threads per block
+    # (each thread handles 2 polygon pieces to reduce register pressure)
     blocks = num_ensembles
-    threads_per_block = n_trees * 4
+    threads_per_block = n_trees * 2
     
     # Pass null pointers if gradients are None
     out_grads_ptr = out_grads if out_grads is not None else np.intp(0)
