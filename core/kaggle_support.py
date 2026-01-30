@@ -54,6 +54,8 @@ def assert_mps():
 if os.path.isdir('/mnt/d/packing/'):
     env = 'local'
     d_drive = '/mnt/d/'    
+elif os.path.isdir('/kaggle/working/'):
+    env = 'kaggle'
 else:
     env = 'vast'
 print(env)
@@ -73,6 +75,10 @@ match env:
         data_dir = '/packing/data/'
         temp_dir = '/packing/temp/'             
         code_dir = '/packing/code/core/'
+    case 'kaggle':
+        data_dir = '/kaggle/temp/data/'
+        temp_dir = '/kaggle/temp/'
+        code_dir = '/kaggle/input/christmas-tree-library/'
 os.makedirs(data_dir, exist_ok=True)
 os.makedirs(temp_dir, exist_ok=True)
 
