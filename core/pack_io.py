@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_metric
 
-def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True, line_search=False, verbose=True):
+def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True, line_search=False, verbose=True, scaling=1.):
     assert sol.is_phenotype()
     solx = copy.deepcopy(sol)
     solx.use_fixed_h = False
@@ -33,6 +33,8 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
     optimizer.cost = copy.deepcopy(cost)
     optimizer.n_iterations = 20000
     optimizer.max_step = 1e-4
+    optimizer.cost.costs[0].scaling*=scaling
+    optimizer.max_step*=np.sqrt(scaling)    
     optimizer.history_size = 10
     optimizer.tolerance_rel_change = tolerance_rel_change
     optimizer.track_cost = do_plot
