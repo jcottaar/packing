@@ -78,7 +78,7 @@ match env:
     case 'kaggle':
         data_dir = '/kaggle/temp/data/'
         temp_dir = '/kaggle/temp/'
-        code_dir = '/kaggle/input/christmas-tree-library/'
+        code_dir = '/kaggle/input/christmas-tree-library/core/'
 os.makedirs(data_dir, exist_ok=True)
 os.makedirs(temp_dir, exist_ok=True)
 
