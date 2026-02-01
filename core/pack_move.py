@@ -1,5 +1,6 @@
 import numpy as np
 import cupy as cp
+import typing
 import kaggle_support as kgs
 from dataclasses import dataclass, field
 
@@ -578,8 +579,6 @@ class Crossover(Move):
         trees[:, 0] = dst_center_x + dx
         trees[:, 1] = dst_center_y + dy
         trees[:, 2] = theta
-
-import typing
 
 @dataclass
 class CrossoverStripe(Move):

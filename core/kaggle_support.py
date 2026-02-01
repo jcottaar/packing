@@ -11,11 +11,16 @@ import copy
 from dataclasses import dataclass, field, fields
 import typing
 import multiprocess
-multiprocess.set_start_method('spawn', force=True)
 from decorator import decorator
 from line_profiler import LineProfiler
 import shutil
 import inspect
+from shapely import affinity
+from shapely.geometry import Polygon, Point
+from shapely.prepared import prep
+from typeguard import typechecked
+
+multiprocess.set_start_method('spawn', force=True)
 
 
 '''
@@ -87,8 +92,10 @@ def list_attrs(obj):
         print(f"{name} = {val}")
 
 def remove_and_make_dir(path):
-    try: shutil.rmtree(path)
-    except: pass
+    try:
+        shutil.rmtree(path)
+    except Exception:
+        pass
     os.makedirs(path)
 
 # Helper class - doesn't allow new properties after construction, and enforces property types. Partially written by ChatGPT.
@@ -162,7 +169,8 @@ def profile_each_line(func, *args, **kwargs):
         raise
 
 def profile_print(string):
-    if profiling: print(string)
+    if profiling:
+        print(string)
 
 module_profiler = None
 
@@ -250,11 +258,6 @@ def clear_gpu():
 '''
 The trees!
 '''
-
-from shapely import affinity
-from shapely.geometry import Polygon, Point
-from shapely.prepared import prep
-from typeguard import typechecked
 
 scale_factor = 1.
 TREE_EXPANSION = 0.0  # Outward expansion distance for trees
@@ -699,7 +702,8 @@ class SolutionCollectionSquare(SolutionCollection):
         original_size = self.h[inds_to_do,0].copy()  # (N,)
         size = original_size.copy()
         if edge_clearance is not None:
-            if edge_clearance is None: edge_clearance = 0.0
+            if edge_clearance is None:
+                edge_clearance = 0.0
             size -= edge_clearance*2
        
             move_centers_x = generator.uniform(-size/2, size/2, dtype=dtype_cp) + self.h[inds_to_do, 1]  # (N,)
