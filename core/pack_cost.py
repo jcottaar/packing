@@ -1,3 +1,26 @@
+"""
+Cost Functions for Tree Packing Optimization
+
+This module defines cost functions for evaluating and optimizing tree packing configurations.
+It provides a hierarchy of cost functions including collision detection (overlap area and
+separation distance), boundary constraints, and area minimization. Cost functions compute
+both cost values and their gradients for use in optimization algorithms.
+
+This code is released under CC BY-SA 4.0, meaning you can freely use and adapt it (including
+commercially), but must give credit to the original author (Jeroen Cottaar) and keep it under
+this license.
+
+Key Classes:
+    Cost: Base class for all cost functions
+    CostCompound: Combines multiple cost functions
+    CollisionCost: Base for collision detection costs
+    CollisionCostOverlappingArea: Penalizes tree overlaps via intersection area
+    CollisionCostSeparation: Penalizes overlaps via SAT-based separation distance
+    CollisionCostExactSeparation: Exact Minkowski-based separation (using a lookup table)
+    AreaCost: Penalizes boundary area
+    BoundaryDistanceCost: Penalizes trees outside boundary
+"""
+
 import numpy as np
 import cupy as cp
 import kaggle_support as kgs
@@ -11,62 +34,147 @@ import copy
 
 @dataclass
 class Cost(kgs.BaseClass):
-    scaling:float = field(init=True, default=1.0)
+    """
+    Base class for all cost functions in the packing optimization framework.
+    
+    Provides infrastructure for computing costs and gradients with optional scaling,
+    phenotype/genotype conversion, and pre-allocated memory for efficiency. Subclasses
+    implement specific cost functions (collision, boundary, area, etc.).
+    """
+    
+    scaling: float = field(init=True, default=1.0)  # Cost scaling factor
+
 
     @typechecked 
-    def compute_cost_ref(self, sol:kgs.SolutionCollection):
-        # xyt: (n_ensemble, n_trees, 3) array
-        #bound: (n_ensemble, 1 or 3) array
+    def compute_cost_ref(self, sol: kgs.SolutionCollection):
+        """
+        Reference implementation using loop over solutions (slow but correct).
+        
+        Automatically handles phenotype/genotype conversion if needed. For genotype
+        solutions, converts to phenotype, computes cost/gradients, then backpropagates 
+        gradients to genotype space.
+        
+        Args:
+            sol: Solution collection to evaluate (N_solutions, N_trees, 3)
+        
+        Returns:
+            cost: Cost values, shape (N_solutions,)
+            grad_xyt: Gradients w.r.t. tree poses, shape (N_solutions, N_trees, 3)
+            grad_h: Gradients w.r.t. boundary parameters, shape (N_solutions, N_h_DOF)
+        """
+        # Handle genotype->phenotype conversion if needed
         if not sol.is_phenotype():
             sol_phenotype = sol.convert_to_phenotype()
             cost, grad_xyt_phenotype, grad_h_phenotype = self.compute_cost_ref(sol_phenotype)
-            # backprop gradients from phenotype to genotype space
+            
+            # Backpropagate gradients from phenotype to genotype space
             grad_xyt = cp.zeros_like(sol.xyt)
             grad_bound = cp.zeros_like(sol.h)
             sol.backprop_phenotype(grad_xyt_phenotype, grad_h_phenotype, grad_xyt, grad_bound)
             return cost, grad_xyt, grad_bound
 
-        sol.check_constraints()                
-        cost,grad_xyt,grad_bound = self._compute_cost_ref(sol)
+        # Validate solution structure
+        sol.check_constraints()
+        
+        # Compute cost and gradients
+        cost, grad_xyt, grad_bound = self._compute_cost_ref(sol)
+        
+        # Validate output shapes
         assert cost.shape == (sol.N_solutions,)
         assert grad_xyt.shape == sol.xyt.shape
-        assert grad_bound.shape == sol.h.shape 
+        assert grad_bound.shape == sol.h.shape
+        
+        # Zero out boundary gradients if h is fixed
         if sol.use_fixed_h:
             grad_bound[:] = 0
-        return self.scaling*cost,self.scaling*grad_xyt,self.scaling*grad_bound
-    
-    def _compute_cost_ref(self, sol:kgs.SolutionCollection):        
+        
+        # Apply scaling
+        return self.scaling * cost, self.scaling * grad_xyt, self.scaling * grad_bound
+
+
+    def _compute_cost_ref(self, sol: kgs.SolutionCollection):
+        """
+        See compute_cost_ref. Default implementation loops over solutions.
+        Subclasses can override for vectorized computation.
+        """
         cost = cp.zeros(sol.N_solutions)
         grad_xyt = cp.zeros_like(sol.xyt)
         grad_bound = cp.zeros_like(sol.h)
+        
+        # Compute cost for each solution individually
         for i in range(sol.N_solutions):
             sol_tmp = copy.deepcopy(sol)
             sol_tmp.select_ids([i])
-            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single_ref(sol_tmp)
-        return cost,grad_xyt,grad_bound
-    
-    def compute_cost_allocate(self, sol:kgs.SolutionCollection, evaluate_gradient:bool=True):
-        # Allocates gradient arrays and calls compute_cost
+            cost[i], grad_xyt[i], grad_bound[i] = self._compute_cost_single_ref(sol_tmp)
+        
+        return cost, grad_xyt, grad_bound
+
+
+    def compute_cost_allocate(self, sol: kgs.SolutionCollection, evaluate_gradient: bool = True):
+        """
+        Convenience wrapper that allocates output arrays and calls compute_cost.
+        
+        Args:
+            sol: Solution collection to evaluate
+            evaluate_gradient: Whether to compute gradients (default: True)
+        
+        Returns:
+            cost: Cost values, shape (N_solutions,)
+            grad_xyt: Gradients w.r.t. tree poses, shape (N_solutions, N_trees, 3)
+            grad_h: Gradients w.r.t. boundary parameters, shape (N_solutions, N_h_DOF)
+        """
+        # Allocate output arrays
         cost = cp.zeros(sol.N_solutions, dtype=sol.xyt.dtype)
-        # Always allocate arrays for gradients
         grad_xyt = cp.zeros_like(sol.xyt)
         grad_bound = cp.zeros_like(sol.h)
-        self.compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient=evaluate_gradient)
+        
+        # Compute cost with pre-allocated arrays
+        self.compute_cost(
+            sol, cost, grad_xyt, grad_bound, 
+            evaluate_gradient=evaluate_gradient
+        )
+        
         return cost, grad_xyt, grad_bound
-    
-    def compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool=True):
-        # Subclass can implement faster version with preallocated gradients
-        if not sol.is_phenotype():            
+
+
+    def compute_cost(
+        self, sol: kgs.SolutionCollection, cost: cp.ndarray, 
+        grad_xyt: cp.ndarray, grad_bound: cp.ndarray, 
+        evaluate_gradient: bool = True
+    ):
+        """
+        Fast cost computation with pre-allocated output arrays (used in hot loops).
+        
+        Handles phenotype/genotype conversion and applies scaling factor. Subclasses
+        can override _compute_cost for GPU-accelerated implementations.
+        
+        Args:
+            sol: Solution collection to evaluate
+            cost: Output array for cost values, shape (N_solutions,)
+            grad_xyt: Output array for pose gradients, shape (N_solutions, N_trees, 3)
+            grad_bound: Output array for boundary gradients, shape (N_solutions, N_h_DOF)
+            evaluate_gradient: Whether to compute gradients (default: True)
+        """
+        # Handle genotype->phenotype conversion
+        if not sol.is_phenotype():
             sol_phenotype = sol.convert_to_phenotype()
-            # Allocate temp arrays for phenotype gradients
             grad_xyt_temp = cp.zeros_like(sol_phenotype.xyt)
             grad_h_temp = cp.zeros_like(sol_phenotype.h)
-            self.compute_cost(sol_phenotype, cost, grad_xyt_temp, grad_h_temp, evaluate_gradient=evaluate_gradient)
-            # backprop gradients from phenotype to genotype space
+            
+            self.compute_cost(
+                sol_phenotype, cost, grad_xyt_temp, grad_h_temp, 
+                evaluate_gradient=evaluate_gradient
+            )
+            
+            # Backpropagate gradients from phenotype to genotype space
             if evaluate_gradient:
                 sol.backprop_phenotype(grad_xyt_temp, grad_h_temp, grad_xyt, grad_bound)
             return
+        
+        # Compute cost (subclass-specific implementation)
         self._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
+        
+        # Apply scaling and handle fixed boundaries
         if self.scaling != 1.0:
             cost *= self.scaling
             if evaluate_gradient:
@@ -78,44 +186,74 @@ class Cost(kgs.BaseClass):
         else:
             if sol.use_fixed_h:
                 grad_bound[:] = 0
-    
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
-        # Subclass can implement faster version with preallocated gradients
+
+
+    def _compute_cost(
+        self, sol: kgs.SolutionCollection, cost: cp.ndarray, 
+        grad_xyt: cp.ndarray, grad_bound: cp.ndarray, 
+        evaluate_gradient: bool
+    ):
+        """
+        See compute_cost. Default implementation loops over solutions.
+        Subclasses override for GPU-accelerated batch computation.
+        """
         for i in range(sol.N_solutions):
             sol_tmp = copy.deepcopy(sol)
             sol_tmp.select_ids([i])
-            cost[i],grad_xyt[i],grad_bound[i] = self._compute_cost_single(sol_tmp, evaluate_gradient)
-    
-    def _compute_cost_single(self, sol:kgs.SolutionCollection, evaluate_gradient):
+            cost[i], grad_xyt[i], grad_bound[i] = self._compute_cost_single(
+                sol_tmp, evaluate_gradient
+            )
+
+
+    def _compute_cost_single(self, sol: kgs.SolutionCollection, evaluate_gradient: bool):
+        """See _compute_cost_single_ref."""
         return self._compute_cost_single_ref(sol)
+
 
 @dataclass 
 class CostCompound(Cost):
-    # Compound cost: sum of multiple costs
-    costs:list = field(init=True, default_factory=list)
+    """
+    Compound cost function combining multiple cost terms with weighted sum.
+    
+    Used to create complex objectives like:
+        cost = overlap_area + 0.01 * boundary_area + 1.0 * boundary_distance
+    """
+    
+    costs: list = field(init=True, default_factory=list)  # List of Cost objects
     _temp_cost: cp.ndarray = field(init=False, default=None, repr=False)
     _temp_grad_xyt: cp.ndarray = field(init=False, default=None, repr=False)
     _temp_grad_bound: cp.ndarray = field(init=False, default=None, repr=False)
     _temp_shape: tuple = field(init=False, default=None, repr=False)
 
-    def _compute_cost_ref(self, sol:kgs.SolutionCollection):
+
+    def _compute_cost_ref(self, sol: kgs.SolutionCollection):
+        """See compute_cost_ref. Sums all component cost functions."""
         total_cost = cp.zeros(sol.N_solutions)
         total_grad = cp.zeros_like(sol.xyt)
         total_grad_bound = cp.zeros_like(sol.h)
+        
+        # Sum contributions from all cost terms
         for c in self.costs:
             c_cost, c_grad, c_grad_bound = c.compute_cost_ref(sol)
             total_cost += c_cost
             total_grad += c_grad
             total_grad_bound += c_grad_bound
+        
         return total_cost, total_grad, total_grad_bound
 
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient):
+
+    def _compute_cost(
+        self, sol: kgs.SolutionCollection, cost: cp.ndarray, 
+        grad_xyt: cp.ndarray, grad_bound: cp.ndarray, 
+        evaluate_gradient: bool
+    ):
+        """See compute_cost. Efficiently sums cost terms with pre-allocated buffers."""
+        # Zero output arrays
         cost[:] = 0
         grad_xyt[:] = 0
         grad_bound[:] = 0
         
-        # Check if we need to allocate or reallocate temporary arrays
-        # Use dtype matching the output arrays to ensure consistency
+        # Check if temporary arrays need (re)allocation
         current_shape = (sol.N_solutions, sol.xyt.shape, sol.h.shape)
         if self._temp_shape != current_shape:
             self._temp_cost = cp.zeros(sol.N_solutions, dtype=cost.dtype)
@@ -123,23 +261,56 @@ class CostCompound(Cost):
             self._temp_grad_bound = cp.zeros(sol.h.shape, dtype=grad_bound.dtype)
             self._temp_shape = current_shape
         
+        # Accumulate contributions from all cost terms
         for c in self.costs:
             self._temp_cost[:] = 0
             self._temp_grad_xyt[:] = 0
             self._temp_grad_bound[:] = 0
-            c.compute_cost(sol, self._temp_cost, self._temp_grad_xyt, self._temp_grad_bound, evaluate_gradient)
+            
+            c.compute_cost(
+                sol, self._temp_cost, self._temp_grad_xyt, 
+                self._temp_grad_bound, evaluate_gradient
+            )
+            
             cost += self._temp_cost
             grad_xyt += self._temp_grad_xyt
             grad_bound += self._temp_grad_bound
 
+
 @dataclass
 class CostDummy(Cost):
-    # Dummy: always zero cost
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
-        return cp.array(0.0), cp.zeros_like(sol.xyt[0]), cp.zeros_like(sol.h[0])
+    """
+    Dummy cost function that always returns zero.
+    
+    Useful for testing and as a placeholder in optimization pipelines.
+    """
+    
+    def _compute_cost_single_ref(self, sol: kgs.SolutionCollection):
+        """See compute_cost_ref. Always returns zero cost and gradients."""
+        return (
+            cp.array(0.0), 
+            cp.zeros_like(sol.xyt[0]), 
+            cp.zeros_like(sol.h[0])
+        )
+
 
 @dataclass
 class CollisionCost(Cost):
+    """
+    Base class for collision detection cost functions.
+    
+    Supports both reference (CPU, Shapely-based) and fast (GPU kernel) implementations.
+    Can optionally use pre-computed lookup tables for ~10x speedup on repeated queries.
+    
+    Attributes:
+        use_lookup_table: Enable LUT-based acceleration (default: False)
+        lut_N_x: LUT resolution in x direction (default: 900)
+        lut_N_y: LUT resolution in y direction (default: 900)
+        lut_N_theta: LUT resolution in rotation (default: 900)
+        lut_trim_zeros: Remove zero-cost regions from LUT to save memory (default: True)
+        _lut: Lazily initialized lookup table object
+    """
+    
     use_lookup_table: bool = field(init=True, default=False)
     lut_N_x: int = field(init=True, default=900)
     lut_N_y: int = field(init=True, default=900)
@@ -147,31 +318,42 @@ class CollisionCost(Cost):
     lut_trim_zeros: bool = field(init=True, default=True)
     _lut: 'pack_cuda_lut.LookupTable' = field(init=False, default=None, repr=False)
 
+
     def _ensure_lut_initialized(self):
-        """Initialize lookup table if use_lookup_table is True and not yet initialized."""
+        """
+        Initialize lookup table on first use if use_lookup_table=True.
+        
+        Builds a 3D table mapping (dx, dy, theta) -> cost for two trees, where
+        tree 1 is at origin and tree 2 at (dx, dy) with rotation theta. The LUT
+        is built by calling the subclass's cost function on a grid of positions.
+        """
         if self.use_lookup_table and self._lut is None:
-            import pack_cuda_lut
             print(f"Building lookup table for {self.__class__.__name__}...")
             
-            # Create wrapper function that matches the expected signature
             def eval_fn(dx: np.ndarray, dy: np.ndarray, theta: float) -> np.ndarray:
-                """Evaluate cost for array of (dx, dy) positions at given theta."""
+                """
+                Evaluate cost for array of (dx, dy) positions at given theta.
+                
+                Args:
+                    dx: X offsets, shape (N,)
+                    dy: Y offsets, shape (N,)
+                    theta: Rotation angle in radians
+                
+                Returns:
+                    costs: Cost values, shape (N,)
+                """
                 N = len(dx)
                 
-                # Create solution with 2 trees:
-                # Tree 0: at origin (0, 0, 0)
-                # Tree 1: at (dx, dy, theta)
+                # Create solution with 2 trees: tree 0 at origin, tree 1 at (dx, dy, theta)
                 xyt = np.zeros((N, 2, 3), dtype=np.float32)
                 xyt[:, 1, 0] = dx
                 xyt[:, 1, 1] = dy
                 xyt[:, 1, 2] = theta
-                
                 xyt_cp = cp.asarray(xyt)
                 
-                # Create solution collection
+                # Create solution collection with large boundary
                 sol = kgs.SolutionCollectionSquare()
                 sol.xyt = xyt_cp
-                # Large boundary to avoid clipping
                 sol.h = cp.tile(cp.array([[10., 0., 0.]], dtype=cp.float32), (N, 1))
                 sol.check_constraints()
                 
@@ -180,7 +362,6 @@ class CollisionCost(Cost):
                 self.use_lookup_table = False
                 
                 try:
-                    # Compute costs
                     costs, _, _ = self.compute_cost_allocate(sol, evaluate_gradient=False)
                     return costs.get()
                 finally:
@@ -195,69 +376,85 @@ class CollisionCost(Cost):
                 verbose=True
             )
 
+
     def __getstate__(self):
         """Exclude lookup table from pickle serialization (contains GPU resources)."""
         state = self.__dict__.copy()
-        # Remove the unpicklable lookup table
-        state['_lut'] = None
+        state['_lut'] = None  # Remove unpicklable LUT
         return state
 
-    def __setstate__(self, state):
-        """Restore object state from pickle, lookup table will be lazily rebuilt if needed."""
-        self.__dict__.update(state)
-        # _lut is already None from __getstate__, will be rebuilt by _ensure_lut_initialized() if needed
 
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
-        # Compute collision cost for all pairs of trees
-        assert(sol.N_solutions==1)
-        xyt = sol.xyt[0]
-        h = sol.h[0]
+    def __setstate__(self, state):
+        """Restore object state from pickle, LUT will be lazily rebuilt if needed."""
+        self.__dict__.update(state)
+
+
+    def _compute_cost_single_ref(self, sol: kgs.SolutionCollection):
+        """
+        Reference implementation for single solution (CPU, Shapely-based).
+        
+        Computes collision cost for all pairs of trees, handling both periodic
+        and non-periodic boundary conditions. For periodic boundaries, includes
+        interactions with periodic images within N_periodic cells.
+        
+        Args:
+            sol: Single solution (N_solutions=1)
+        
+        Returns:
+            cost: Total collision cost (scalar)
+            grad_xyt: Gradients w.r.t. tree poses, shape (N_trees, 3)
+            grad_h: Gradients w.r.t. boundary parameters, shape (N_h_DOF,)
+        """
+        assert sol.N_solutions == 1
+        xyt = sol.xyt[0]  # (N_trees, 3)
+        h = sol.h[0]  # (N_h_DOF,)
         n_trees = sol.N_trees
 
         if sol.periodic:
-            # Periodic BC: use analytical gradients w.r.t. xyt (scatter pattern)
-            # but finite differences for h (lattice parameters)
+            # Periodic boundaries: use analytical gradients for xyt, finite differences for h
             tree_list = kgs.TreeList()
             tree_list.xyt = xyt
             trees = tree_list.get_trees()
 
-            # Get crystal axes
+            # Get crystal lattice axes
             import copy
             sol_here = copy.deepcopy(sol)
             sol_here.h = h[None]
             crystal_axes = cp.zeros((1, 2, 2), dtype=xyt.dtype)
             sol_here.get_crystal_axes(crystal_axes)
-            a_vec = crystal_axes[0, 0, :]
-            b_vec = crystal_axes[0, 1, :]
+            a_vec = crystal_axes[0, 0, :]  # First lattice vector
+            b_vec = crystal_axes[0, 1, :]  # Second lattice vector
             a_vec_np = a_vec.get()
             b_vec_np = b_vec.get()
 
             total_cost = cp.array(0.0)
             total_grad = cp.zeros_like(xyt)
 
+            # Compute cost and gradients for each tree vs all others (including periodic images)
             for i in range(n_trees):
                 this_xyt = xyt[i]
                 this_tree = trees[i]
 
-                # Collect all other trees including periodic images (excluding ALL self-interactions)
                 other_trees_all = []
                 other_xyt_all = []
 
-                # Loop over grid of periodic cells
+                # Loop over periodic cells within N_periodic range
                 for dx in range(-sol.N_periodic, sol.N_periodic + 1):
                     for dy in range(-sol.N_periodic, sol.N_periodic + 1):
-                        shift = dx * a_vec_np + dy * b_vec_np
+                        shift = dx * a_vec_np + dy * b_vec_np  # Lattice shift
 
                         for j in range(n_trees):
-                            # Skip ALL self-interactions (including periodic)
+                            # Skip ALL self-interactions (including periodic images)
                             if i == j:
                                 continue
 
                             # Translate tree j by the lattice shift
-                            tree_j_shifted = shapely.affinity.translate(trees[j], xoff=shift[0], yoff=shift[1])
+                            tree_j_shifted = shapely.affinity.translate(
+                                trees[j], xoff=shift[0], yoff=shift[1]
+                            )
                             other_trees_all.append(tree_j_shifted)
 
-                            # Create shifted pose for xyt2 (needed by CollisionCostSeparation)
+                            # Create shifted pose for xyt2
                             xyt_j_shifted = xyt[j].copy()
                             xyt_j_shifted[0] += cp.array(shift[0])
                             xyt_j_shifted[1] += cp.array(shift[1])
@@ -269,15 +466,16 @@ class CollisionCost(Cost):
                 else:
                     other_xyt = cp.zeros((0, 3), dtype=xyt.dtype)
 
-                # Use subclass's _compute_cost_one_tree_ref (overlap area or separation)
-                # Get both cost and gradient
-                this_cost, this_grads = self._compute_cost_one_tree_ref(this_xyt, other_xyt, this_tree, other_trees_all)
-                total_cost += this_cost / 2
+                # Use subclass's method (overlap area or separation distance)
+                this_cost, this_grads = self._compute_cost_one_tree_ref(
+                    this_xyt, other_xyt, this_tree, other_trees_all
+                )
+                total_cost += this_cost / 2  # Divide by 2 to avoid double-counting
                 total_grad[i] += this_grads
 
             # Handle self-interactions separately using finite differences
-            # Build helper function to compute cost with given xyt for a specific tree i
             def _compute_cost_only_xyt(xyt_in, tree_idx):
+                """Helper: compute cost for tree_idx with its periodic images only."""
                 tree_list_tmp = kgs.TreeList()
                 tree_list_tmp.xyt = xyt_in
                 trees_tmp = tree_list_tmp.get_trees()
@@ -290,10 +488,12 @@ class CollisionCost(Cost):
                 for dx in range(-sol.N_periodic, sol.N_periodic + 1):
                     for dy in range(-sol.N_periodic, sol.N_periodic + 1):
                         if dx == 0 and dy == 0:
-                            continue  # Skip origin
+                            continue  # Skip origin (no self-interaction)
 
                         shift = dx * a_vec_np + dy * b_vec_np
-                        tree_i_shifted = shapely.affinity.translate(trees_tmp[tree_idx], xoff=shift[0], yoff=shift[1])
+                        tree_i_shifted = shapely.affinity.translate(
+                            trees_tmp[tree_idx], xoff=shift[0], yoff=shift[1]
+                        )
                         other_trees_self.append(tree_i_shifted)
 
                         xyt_i_shifted = xyt_in[tree_idx].copy()
@@ -304,20 +504,22 @@ class CollisionCost(Cost):
                 cost_tmp = 0.0
                 if len(other_xyt_self) > 0:
                     other_xyt_arr = cp.stack(other_xyt_self, axis=0)
-                    this_cost_tmp, X = self._compute_cost_one_tree_ref(xyt_in[tree_idx], other_xyt_arr, this_tree_tmp, other_trees_self)
+                    this_cost_tmp, _ = self._compute_cost_one_tree_ref(
+                        xyt_in[tree_idx], other_xyt_arr, this_tree_tmp, other_trees_self
+                    )
                     cost_tmp = this_cost_tmp / 2
 
                 return cp.array(cost_tmp)
 
-            # # Add self-interaction cost to total (sum over all trees)
+            # Add self-interaction costs
             for i in range(n_trees):
                 self_interaction_cost = _compute_cost_only_xyt(xyt, i)
                 total_cost += self_interaction_cost
 
-            # Compute self-interaction gradients using finite differences
+            # Compute self-interaction gradients using finite differences (theta only)
             eps = 1e-6
             for i in range(n_trees):
-                for j in [2]:  # theta only, x and y are 0
+                for j in [2]:  # Theta only (x and y gradients are zero for self-interactions)
                     xyt_plus = xyt.copy()
                     xyt_minus = xyt.copy()
                     xyt_plus[i, j] += eps
@@ -332,11 +534,12 @@ class CollisionCost(Cost):
             grad_h = cp.zeros_like(h)
 
             def _compute_cost_only_h(h_in):
-                # Recompute cost with different h
+                """Helper: compute total cost with modified lattice parameters."""
                 tree_list_tmp = kgs.TreeList()
                 tree_list_tmp.xyt = xyt
                 trees_tmp = tree_list_tmp.get_trees()
 
+                # Recompute crystal axes with modified h
                 crystal_axes_tmp = cp.zeros((1, 2, 2), dtype=xyt.dtype)
                 sol_tmp = copy.deepcopy(sol)
                 sol_tmp.xyt = cp.array([xyt])
@@ -357,7 +560,9 @@ class CollisionCost(Cost):
                             for j in range(n_trees):
                                 if dx == 0 and dy == 0 and i == j:
                                     continue
-                                tree_j_tmp = shapely.affinity.translate(trees_tmp[j], xoff=shift_tmp[0], yoff=shift_tmp[1])
+                                tree_j_tmp = shapely.affinity.translate(
+                                    trees_tmp[j], xoff=shift_tmp[0], yoff=shift_tmp[1]
+                                )
                                 other_trees_tmp.append(tree_j_tmp)
                                 xyt_j_tmp = xyt[j].copy()
                                 xyt_j_tmp[0] += cp.array(shift_tmp[0])
@@ -369,11 +574,14 @@ class CollisionCost(Cost):
                     else:
                         other_xyt_arr = cp.zeros((0, 3), dtype=xyt.dtype)
 
-                    this_cost_tmp, _ = self._compute_cost_one_tree_ref(xyt[i], other_xyt_arr, this_tree_tmp, other_trees_tmp)
+                    this_cost_tmp, _ = self._compute_cost_one_tree_ref(
+                        xyt[i], other_xyt_arr, this_tree_tmp, other_trees_tmp
+                    )
                     cost_tmp += this_cost_tmp / 2
 
                 return cp.array(cost_tmp)
 
+            # Compute gradients w.r.t. each h component
             for i in range(h.shape[0]):
                 h_plus = h.copy()
                 h_minus = h.copy()
@@ -386,6 +594,7 @@ class CollisionCost(Cost):
                 grad_h[i] = (cost_plus - cost_minus) / (2.0 * eps)
 
             return total_cost, total_grad, grad_h
+        
         else:
             # Non-periodic: use existing analytical approach
             tree_list = kgs.TreeList()
@@ -410,7 +619,6 @@ class CollisionCost(Cost):
             # Use lookup table if enabled
             if self.use_lookup_table:
                 self._ensure_lut_initialized()
-                import pack_cuda_lut
                 # Pass LUT directly (fast - updates constants only if changed)
                 if evaluate_gradient:
                     pack_cuda_lut.overlap_multi_ensemble(sol.xyt, cost, self._lut, grad_xyt)
@@ -471,8 +679,6 @@ class CollisionCost(Cost):
                     grad_theta = (cost_plus - cost_minus) / (2.0 * eps)
                     grad_xyt[:, t, 2] += grad_theta/2
 
-            if evaluate_gradient:
-
                 # Now, find gradients w.r.t. h using finite differences
                 # Vectorized finite-difference for grad w.r.t. h (no loop over solutions)
                 eps = 1e-6
@@ -513,45 +719,117 @@ class CollisionCost(Cost):
 
                     # central difference across the ensemble (vectorized)
                     grad_bound[:, k] = (cost_plus - cost_minus) / (2.0 * eps)
-        
-    
-    
+
+
 class CollisionCostOverlappingArea(CollisionCost):
-    # Collision cost based on overlapping area of two trees
-    def _compute_cost_one_tree_ref(self, xyt1:cp.ndarray, xyt2:cp.ndarray, tree1:Polygon, tree2:list):
-        # Compute overlapping area between tree1 and the union of tree2 geometries.        
+    """
+    Collision cost based on total overlapping area between trees.
+    
+    Cost = sum of intersection areas over all tree pairs. Uses Shapely for reference
+    implementation and GPU kernels for fast computation. Supports optional lookup tables.
+    """
+    
+    def _compute_cost_one_tree_ref(
+        self, xyt1: cp.ndarray, xyt2: cp.ndarray, 
+        tree1: Polygon, tree2: list
+    ):
+        """
+        Compute overlap area between one tree and a list of other trees.
+        
+        Uses Shapely geometric intersection. Gradients computed by finite differences.
+        
+        Args:
+            xyt1: Pose of this tree, shape (3,) = [x, y, theta]
+            xyt2: Poses of other trees, shape (N_other, 3)
+            tree1: Shapely polygon for this tree
+            tree2: List of Shapely polygons for other trees
+        
+        Returns:
+            area: Total overlap area (scalar)
+            grad: Gradients w.r.t. xyt1, shape (3,)
+        """
+        # Compute total overlap area
         area = cp.array(np.sum(shapely.area(tree1.intersection(tree2))))
-        # Gradient computation is complex; use finite differences as a placeholder
+        
+        # Compute gradients using finite differences
         grad = cp.zeros_like(xyt1)
-        if area>0:
+        if area > 0:
             epsilon = 1e-6
             for j in range(3):  # x, y, theta
                 xyt1_plus = xyt1.copy()
                 xyt1_minus = xyt1.copy()
                 xyt1_plus[j] += epsilon
                 xyt1_minus[j] -= epsilon
-                tree1_plus = kgs.create_tree(xyt1_plus[0].get().item(), xyt1_plus[1].get().item(), xyt1_plus[2].get().item()*360/2/np.pi)
+                
+                # Create perturbed trees
+                tree1_plus = kgs.create_tree(
+                    xyt1_plus[0].get().item(), 
+                    xyt1_plus[1].get().item(), 
+                    xyt1_plus[2].get().item() * 360 / 2 / np.pi
+                )
                 area_plus = np.sum(shapely.area(tree1_plus.intersection(tree2)))
-                tree1_minus = kgs.create_tree(xyt1_minus[0].get().item(), xyt1_minus[1].get().item(), xyt1_minus[2].get().item()*360/2/np.pi)
+                
+                tree1_minus = kgs.create_tree(
+                    xyt1_minus[0].get().item(), 
+                    xyt1_minus[1].get().item(), 
+                    xyt1_minus[2].get().item() * 360 / 2 / np.pi
+                )
                 area_minus = np.sum(shapely.area(tree1_minus.intersection(tree2)))
+                
                 grad[j] = cp.array((area_plus - area_minus) / (2 * epsilon))
+        
         return area, grad
 
-    def _compute_cost_internal(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient, crystal_axes=None,
-                               only_self_interactions=False):
-        # Use fast CUDA implementation
+
+    def _compute_cost_internal(
+        self, sol: kgs.SolutionCollection, cost: cp.ndarray, 
+        grad_xyt: cp.ndarray, grad_bound: cp.ndarray, 
+        evaluate_gradient: bool, crystal_axes=None,
+        only_self_interactions: bool = False
+    ):
+        """
+        Fast GPU kernel implementation for overlap area computation.
+        
+        Args:
+            sol: Solution collection
+            cost: Output cost array, shape (N_solutions,)
+            grad_xyt: Output gradient array, shape (N_solutions, N_trees, 3)
+            grad_bound: Output boundary gradient array, shape (N_solutions, N_h_DOF)
+            evaluate_gradient: Whether to compute gradients
+            crystal_axes: For periodic boundaries, lattice vectors, shape (N_solutions, 4)
+            only_self_interactions: If True, only compute tree-vs-self costs
+        """
         if evaluate_gradient:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, out_grads=grad_xyt, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions, N_periodic=sol.N_periodic)
+            pack_cuda.overlap_multi_ensemble(
+                sol.xyt, sol.xyt, False, 
+                out_cost=cost, out_grads=grad_xyt, 
+                crystal_axes=crystal_axes, 
+                only_self_interactions=only_self_interactions, 
+                N_periodic=sol.N_periodic
+            )
             grad_bound[:] = 0
         else:
-            pack_cuda.overlap_multi_ensemble(sol.xyt, sol.xyt, False, out_cost=cost, crystal_axes=crystal_axes, only_self_interactions=only_self_interactions, N_periodic=sol.N_periodic)
+            pack_cuda.overlap_multi_ensemble(
+                sol.xyt, sol.xyt, False, 
+                out_cost=cost, 
+                crystal_axes=crystal_axes, 
+                only_self_interactions=only_self_interactions, 
+                N_periodic=sol.N_periodic
+            )
+
 
 @dataclass
 class CollisionCostSeparation(CollisionCost):
-    # Collision cost based on minimum separation distance between trees
-    # Cost = sum(separation_distance^2) over all pairwise overlaps
-    # Only overlapping pairs contribute (separated pairs have zero cost)
-    # Separation distance = minimum distance trees must move to no longer overlap
+    """
+    Collision cost based on minimum separation distance (penetration depth).
+    
+    Uses the Separating Axis Theorem (SAT) to compute exact penetration depth between
+    convex tree pieces. Cost = sum(separation^2) over all overlapping pairs, where
+    separation is the minimum distance trees must move to no longer overlap.
+    
+    Provides analytical gradients via SAT-based sensitivity analysis, accounting for
+    both vertex motion and axis rotation effects.
+    """
     
     def _compute_separation_distance(
         self,
@@ -563,33 +841,31 @@ class CollisionCostSeparation(CollisionCost):
         th1: float,
     ):
         """
-        Compute minimum separation distance (penetration depth) between poly1 and poly2,
-        AND the derivatives of that separation wrt the pose (x, y, theta) of poly1.
-
-        Arguments
-        ---------
-        poly1_world : Polygon
-            Convex piece of tree1 in world coordinates.
-        poly2_world : Polygon
-            Convex piece of tree2 in world coordinates.
-        local_coords1 : (N, 2) ndarray
-            Vertices of this piece in tree1's local coordinate frame (center-tree coords),
-            in the SAME order used to build poly1_world.
-        x1, y1 : float
-            Translation of tree1.
-        th1 : float
-            Rotation (radians) of tree1.
-
-        Returns
-        -------
-        sep : float
-            Minimum penetration depth (0 if no overlap).
-        dsep_dx : float
-            Derivative of sep wrt translation x1 of poly1.
-        dsep_dy : float
-            Derivative of sep wrt translation y1 of poly1.
-        dsep_dtheta : float
-            Derivative of sep wrt rotation th1 of poly1.
+        Compute penetration depth and gradients using Separating Axis Theorem (SAT).
+        
+        This is the key function that enables analytical gradient computation for
+        separation-based collision costs. It computes both the minimum separation
+        distance and its derivatives w.r.t. the pose of poly1.
+        
+        The SAT states that two convex polygons overlap iff they overlap on ALL
+        projection axes (edge normals). The penetration depth is the minimum overlap
+        across all axes. Gradients account for:
+        1. Motion of the critical vertex (always contributes)
+        2. Rotation of the separation axis if it comes from poly1 (extra term)
+        
+        Args:
+            poly1_world: Convex piece of tree1 in world coordinates
+            poly2_world: Convex piece of tree2 in world coordinates
+            local_coords1: Vertices of poly1 in tree1's local frame, shape (N, 2)
+            x1: Translation x of tree1
+            y1: Translation y of tree1
+            th1: Rotation (radians) of tree1
+        
+        Returns:
+            sep: Minimum penetration depth (0 if no overlap)
+            dsep_dx: Derivative of sep w.r.t. x1
+            dsep_dy: Derivative of sep w.r.t. y1
+            dsep_dtheta: Derivative of sep w.r.t. th1
         """
 
         overlap = poly1_world.intersection(poly2_world)
@@ -877,7 +1153,6 @@ class CollisionCostExactSeparation(CollisionCost):
             raise ValueError(f"{self.__class__.__name__} requires use_lookup_table=True")
         
         if self._lut is None:
-            import pack_cuda_lut
             import pack_minkowski as mink
             import os
             import pickle
@@ -971,42 +1246,73 @@ class CollisionCostExactSeparation(CollisionCost):
         """
         # Assert we're using lookup table
         assert self.use_lookup_table, f"{self.__class__.__name__} requires use_lookup_table=True"
-        assert not sol.periodic, f"{self.__class__.__name__} does not support periodic boundaries yet"
+        assert not sol.periodic, f"{self.__class__.__name__} does not support periodic boundaries"
         
         # Kernel applies quadratic transform per-pair (controlled by LUT.apply_quadratic_transform)
         # No post-processing needed - cost and gradients are already transformed
         super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
-        
+
 
 @dataclass 
 class AreaCost(Cost):
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
+    """
+    Cost based on boundary area (minimize bounding square size).
+    
+    Penalizes the area of the bounding square/shape. For square boundaries,
+    cost = square_size^2. For lattices, cost = lattice_cell_area. Zero cost
+    if h is fixed.
+    """
+    
+    def _compute_cost_single_ref(self, sol: kgs.SolutionCollection):
+        """See compute_cost_ref. Returns zero if h is fixed."""
         if sol.use_fixed_h:
-            return cp.array(0.0), cp.zeros_like(sol.xyt[0]), cp.zeros_like(sol.h[0])
+            return (
+                cp.array(0.0), 
+                cp.zeros_like(sol.xyt[0]), 
+                cp.zeros_like(sol.h[0])
+            )
         else:
             cost, grad_bound = sol.compute_cost_single_ref()
             return cost, cp.zeros_like(sol.xyt[0]), grad_bound
-    
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray, evaluate_gradient:bool):        
+
+
+    def _compute_cost(
+        self, sol: kgs.SolutionCollection, cost: cp.ndarray, 
+        grad_xyt: cp.ndarray, grad_bound: cp.ndarray, 
+        evaluate_gradient: bool
+    ):
+        """See compute_cost. Delegates to solution collection's area computation."""
         grad_xyt[:] = 0
         if sol.use_fixed_h:
             cost[:] = 0
             grad_bound[:] = 0
         else:
-            sol.compute_cost(sol, cost, grad_bound)        
+            sol.compute_cost(sol, cost, grad_bound)
+
 
 @dataclass
 class BoundaryDistanceCost(Cost):
-    use_kernel : bool = field(init=True, default=True)
-    # Cost based on squared distance of vertices outside the square boundary
-    # Per tree, use only the vertex with the maximum distance
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
-        assert(sol.N_solutions==1)
+    """
+    Cost penalizing tree vertices outside the boundary.
+    
+    For each tree, finds the vertex with maximum distance outside the square boundary
+    and adds distance^2 to the cost. Only vertices outside the boundary contribute.
+    Uses analytical gradients for efficient optimization.
+    
+    Attributes:
+        use_kernel: Use GPU kernel (default: True) vs. reference implementation
+    """
+    
+    use_kernel: bool = field(init=True, default=True)
+
+
+    def _compute_cost_single_ref(self, sol: kgs.SolutionCollection):
+        """See _compute_cost_single_ref docstring."""
+        assert sol.N_solutions == 1
         xyt = sol.xyt[0]
         h = sol.h[0]
 
         assert not sol.periodic
-        # xyt is (n_trees, 3), bound is (1,); compute squared distance for each vertex outside square
         b = float(h[0].get().item())
         half = b / 2.0
         
