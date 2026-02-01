@@ -1,21 +1,14 @@
-from unittest import runner
 import pandas as pd
 import numpy as np
-import scipy as sp
 import cupy as cp
 import kaggle_support as kgs
-from dataclasses import dataclass, field, fields
-from typeguard import typechecked
-from shapely.geometry import Polygon
-from shapely.ops import unary_union
-import shapely
+from dataclasses import dataclass, field
 import pack_cost
 import pack_vis_sol
 import pack_dynamics
 import pack_io
 import copy
 import matplotlib.pyplot as plt
-from concurrent.futures import ThreadPoolExecutor
 import lap_batch
 import pack_move
 import os
@@ -251,15 +244,15 @@ class InitializerRandomJiggled(Initializer):
             sol.canonicalize()
             #pack_vis_sol.pack_vis_sol(sol)
             #print('1')
-            if not self.ref_sol_crystal_type is None:
+            if self.ref_sol_crystal_type is not None:
                 axis1_offset = self.ref_sol_axis1_offset(generator)
                 axis2_offset = self.ref_sol_axis2_offset(generator)
                 #print(self.seed, axis1_offset, axis2_offset)
                 self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
                                                         axis1_offset=axis1_offset, axis2_offset=axis2_offset)
-            if not self.ref_N_scaling is None:
+            if self.ref_N_scaling is not None:
                 self.ref_N = int(self.ref_N_scaling * N_trees)
-            if not self.ref_sol is None:
+            if self.ref_sol is not None:
                 ref_sol_use = copy.deepcopy(self.ref_sol)
                 if self.ref_rotate is None:
                     ref_rotate = generator.uniform(0., 2*np.pi)
@@ -270,15 +263,15 @@ class InitializerRandomJiggled(Initializer):
                 for i in range(N_individuals):
                     kgs.copy_inner_part(sol.xyt[i], ref_sol_use.xyt[0], self.ref_N)
         else:
-            assert not self.fixed_h is None
+            assert self.fixed_h is not None
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))      
-            if not self.ref_sol_crystal_type is None:
+            if self.ref_sol_crystal_type is not None:
                 axis1_offset = self.ref_sol_axis1_offset(generator)
                 axis2_offset = self.ref_sol_axis2_offset(generator)
                 #print(self.seed, axis1_offset, axis2_offset)
                 self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
                                                         axis1_offset=axis1_offset, axis2_offset=axis2_offset)            
-            if not self.ref_sol is None:
+            if self.ref_sol is not None:
                 ref_sol_use = copy.deepcopy(self.ref_sol)
                 if self.ref_rotate is None:
                     ref_rotate = generator.uniform(0., 2*np.pi)
@@ -432,7 +425,7 @@ class GA(kgs.BaseClass):
                     self.best_ever[i] = copy.deepcopy(c)
             if self.best_costs_per_generation[0][-1][0]<=self.target_score:
                 self._stopped = True
-            if not self.stop_check_generations is None and len(self.champions)>0:
+            if self.stop_check_generations is not None and len(self.champions)>0:
                 assert len(self.best_costs_per_generation)==1
                 effective_stop_check_generations = self.stop_check_generations + self.champions[0].phenotype.N_trees * self.stop_check_generations_scale 
                 costs = self.best_costs_per_generation[0]          
@@ -440,7 +433,7 @@ class GA(kgs.BaseClass):
                         costs[-1][0]==costs[-effective_stop_check_generations][0] and \
                         costs[-1][1]>=self.reset_check_threshold*costs[-effective_stop_check_generations][1]:     
                     self._stopped = True        
-            if not self.reset_check_generations is None:
+            if self.reset_check_generations is not None:
                 assert len(self.best_costs_per_generation)==1
                 effective_reset_check_generations = self.reset_check_generations + \
                     int(self.reset_check_generations_ratio * (len(self.best_costs_per_generation[0])))
@@ -532,7 +525,7 @@ class GA(kgs.BaseClass):
                 self._fig, self._ax = plt.subplots(*self.make_own_fig, figsize=self.make_own_fig_size, squeeze=False)
             plot_ax = self._ax
             plt.tight_layout()
-        if not self.best_costs_per_generation_ax is None:
+        if self.best_costs_per_generation_ax is not None:
             for xx in self.best_costs_per_generation_ax:
                 ax = plot_ax[xx[2]]
                 ax.clear()
@@ -546,14 +539,14 @@ class GA(kgs.BaseClass):
                 plt.grid(True)
                 plt.xlabel('Generation')
                 plt.ylabel('Best Cost')
-        if not self.champion_genotype_ax is None:
+        if self.champion_genotype_ax is not None:
             ax = plot_ax[ self.champion_genotype_ax ]
             plt.sca(ax)
             if self._always_plot_trees or len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
                 ax.clear()
                 pack_vis_sol.pack_vis_sol(self.champions[0].genotype, ax=ax)
                 plt.title(f'Champion Genotype ({self.champions[0].phenotype.N_trees} trees)')
-        if not self.champion_phenotype_ax is None:
+        if self.champion_phenotype_ax is not None:
             ax = plot_ax[ self.champion_phenotype_ax ]
             plt.sca(ax)
             if self._always_plot_trees or len(self.best_costs_per_generation[0])<2 or kgs.lexicographic_less_than(self.best_costs_per_generation[0][-1], self.best_costs_per_generation[0][-2]):
@@ -702,7 +695,7 @@ class GAMulti(GA):
         for ga in self.ga_list:
             ga.abbreviate()
     def _diagnostic_plots(self, i_gen, plot_ax):
-        if not self.plot_subpopulation_costs_per_generation_ax is None:
+        if self.plot_subpopulation_costs_per_generation_ax is not None:
             for xx in self.plot_subpopulation_costs_per_generation_ax:
                 ax = plot_ax[xx[2]]
                 ax.clear()
@@ -1090,8 +1083,6 @@ class GAMultiTree(GAMultiIsland):
         return connectivity_matrix
 
 
-import pack_io
-import pandas as pd
 ref_solution = None
 
 @dataclass

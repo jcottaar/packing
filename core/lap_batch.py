@@ -469,7 +469,7 @@ def _ensure_initialized() -> None:
         "-o", cubin_path
     ]
     
-    print(f"=== Compiling LAP kernels ===")
+    print("=== Compiling LAP kernels ===")
     print(f"Command: {' '.join(cmd_cubin)}")
     proc = subprocess.run(cmd_cubin, text=True, capture_output=True)
     

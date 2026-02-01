@@ -4,7 +4,6 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-import kaggle_support as kgs
 
 
 __all__ = ["lbfgs"]

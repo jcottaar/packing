@@ -3,37 +3,19 @@
 # print("CUDA_MPS_LOG_DIRECTORY  =", os.environ.get("CUDA_MPS_LOG_DIRECTORY"))
 # print("mps-server running =", subprocess.run(["bash","-lc","pgrep -x nvidia-cuda-mps-server"], capture_output=True).returncode == 0)
 
-import pandas as pd
 import numpy as np
-import scipy as sp
 import cupy as cp
 import dill # like pickle but more powerful
-import itertools
 import os
 import copy
-import json
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-import IPython
 from dataclasses import dataclass, field, fields
-import enum
 import typing
-import pathlib
 import multiprocess
 multiprocess.set_start_method('spawn', force=True)
 from decorator import decorator
 from line_profiler import LineProfiler
-import os
-import gc
-import glob
-import h5py
-import time
-import sklearn
 import shutil
 import inspect
-from tqdm import tqdm
-import hashlib
-from contextlib import nullcontext
 
 
 '''
@@ -136,7 +118,7 @@ class BaseClass:
             expected_type = type_hints.get(field_name)
             actual_value = getattr(self, field_name)
             
-            if expected_type and not isinstance(actual_value, expected_type) and not actual_value is None:
+            if expected_type and not isinstance(actual_value, expected_type) and actual_value is not None:
                 raise TypeError(
                     f"Field '{field_name}' expected type {expected_type}, "
                     f"but got value {actual_value} of type {type(actual_value).__name__}.")
@@ -153,14 +135,14 @@ class BaseClass:
 
 # Small wrapper for dill loading
 def dill_load(filename):
-    filehandler = open(filename, 'rb');
+    filehandler = open(filename, 'rb')
     data = dill.load(filehandler)
     filehandler.close()
     return data
 
 # Small wrapper for dill saving
 def dill_save(filename, data):
-    filehandler = open(filename, 'wb');
+    filehandler = open(filename, 'wb')
     data = dill.dump(data, filehandler)
     filehandler.close()
     return data
@@ -269,11 +251,8 @@ def clear_gpu():
 The trees!
 '''
 
-from matplotlib.patches import Rectangle
-from shapely import affinity, touches
+from shapely import affinity
 from shapely.geometry import Polygon, Point
-from shapely.ops import unary_union
-from shapely.strtree import STRtree
 from shapely.prepared import prep
 from typeguard import typechecked
 

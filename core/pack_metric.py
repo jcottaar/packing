@@ -10,7 +10,7 @@ calculations in the shapley (v 2.1.2) library.
 from decimal import Decimal, getcontext
 
 import pandas as pd
-from shapely import affinity, touches
+from shapely import affinity
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from shapely.strtree import STRtree

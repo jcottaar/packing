@@ -1,20 +1,10 @@
 import pandas as pd
 import numpy as np
-import scipy as sp
 import cupy as cp
 import kaggle_support as kgs
-from dataclasses import dataclass, field, fields
-from typeguard import typechecked
-from shapely.geometry import Polygon
-from shapely.ops import unary_union
-import shapely
 import pack_cost
-import pack_vis_sol
 import pack_dynamics
 import copy
-import matplotlib.pyplot as plt
-from concurrent.futures import ThreadPoolExecutor
-import lap_batch
 import pack_metric
 
 def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True, line_search=False, verbose=True, scaling=1.):
@@ -105,7 +95,7 @@ def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1., return_sco
                 try:
                     pack_metric.score(submission_copy, submission_copy, '', allow_error=False)
                     return False
-                except Exception as err:
+                except Exception:
                     #rint(err)
                     return True
 

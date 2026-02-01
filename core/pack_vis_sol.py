@@ -1,7 +1,4 @@
-import pandas as pd
 import numpy as np
-import scipy as sp
-import cupy as cp
 import kaggle_support as kgs
 from shapely import affinity
 import matplotlib.pyplot as plt

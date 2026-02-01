@@ -1,11 +1,6 @@
-from unittest import case
-import pandas as pd
 import numpy as np
-import scipy as sp
 import cupy as cp
 import kaggle_support as kgs
-from dataclasses import dataclass, field, fields
-from typeguard import typechecked
 import pack_cost
 import pack_cuda
 import pack_cuda_primitives_test
@@ -289,7 +284,7 @@ def test_costs():
                 assert cp.array_equal(vec_fast_grad_bound_i, stored_fast[2][0]), \
                     f"Vectorized fast bound grad mismatch for {c.__class__.__name__} tree {i}"
             
-            print(f"  ✓ Vectorized results exactly match individual calls")
+            print("  ✓ Vectorized results exactly match individual calls")
 
         
         # # Timing comparisons

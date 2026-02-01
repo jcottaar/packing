@@ -1,12 +1,9 @@
-import pandas as pd
 import numpy as np
-import scipy as sp
 import cupy as cp
 import kaggle_support as kgs
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typeguard import typechecked
 from shapely.geometry import Polygon
-from shapely.ops import unary_union
 import shapely
 import pack_cuda
 import copy
@@ -947,7 +944,7 @@ class CollisionCostExactSeparation(CollisionCost):
                     print(f"Loading cached lookup table from {cache_path}...")
                     with open(cache_path, 'rb') as f:
                         self._lut = pickle.load(f)
-                    print(f"Successfully loaded cached lookup table")
+                    print("Successfully loaded cached lookup table")
                     return
                 except Exception as e:
                     print(f"Warning: Failed to load cache ({e}), rebuilding...")
@@ -998,7 +995,7 @@ class CollisionCostExactSeparation(CollisionCost):
             print(f"Saving lookup table to cache: {cache_path}...")
             with open(cache_path, 'wb') as f:
                 pickle.dump(lut, f)
-            print(f"Successfully cached lookup table")
+            print("Successfully cached lookup table")
     
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection):
         """Not implemented - this class requires lookup table."""

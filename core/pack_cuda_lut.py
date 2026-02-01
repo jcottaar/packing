@@ -25,7 +25,6 @@ import kaggle_support as kgs
 import os
 import subprocess
 import shutil
-import math
 
 MAX_RADIUS = kgs.tree_max_radius
 
@@ -249,7 +248,7 @@ class LookupTable:
             total_removed = (N_x * N_y * N_theta) - (len(X_trim) * len(Y_trim) * len(theta_trim))
             pct = 100 * total_removed / (N_x * N_y * N_theta)
 
-            print(f"Trimming non-positive edges:")
+            print("Trimming non-positive edges:")
             print(f"  X: {N_x} -> {len(X_trim)} (removed {removed_x})")
             print(f"  Y: {N_y} -> {len(Y_trim)} (removed {removed_y})")
             print(f"  Theta: {N_theta} -> {len(theta_trim)} (removed {removed_theta})")
@@ -795,7 +794,7 @@ def _ensure_initialized() -> None:
     if _initialized:
         return
 
-    print(f'Compiling CUDA LUT kernel one-time only)')
+    print('Compiling CUDA LUT kernel one-time only)')
 
     # Prepare CUDA source (only MAX_RADIUS and USE_TEXTURE are compile-time constants)
     cuda_src = _CUDA_SRC
@@ -860,7 +859,7 @@ def _ensure_initialized() -> None:
     
     # Print kernel info
     kernel = _multi_overlap_lut_kernel
-    print(f"Kernel multi_overlap_lut_total:")
+    print("Kernel multi_overlap_lut_total:")
     print(f"  Registers: {kernel.num_regs}")
     print(f"  Shared mem: {kernel.shared_size_bytes} bytes")
     print(f"  Max threads/block: {kernel.max_threads_per_block}")

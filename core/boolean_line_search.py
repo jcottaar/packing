@@ -1,4 +1,3 @@
-import copy
 import kaggle_support as kgs
 
 def boolean_line_search(f, lo, hi, max_iter=60, tol=1e-20):
