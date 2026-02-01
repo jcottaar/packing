@@ -646,8 +646,6 @@ class SolutionCollectionSquare(SolutionCollection):
         # tree_vertices shape: (n_vertices, 2)
         
         n_solutions = self.xyt.shape[0]
-        n_trees = self.xyt.shape[1]
-        n_vertices = tree_vertices.shape[0]
         
         # Extract pose components
         x = self.xyt[:, :, 0:1]  # (n_solutions, n_trees, 1)
@@ -922,7 +920,6 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
         - 180°: (-x, -y, θ + π)
         - 270°: (y, -x, θ + 3π/2)
         """
-        N_solutions = self.N_solutions
         N_trees_gen = self.xyt.shape[1]
         
         # Extract genotype components
@@ -959,7 +956,6 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
         Each genotype tree affects 4 phenotype trees through the rotation transformations.
         We sum the contributions using the chain rule.
         """
-        N_solutions = self.N_solutions
         N_trees_gen = self.xyt.shape[1]
         
         # Extract phenotype gradients for each image
@@ -1109,7 +1105,6 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
         - 0°:   (x, y, θ)
         - 180°: (-x, -y, θ + π)
         """
-        N_solutions = self.N_solutions
         N_trees_gen = self.xyt.shape[1]
         
         # Extract genotype components
@@ -1136,7 +1131,6 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
         Each genotype tree affects 2 phenotype trees through the rotation transformations.
         We sum the contributions using the chain rule.
         """
-        N_solutions = self.N_solutions
         N_trees_gen = self.xyt.shape[1]
         
         # Extract phenotype gradients for each image
@@ -1386,10 +1380,6 @@ class SolutionCollectionLattice(SolutionCollection):
             grad_bound: (3,) array with derivatives [d/da, d/db, d/dangle]
         """
         h = self.h[0]
-        a_length = float(h[0].get().item())
-        b_length = float(h[1].get().item())
-        angle = float(h[2].get().item())
-
         sin_angle = cp.sin(h[2])
         cos_angle = cp.cos(h[2])
 

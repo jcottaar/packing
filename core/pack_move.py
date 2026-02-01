@@ -164,14 +164,7 @@ class MoveRandomTree(Move):
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: randomly reposition selected trees in multiple individuals."""
-        new_h = population.genotype.h
-        new_xyt = population.genotype.xyt
-        N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
-
-        # Get h parameters (on GPU)
-        h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
-        h_sizes = h_params[:, 0]
 
         # Generate all random values at once (GPU-based RNG)
         trees_to_mutate_gpu = _sample_trees_to_mutate(population, inds_to_do, generator)
@@ -179,6 +172,7 @@ class MoveRandomTree(Move):
         new_theta_gpu = generator.uniform(-cp.pi, cp.pi, size=N_moves)
 
         # Apply updates using fancy indexing (fully vectorized on GPU)
+        new_xyt = population.genotype.xyt
         new_xyt[inds_to_do, trees_to_mutate_gpu, 0] = new_x_gpu
         new_xyt[inds_to_do, trees_to_mutate_gpu, 1] = new_y_gpu
         new_xyt[inds_to_do, trees_to_mutate_gpu, 2] = new_theta_gpu  
@@ -191,7 +185,6 @@ class JiggleRandomTree(Move):
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: jiggle random trees in multiple individuals."""
         new_xyt = population.genotype.xyt
-        N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
 
         # Generate all random values at once (GPU-based RNG)
@@ -214,14 +207,9 @@ class JiggleCluster(Move):
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Fully vectorized version: jiggle variable numbers of trees in clusters."""
-        new_h = population.genotype.h
         new_xyt = population.genotype.xyt
         N_trees = new_xyt.shape[1]
         N_moves = int(inds_to_do.shape[0])
-
-        # Get h parameters (on GPU)
-        h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
-        h_sizes = h_params[:, 0]
 
         # Generate random centers (GPU-based RNG) - shape (N_moves, 1)
         #center_x_all = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]
@@ -276,7 +264,6 @@ class Translate(Move):
         """Vectorized version: translate all trees in multiple individuals."""
         new_h = population.genotype.h
         new_xyt = population.genotype.xyt
-        N_moves = int(inds_to_do.shape[0])
 
         # Get h parameters (on GPU)
         h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
@@ -299,15 +286,10 @@ class Twist(Move):
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: twist trees around centers in multiple individuals."""
-        new_h = population.genotype.h
         new_xyt = population.genotype.xyt
         N_moves = int(inds_to_do.shape[0])
 
-        # Get h parameters (on GPU)
-        h_params = new_h[inds_to_do]  # (N_moves, 3) on GPU
-
         # Generate all random parameters at once (vectorized RNG on GPU)
-        h_sizes = h_params[:, 0]
         #center_x_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]  # (N_moves, 1)
         #center_y_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]  # (N_moves, 1)
         center_x_gpu, center_y_gpu = population.genotype.generate_move_centers(None, inds_to_do, generator)
@@ -455,7 +437,6 @@ class Crossover(Move):
 
         # Compute centers of mass (with masking for valid trees only)
         # Sum only valid trees and divide by count
-        mask_expanded = valid_mask[:, :, cp.newaxis]  # (N_moves, max_n_trees, 1)
         individual_centers_x = cp.sum(selected_individual_positions[:, :, 0] * valid_mask, axis=1) / cp.sum(valid_mask, axis=1)  # (N_moves,)
         individual_centers_y = cp.sum(selected_individual_positions[:, :, 1] * valid_mask, axis=1) / cp.sum(valid_mask, axis=1)  # (N_moves,)
         mate_centers_x = cp.sum(selected_mate_positions[:, :, 0] * valid_mask, axis=1) / cp.sum(valid_mask, axis=1)  # (N_moves,)
@@ -615,7 +596,6 @@ class CrossoverStripe(Move):
         mate_h_params = mate_sol.h[inds_mate]
 
         # Sample a random point inside each square to anchor the crossover stripe
-        h_sizes = h_params[:, 0]
         # if isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90):
         #     if not self.decouple_mate_location:
         #         offset_x_all = generator.uniform(-h_sizes / 2, 0.)

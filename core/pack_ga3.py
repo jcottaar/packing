@@ -724,7 +724,6 @@ class GAMulti(GA):
             for ga in self.ga_list[1:]:
                 champions_pop.merge(ga.champions[0].genotype)
             # Compute diversity matrix
-            N_sols = champions_pop.N_solutions
             diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(champions_pop.xyt), cp.array(champions_pop.xyt)).get()
             im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
             if not hasattr(ax, '_colorbar') or ax._colorbar is None:
@@ -1212,7 +1211,6 @@ class GASinglePopulation(GA):
             plt.sca(ax)
             pop = self.population.genotype
             # Compute diversity matrix
-            N_sols = pop.N_solutions
             diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt)).get()
             im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
             if not hasattr(ax, '_colorbar') or ax._colorbar is None:
@@ -1228,7 +1226,6 @@ class GASinglePopulation(GA):
             plt.sca(ax)
             pop = self.population.genotype
             # Compute diversity matrix
-            N_sols = pop.N_solutions
             import lap_batch
             diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt), lap_config = lap_batch.LAPConfig(algorithm='auction')).get() - \
                 kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt), lap_config = lap_batch.LAPConfig(algorithm='hungarian')).get()

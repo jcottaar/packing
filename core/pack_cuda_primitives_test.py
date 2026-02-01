@@ -659,8 +659,6 @@ def test_line_intersection():
         if idx == 0:
             print("✓ Forward results match with and without gradients")
         
-        intersection = intersection_with_grad
-        
         # Get analytical gradients for this case
         d_p1_case = d_p1.get()[0]
         d_p2_case = d_p2.get()[0]
@@ -1088,7 +1086,6 @@ def test_polygon_area():
         if idx == 0:
             print("✓ Forward results match with and without gradients")
         
-        area = float(areas_with_grad[0])
         d_verts = grads[0].get()
         
         n_verts = poly_np.shape[0]

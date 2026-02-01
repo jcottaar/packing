@@ -963,7 +963,6 @@ class CollisionCostExactSeparation(CollisionCost):
                 Returns raw signed separation distances (positive = overlap, negative = clearance).
                 The quadratic transform is applied later in _compute_cost().
                 """
-                N = len(dx)
                 
                 # Tree positions for separation_distance
                 # Tree1 always at origin with rotation 0
@@ -1278,8 +1277,6 @@ class BoundaryDistanceCost(Cost):
         offset_y = h[2]  # (scalar)
         
         n_trees = xyt.shape[0]
-        
-        epsilon = 1e-6
         
         # Extract positions
         x = xyt[:, 0:1]  # (n_trees, 1)

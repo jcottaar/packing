@@ -478,7 +478,6 @@ def lbfgs(
     loss_change_buffer = torch.zeros(M, dtype=dtype, device=device)
     append_mask_buffer = torch.zeros(M, dtype=torch.bool, device=device)
     shift_mask_buffer = torch.zeros(M, dtype=torch.bool, device=device)
-    step_norm_buffer = torch.zeros(M, dtype=dtype, device=device)
 
     n_iter = 0
     prev_loss = loss.clone()

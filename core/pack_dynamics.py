@@ -151,8 +151,7 @@ class Optimizer(kgs.BaseClass):
         xyt = sol.xyt
         h = sol.h        
         
-        n_ensembles = xyt.shape[0]
-        n_trees = xyt.shape[1] 
+        n_ensembles = xyt.shape[0] 
 
         if self.plot_interval is not None:
             fig, ax = plt.subplots(figsize=(8, 8))
@@ -305,7 +304,6 @@ class Dynamics(kgs.BaseClass):
         cost1 = copy.deepcopy(self.cost1)
 
         n_ensembles = sol.xyt.shape[0]
-        n_trees = sol.xyt.shape[1]
         assert self.dt_list.shape == self.friction_list.shape == self.cost_0_scaling_list.shape
         assert self.temperature_list.shape == self.dt_list.shape
         assert self.dt_list.shape[0] == n_ensembles
@@ -348,7 +346,6 @@ class Dynamics(kgs.BaseClass):
             # Step 2: Compute forces at midpoint
             cost0.compute_cost(sol, total_cost0, total_grad0, bound_grad0)
             cost1.compute_cost(sol, total_cost1, total_grad1, bound_grad1)
-            total_cost = total_cost0 * cost_0_scaling + total_cost1
             total_grad = total_grad0 * cost_0_scaling[:, None, None] + total_grad1
             bound_grad = bound_grad0 * cost_0_scaling[:, None] + bound_grad1
             
@@ -421,7 +418,6 @@ class DynamicsInitialize(Dynamics):
             self.cost1.costs[1] = pack_cost.CollisionCostSeparation(scaling=self.scaling_overlap)   
         if sol.periodic:
             self.cost1.costs.pop(0)
-        t_total = kgs.dtype_np(0.)
         dt = kgs.dtype_np(self.dt)
         phase = 'init'
         t_this_phase = kgs.dtype_np(0.)        
@@ -590,7 +586,6 @@ class OptimizerGraph(Optimizer):
         h = sol.h
 
         n_ensembles = xyt.shape[0]
-        n_trees = xyt.shape[1]
 
         # Pre-allocate gradient arrays once (float32 for efficiency)
         total_cost = cp.zeros(n_ensembles, dtype=kgs.dtype_cp)
