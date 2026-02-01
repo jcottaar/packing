@@ -398,187 +398,6 @@ __device__ double overlap_ref_with_list_piece(
     return sum;
 }
 
-
-
-// Compute the area of a single convex polygon that lies outside the square [-h/2, h/2] x [-h/2, h/2]
-// Uses the clipping algorithm to find the intersection with the square, then subtracts from polygon area
-__device__ double convex_area_outside_square(
-    const d2* __restrict__ poly,
-    const int n,
-    const double h)
-{
-    if (n < 3) return 0.0;
-    
-    double half_h = h * 0.5;
-    
-    // Define square vertices (CCW order)
-    d2 square[4];
-    square[0] = make_double2(-half_h, -half_h);
-    square[1] = make_double2(half_h, -half_h);
-    square[2] = make_double2(half_h, half_h);
-    square[3] = make_double2(-half_h, half_h);
-    
-    // Compute intersection area between polygon and square (no gradients needed)
-    double intersection_area = convex_intersection_area(poly, n, square, 4, NULL, NULL);
-    
-    // Compute total polygon area
-    double total_area = 0.0;
-    for (int i = 0; i < n; ++i) {
-        int j = (i + 1) % n;
-        total_area += poly[i].x * poly[j].y - poly[j].x * poly[i].y;
-    }
-    total_area = fabs(total_area) * 0.5;
-    
-    // Area outside = total area - intersection area
-    return total_area - intersection_area;
-}
-
-// Compute total area outside square boundary for one piece (pi) of one tree
-// Also computes gradients w.r.t. pose (x, y, theta) and h using finite differences
-__device__ double boundary_area_piece(
-    const double3 pose,
-    const double h,
-    const int pi,  // piece index to process (0-3)
-    double3* d_pose,  // output: gradient w.r.t. pose (can be NULL)
-    double* d_h)      // output: gradient w.r.t. h (can be NULL)
-{
-    // Compute transformed polygon for this piece
-    d2 poly[MAX_VERTS_PER_PIECE];
-    double aabb_min_x, aabb_max_x, aabb_min_y, aabb_max_y;
-    
-    compute_tree_poly_and_aabb(pose, pi, poly, aabb_min_x, aabb_max_x,
-                                aabb_min_y, aabb_max_y);
-    
-    int n = const_piece_nverts[pi];
-    
-    // Compute area outside square for this piece
-    double area = convex_area_outside_square(poly, n, h);
-    
-    // Compute gradients using finite differences if requested
-    if (d_pose != NULL || d_h != NULL) {
-        const double eps = 1e-3;
-        
-        if (d_pose != NULL) {
-            // Gradient w.r.t. x
-            double3 pose_plus = pose;
-            pose_plus.x += eps;
-            d2 poly_plus[MAX_VERTS_PER_PIECE];
-            compute_tree_poly_and_aabb(pose_plus, pi, poly_plus, aabb_min_x, aabb_max_x,
-                                        aabb_min_y, aabb_max_y);
-            double area_plus = convex_area_outside_square(poly_plus, n, h);
-            
-            double3 pose_minus = pose;
-            pose_minus.x -= eps;
-            d2 poly_minus[MAX_VERTS_PER_PIECE];
-            compute_tree_poly_and_aabb(pose_minus, pi, poly_minus, aabb_min_x, aabb_max_x,
-                                        aabb_min_y, aabb_max_y);
-            double area_minus = convex_area_outside_square(poly_minus, n, h);
-            
-            d_pose->x = (area_plus - area_minus) / (2.0 * eps);
-            
-            // Gradient w.r.t. y
-            pose_plus = pose;
-            pose_plus.y += eps;
-            compute_tree_poly_and_aabb(pose_plus, pi, poly_plus, aabb_min_x, aabb_max_x,
-                                        aabb_min_y, aabb_max_y);
-            area_plus = convex_area_outside_square(poly_plus, n, h);
-            
-            pose_minus = pose;
-            pose_minus.y -= eps;
-            compute_tree_poly_and_aabb(pose_minus, pi, poly_minus, aabb_min_x, aabb_max_x,
-                                        aabb_min_y, aabb_max_y);
-            area_minus = convex_area_outside_square(poly_minus, n, h);
-            
-            d_pose->y = (area_plus - area_minus) / (2.0 * eps);
-            
-            // Gradient w.r.t. theta
-            pose_plus = pose;
-            pose_plus.z += eps;
-            compute_tree_poly_and_aabb(pose_plus, pi, poly_plus, aabb_min_x, aabb_max_x,
-                                        aabb_min_y, aabb_max_y);
-            area_plus = convex_area_outside_square(poly_plus, n, h);
-            
-            pose_minus = pose;
-            pose_minus.z -= eps;
-            compute_tree_poly_and_aabb(pose_minus, pi, poly_minus, aabb_min_x, aabb_max_x,
-                                        aabb_min_y, aabb_max_y);
-            area_minus = convex_area_outside_square(poly_minus, n, h);
-            
-            d_pose->z = (area_plus - area_minus) / (2.0 * eps);
-        }
-        
-        if (d_h != NULL) {
-            // Gradient w.r.t. h
-            double area_plus = convex_area_outside_square(poly, n, h + eps);
-            double area_minus = convex_area_outside_square(poly, n, h - eps);
-            *d_h = (area_plus - area_minus) / (2.0 * eps);
-        }
-    }
-    
-    return area;
-}
-
-// Compute total boundary violation area for a list of trees
-// Each tree consists of 4 convex pieces
-// Uses N*2 threads: each thread handles 2 pieces of each tree
-__device__ void boundary_list_total(
-    const double* __restrict__ xyt_Nx3,  // flattened: [n, 3] in C-contiguous layout
-    const int n,
-    const double h,
-    double* __restrict__ out_total,
-    double* __restrict__ out_grads,  // if non-NULL, write gradients [n*3]
-    double* __restrict__ out_grad_h)  // if non-NULL, write gradient w.r.t. h
-{
-    // Thread organization: 2 threads per tree, each handles 2 pieces
-    // tid = tree_idx * 2 + half_idx
-    int tid = threadIdx.x;
-    int tree_idx = tid / 2;       // which tree (0 to n-1)
-    int half_idx = tid % 2;       // which half (0 = pieces 0,1; 1 = pieces 2,3)
-    int piece_idx_base = half_idx * 2;  // starting piece index for this thread
-    
-    double local_area = 0.0;
-    
-    if (tree_idx < n) {
-        // Read pose with strided access: [tree_idx, component]
-        double3 pose;
-        pose.x = xyt_Nx3[tree_idx * 3 + 0];
-        pose.y = xyt_Nx3[tree_idx * 3 + 1];
-        pose.z = xyt_Nx3[tree_idx * 3 + 2];
-        
-        // Process 2 pieces sequentially
-        for (int p = 0; p < 2; ++p) {
-            int piece_idx = piece_idx_base + p;
-            
-            // Compute gradients if requested
-            double3 d_pose;
-            double d_h_local;
-            
-            // Each thread computes area outside boundary for one piece with gradients
-            double piece_area = boundary_area_piece(pose, h, piece_idx, 
-                                              (out_grads != NULL) ? &d_pose : NULL,
-                                              (out_grad_h != NULL) ? &d_h_local : NULL);
-            local_area += piece_area;
-            
-            // Accumulate gradients if computed
-            if (out_grads != NULL) {
-                // Each of the 2 threads for this tree contributes gradient from its 2 pieces
-                // Write to [tree_idx, component] layout
-                atomicAdd(&out_grads[tree_idx * 3 + 0], d_pose.x);
-                atomicAdd(&out_grads[tree_idx * 3 + 1], d_pose.y);
-                atomicAdd(&out_grads[tree_idx * 3 + 2], d_pose.z);
-            }
-            
-            if (out_grad_h != NULL) {
-                // All threads contribute to d/dh
-                atomicAdd(out_grad_h, d_h_local);
-            }
-        }
-        
-        // Atomic add for total area
-        atomicAdd(out_total, local_area);
-    }
-}
-
 // Sum overlaps between trees in xyt1 and trees in xyt2.
 // Each tree in xyt1 is compared against all trees in xyt2.
 // Identical poses are automatically skipped.
@@ -730,67 +549,6 @@ __global__ void multi_overlap_list_total(
 
     // Call overlap_list_total - it now reads (n_trees, 3) format directly
     overlap_list_total(xyt1_ensemble, n1, xyt2_ensemble, n2, out_total, out_grads, use_separation, use_crystal, crystal_axes, only_self_interactions, N_periodic);
-}
-
-// Multi-ensemble kernel for boundary: one block per ensemble
-// Each block processes one ensemble by calling boundary_list_total
-//
-// Accepts single 3D array with strided access - no transpose needed
-// Parameters:
-//   xyt_base: base pointer to 3D array [num_ensembles, n_trees, 3] in C-contiguous layout
-//   n_trees: number of trees per ensemble (same for all)
-//   h_list: array of h values (boundary size) for each ensemble
-//   out_totals: array of output totals, one per ensemble
-//   out_grads_base: base pointer to gradient output [num_ensembles, n_trees, 3] (can be NULL)
-//   out_grad_h: array of h gradients [num_ensembles] (can be NULL)
-//   num_ensembles: number of ensembles to process
-__global__ void multi_boundary_list_total(
-    const double* __restrict__ xyt_base,       // base pointer to [num_ensembles, n_trees, 3]
-    const int n_trees,                          // number of trees per ensemble
-    const double* __restrict__ h_list,         // [num_ensembles]
-    double* __restrict__ out_totals,           // [num_ensembles]
-    double* __restrict__ out_grads_base,       // base pointer to [num_ensembles, n_trees, 3] (NULL allowed)
-    double* __restrict__ out_grad_h,           // [num_ensembles] (NULL allowed)
-    const int num_ensembles)
-{
-    int ensemble_id = blockIdx.x;
-    
-    if (ensemble_id >= num_ensembles) {
-        return;  // Extra blocks beyond num_ensembles
-    }
-    
-    // Calculate offset for this ensemble's data using strided access
-    // Layout: [num_ensembles, n_trees, 3]
-    // Stride: each ensemble is n_trees*3 elements apart
-    int ensemble_stride = n_trees * 3;
-    const double* xyt_ensemble = xyt_base + ensemble_id * ensemble_stride;
-    
-    // Parameters for boundary_list_total
-    int n = n_trees;
-    double h = h_list[ensemble_id];
-    double* out_total = &out_totals[ensemble_id];
-    double* out_grads = (out_grads_base != NULL) ? (out_grads_base + ensemble_id * ensemble_stride) : NULL;
-    double* out_grad_h_elem = (out_grad_h != NULL) ? &out_grad_h[ensemble_id] : NULL;
-    
-    // Initialize outputs
-    if (threadIdx.x == 0) {
-        *out_total = 0.0;
-        if (out_grad_h_elem != NULL) {
-            *out_grad_h_elem = 0.0;
-        }
-    }
-    // Initialize gradient buffer
-    if (out_grads != NULL) {
-        int tid = threadIdx.x;
-        int max_tid = n_trees * 2;  // 2 threads per tree
-        for (int idx = tid; idx < n_trees * 3; idx += max_tid) {
-            out_grads[idx] = 0.0;
-        }
-    }
-    __syncthreads();
-    
-    // Call boundary_list_total - it now reads (n_trees, 3) format directly
-    boundary_list_total(xyt_ensemble, n, h, out_total, out_grads, out_grad_h_elem);
 }
 
 // Compute boundary distance cost for a single tree
@@ -1021,7 +779,6 @@ _num_pieces: int = 0
 
 # Compiled CUDA modules and kernels
 _raw_module: cp.RawModule | None = None
-_multi_boundary_list_total_kernel: cp.RawKernel | None = None
 _multi_boundary_distance_list_total_kernel: cp.RawKernel | None = None
 
 # Three specialized overlap kernel variants (reduce register pressure)
@@ -1111,7 +868,7 @@ def _ensure_initialized() -> None:
     """
     
     global _initialized, _piece_xy_d, _piece_nverts_d
-    global _num_pieces, _raw_module, _multi_boundary_list_total_kernel, _multi_boundary_distance_list_total_kernel
+    global _num_pieces, _raw_module, _multi_boundary_distance_list_total_kernel
     global _multi_overlap_list_total_kernel_crystal, _multi_overlap_list_total_kernel_no_sep, _multi_overlap_list_total_kernel_sep
 
     if _initialized:
@@ -1247,8 +1004,6 @@ def _ensure_initialized() -> None:
 
     # Use the first module for boundary kernels (they don't use the specialized branches)
     _raw_module = module_crystal
-    _multi_boundary_list_total_kernel = _raw_module.get_function("multi_boundary_list_total")
-    print_kernel_attributes(_multi_boundary_list_total_kernel, "multi_boundary_list_total")
 
     _multi_boundary_distance_list_total_kernel = _raw_module.get_function("multi_boundary_distance_list_total")
     print_kernel_attributes(_multi_boundary_distance_list_total_kernel, "multi_boundary_distance_list_total")
@@ -1432,113 +1187,6 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
             ),
             stream=stream,
         )
-
-def boundary_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, out_grad_h: cp.ndarray | None = None, stream: cp.cuda.Stream | None = None):
-    """Compute total boundary violation area for multiple ensembles in parallel.
-    
-    Parameters
-    ----------
-    xyt : cp.ndarray, shape (n_ensembles, n_trees, 3)
-        Pose arrays. Must be C-contiguous and correct dtype.
-    h : cp.ndarray, shape (n_ensembles,)
-        Boundary sizes for each ensemble.
-    out_cost : cp.ndarray, shape (n_ensembles,)
-        Preallocated array for output costs. Must be provided.
-    out_grads : cp.ndarray, shape (n_ensembles, n_trees, 3), optional
-        Preallocated array for gradients. If None, gradients are not computed.
-    out_grad_h : cp.ndarray, shape (n_ensembles,), optional
-        Preallocated array for h gradients. If None, h gradients are not computed.
-    stream : cp.cuda.Stream, optional
-        CUDA stream for kernel execution. If None, uses default stream.
-    """
-    _ensure_initialized()
-    
-    num_ensembles = xyt.shape[0]
-    n_trees = xyt.shape[1]
-    dtype = xyt.dtype
-    
-    if num_ensembles == 0:
-        return
-    
-    if kgs.debugging_mode >= 2:
-        # Determine expected dtype based on kgs.USE_FLOAT32
-        expected_dtype = kgs.dtype_cp if kgs.USE_FLOAT32 else kgs.dtype_cp
-        
-        # Assert inputs are correct shape
-        if xyt.ndim != 3 or xyt.shape[2] != 3:
-            raise ValueError(f"xyt must be shape (n_ensembles, n_trees, 3), got {xyt.shape}")
-        if h.ndim != 1:
-            raise ValueError(f"h must be 1D array, got shape {h.shape}")
-        
-        # Assert correct dtype
-        if xyt.dtype != expected_dtype:
-            raise ValueError(f"xyt must have dtype {expected_dtype}, got {xyt.dtype}")
-        if h.dtype != expected_dtype:
-            raise ValueError(f"h must have dtype {expected_dtype}, got {h.dtype}")
-        
-        # Assert contiguous
-        if not xyt.flags.c_contiguous:
-            raise ValueError("xyt must be C-contiguous")
-        
-        if h.shape[0] != num_ensembles:
-            raise ValueError(f"h must have {num_ensembles} elements, got {h.shape[0]}")
-        
-        # Assert outputs are provided
-        if out_cost is None:
-            raise ValueError("out_cost must be provided")
-        
-        # Validate output array shapes and types
-        if out_cost.shape != (num_ensembles,):
-            raise ValueError(f"out_cost must have shape ({num_ensembles},), got {out_cost.shape}")
-        if out_grads is not None:
-            if out_grads.shape != (num_ensembles, n_trees, 3):
-                raise ValueError(f"out_grads must have shape ({num_ensembles}, {n_trees}, 3), got {out_grads.shape}")
-            if out_grads.dtype != dtype:
-                raise ValueError(f"out_grads must have dtype {dtype}, got {out_grads.dtype}")
-            if not out_grads.flags.c_contiguous:
-                raise ValueError("out_grads must be C-contiguous")
-        if out_grad_h is not None:
-            if out_grad_h.shape != (num_ensembles,):
-                raise ValueError(f"out_grad_h must have shape ({num_ensembles},), got {out_grad_h.shape}")
-            if out_grad_h.dtype != dtype:
-                raise ValueError(f"out_grad_h must have dtype {dtype}, got {out_grad_h.dtype}")
-            if not out_grad_h.flags.c_contiguous:
-                raise ValueError("out_grad_h must be C-contiguous")
-        if out_cost.dtype != dtype:
-            raise ValueError(f"out_cost must have dtype {dtype}, got {out_cost.dtype}")
-        if not out_cost.flags.c_contiguous:
-            raise ValueError("out_cost must be C-contiguous")
-    
-    # Zero the output arrays
-    out_cost[:] = 0
-    if out_grads is not None:
-        out_grads[:] = 0
-    if out_grad_h is not None:
-        out_grad_h[:] = 0
-    
-    # Launch kernel: one block per ensemble, n_trees * 2 threads per block
-    # (each thread handles 2 polygon pieces to reduce register pressure)
-    blocks = num_ensembles
-    threads_per_block = n_trees * 2
-    
-    # Pass null pointers if gradients are None
-    out_grads_ptr = out_grads if out_grads is not None else np.intp(0)
-    out_grad_h_ptr = out_grad_h if out_grad_h is not None else np.intp(0)
-    
-    _multi_boundary_list_total_kernel(
-        (blocks,),
-        (threads_per_block,),
-        (
-            xyt,
-            np.int32(n_trees),
-            h,
-            out_cost,
-            out_grads_ptr,
-            out_grad_h_ptr,
-            np.int32(num_ensembles),
-        ),
-        stream=stream,
-    )
 
 
 def boundary_distance_multi_ensemble(xyt: cp.ndarray, h: cp.ndarray, out_cost: cp.ndarray = None, out_grads: cp.ndarray | None = None, out_grad_h: cp.ndarray | None = None, stream: cp.cuda.Stream | None = None):
