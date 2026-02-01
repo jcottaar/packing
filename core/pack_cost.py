@@ -552,9 +552,6 @@ class CollisionCostSeparation(CollisionCost):
     # Cost = sum(separation_distance^2) over all pairwise overlaps
     # Only overlapping pairs contribute (separated pairs have zero cost)
     # Separation distance = minimum distance trees must move to no longer overlap
-
-    use_max:bool = field(init=True, default=False)
-    TEMP_use_kernel:bool = field(init=True, default=False)
     
     def _compute_separation_distance(
         self,
@@ -817,73 +814,25 @@ class CollisionCostSeparation(CollisionCost):
 
             for (pa_world, pa_local) in pieces_a:
                 for (pb_world, pb_world2) in pieces_b:
-                    if self.TEMP_use_kernel:
-                        import pack_cuda_primitives_test
-                        raise NotImplementedError("TEMP_use_kernel path not fully integrated.")
-                        sep, grad = pack_cuda_primitives_test.sat_separation_with_grad_pose_fwd_bwd(
-                            cp.array(pa_local, dtype=cp.float64),
-                            cp.array(pb_world2, dtype=cp.float64),
-                            # convert these to float64
-                            cp.array(x1, dtype=cp.float64),
-                            cp.array(y1, dtype=cp.float64),
-                            cp.array(np.cos(th1), dtype=cp.float64),
-                            cp.array(np.sin(th1), dtype=cp.float64),
-                            compute_gradients=True
+                    sep, dsep_dx, dsep_dy, dsep_dtheta = \
+                        self._compute_separation_distance(
+                            poly1_world=pa_world,
+                            poly2_world=pb_world,
+                            local_coords1=pa_local,
+                            x1=x1,
+                            y1=y1,
+                            th1=th1,
                         )
-                        dsep_dx, dsep_dy, dsep_dtheta = grad
-                    else:
-                        sep, dsep_dx, dsep_dy, dsep_dtheta = \
-                            self._compute_separation_distance(
-                                poly1_world=pa_world,
-                                poly2_world=pb_world,
-                                local_coords1=pa_local,
-                                x1=x1,
-                                y1=y1,
-                                th1=th1,
-                            )
-                        # import pack_cuda_primitives_test
-                        # sep2, grad2 = pack_cuda_primitives_test.sat_separation_with_grad_pose_fwd_bwd(
-                        #     cp.array(pa_local),
-                        #     cp.array(pb_world2),
-                        #     x1, y1, np.cos(th1), np.sin(th1),
-                        #     compute_gradients=True
-                        # )
-                        # print(sep, sep2.get().item())
-                        # print( (dsep_dx, dsep_dy, dsep_dtheta), grad2)
-                        # print('')
 
-                    if self.use_max:
-                        if sep > max_sep:
-                            max_sep = sep
-                            best_dsep_dx = dsep_dx
-                            best_dsep_dy = dsep_dy
-                            best_dsep_dtheta = dsep_dtheta
-                    else:
-                        # Sum contributions over all piece-pairs instead of taking the max.
-                        if sep <= 0.0:
-                            continue
-                        # Add sep^2 contribution and its gradient 2*sep*dsep
-                        total_sep_squared += sep ** 2
-                        grad = cp.zeros_like(xyt1)
-                        grad[0] = 2.0 * sep * float(dsep_dx)
-                        grad[1] = 2.0 * sep * float(dsep_dy)
-                        grad[2] = 2.0 * sep * float(dsep_dtheta)
-                        total_grad += grad
-
-            # If using max behavior, handle the accumulated max for this other-tree.
-            if self.use_max:
-                if max_sep <= 0.0:
+                # Sum contributions over all piece-pairs instead of taking the max.
+                if sep <= 0.0:
                     continue
-
-                # Cost contribution: sep^2
-                total_sep_squared += max_sep ** 2
-
-                # Gradient of sep^2: 2 * sep * dsep/dparam
+                # Add sep^2 contribution and its gradient 2*sep*dsep
+                total_sep_squared += sep ** 2
                 grad = cp.zeros_like(xyt1)
-                grad[0] = 2.0 * max_sep * float(best_dsep_dx)
-                grad[1] = 2.0 * max_sep * float(best_dsep_dy)
-                grad[2] = 2.0 * max_sep * float(best_dsep_dtheta)
-
+                grad[0] = 2.0 * sep * float(dsep_dx)
+                grad[1] = 2.0 * sep * float(dsep_dy)
+                grad[2] = 2.0 * sep * float(dsep_dtheta)
                 total_grad += grad
 
         return cp.array(total_sep_squared), total_grad
@@ -1029,78 +978,6 @@ class CollisionCostExactSeparation(CollisionCost):
         # No post-processing needed - cost and gradients are already transformed
         super()._compute_cost(sol, cost, grad_xyt, grad_bound, evaluate_gradient)
         
-    
-
-@dataclass
-class BoundaryCost(Cost):
-    # Cost for trees being out of bounds
-    def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):        
-        # Use TreeList.get_trees() to build geometries and perform a single difference against the square (vectorized).
-        raise Exception('TODO: deal with square offsets')
-        b = float(h[0].get().item())
-        half = b / 2.0
-        square = Polygon([(-half, -half), (half, -half), (half, half), (-half, half)])
-
-        tree_list = kgs.TreeList()
-        tree_list.xyt = xyt.get()
-        trees = tree_list.get_trees()
-
-        n_trees = xyt.shape[0]
-        area = n_trees*kgs.tree_area - np.sum(shapely.area(square.intersection(trees)))
-
-        # Finite-difference gradient (central differences) w.r.t. each tree's x, y, theta
-        grad = cp.zeros_like(xyt)
-        epsilon = 1e-6
-        for i in range(n_trees):
-            # Extract base values as Python floats
-            xi = xyt[i,0].get().item()
-            yi = xyt[i,1].get().item()
-            thetai = xyt[i,2].get().item()
-            for j in range(3):
-                if j == 0:
-                    x_plus, x_minus = xi + epsilon, xi - epsilon
-                    y_plus = y_minus = yi
-                    th_plus = th_minus = thetai
-                elif j == 1:
-                    y_plus, y_minus = yi + epsilon, yi - epsilon
-                    x_plus = x_minus = xi
-                    th_plus = th_minus = thetai
-                else:
-                    th_plus, th_minus = thetai + epsilon, thetai - epsilon
-                    x_plus = x_minus = xi
-                    y_plus = y_minus = yi
-
-                # create perturbed trees lists by replacing the i-th tree
-                tree_plus = kgs.create_tree(x_plus, y_plus, th_plus*360/2/np.pi)
-                tree_minus = kgs.create_tree(x_minus, y_minus, th_minus*360/2/np.pi)                
-
-                area_plus = - square.intersection(tree_plus).area
-                area_minus = - square.intersection(tree_minus).area
-
-                grad_val = (area_plus - area_minus) / (2.0 * epsilon)
-                grad[i, j] = cp.array(grad_val)
-
-        # Compute gradient w.r.t. bound using finite differences
-        grad_bound = cp.zeros_like(h)
-        b_plus = b + epsilon
-        b_minus = b - epsilon
-        half_plus = b_plus / 2.0
-        half_minus = b_minus / 2.0
-        square_plus = Polygon([(-half_plus, -half_plus), (half_plus, -half_plus), (half_plus, half_plus), (-half_plus, half_plus)])
-        square_minus = Polygon([(-half_minus, -half_minus), (half_minus, -half_minus), (half_minus, half_minus), (-half_minus, half_minus)])
-        
-        area_plus = n_trees*kgs.tree_area - np.sum(shapely.area(square_plus.intersection(trees)))
-        area_minus = n_trees*kgs.tree_area - np.sum(shapely.area(square_minus.intersection(trees)))
-        grad_bound[0] = cp.array((area_plus - area_minus) / (2.0 * epsilon))
-
-        return cp.array(area), grad, grad_bound
-    
-    def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
-        raise Exception('TODO: deal with square offsets')
-        grad_h_temp = cp.zeros(sol.N_solutions, dtype=sol.h.dtype)
-        pack_cuda.boundary_multi_ensemble(sol.xyt, sol.h[:,0], out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_h_temp)
-        grad_bound[:] = 0
-        grad_bound[:,0] = grad_h_temp
 
 @dataclass 
 class AreaCost(Cost):
