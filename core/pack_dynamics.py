@@ -672,7 +672,7 @@ def run_simulation_list(simulator, solution_list):
             # Check all solutions are same subclass
             first_type = type(group_sols[0])
             for sol in group_sols[1:]:
-                if type(sol) != first_type:
+                if type(sol) is not first_type:
                     raise ValueError(f"Solution type mismatch in group: {first_type} vs {type(sol)}")
             
             # Check all properties except xyt and h match

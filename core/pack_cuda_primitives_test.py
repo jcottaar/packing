@@ -583,11 +583,6 @@ def clip_against_edge_fwd_bwd(
     else:
         return out_polygons, None
 
-
-def run_all_tests():
-    test_line_intersection()
-    test_clip_against_edge()
-
 def test_line_intersection():
     """Test line_intersection forward and backward passes using finite differences."""
     print("=== Testing line_intersection ===")

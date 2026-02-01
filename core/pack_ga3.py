@@ -1452,7 +1452,7 @@ class GASinglePopulationOld(GASinglePopulation):
                         cp.array(current_xyt[:prefix_size]),
                         lap_config=self.lap_config
                     ).get()
-                except:
+                except Exception:
                     diversity_matrix = kgs.compute_genetic_diversity_matrix(
                         cp.array(current_xyt[:max_sel]),
                         cp.array(current_xyt[:prefix_size])
@@ -1465,7 +1465,7 @@ class GASinglePopulationOld(GASinglePopulation):
                 selected[selected_id] = True
                 try:
                     diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id]), lap_config=self.lap_config).get(), diversity)
-                except:
+                except Exception:
                     diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
                 assert(np.all(diversity[selected[:max_sel]]<1e-4))
             current_pop.select_ids(np.where(selected)[0])

@@ -6,6 +6,7 @@ from typeguard import typechecked
 from shapely.geometry import Polygon
 import shapely
 import pack_cuda
+import pack_cuda_lut
 import copy
 
 @dataclass
@@ -1036,7 +1037,7 @@ class BoundaryCost(Cost):
     # Cost for trees being out of bounds
     def _compute_cost_single_ref(self, sol:kgs.SolutionCollection, xyt, h):        
         # Use TreeList.get_trees() to build geometries and perform a single difference against the square (vectorized).
-        raise Error('TODO: deal with square offsets')
+        raise Exception('TODO: deal with square offsets')
         b = float(h[0].get().item())
         half = b / 2.0
         square = Polygon([(-half, -half), (half, -half), (half, half), (-half, half)])
@@ -1096,7 +1097,7 @@ class BoundaryCost(Cost):
         return cp.array(area), grad, grad_bound
     
     def _compute_cost(self, sol:kgs.SolutionCollection, cost:cp.ndarray, grad_xyt:cp.ndarray, grad_bound:cp.ndarray):
-        raise Error('TODO: deal with square offsets')
+        raise Exception('TODO: deal with square offsets')
         grad_h_temp = cp.zeros(sol.N_solutions, dtype=sol.h.dtype)
         pack_cuda.boundary_multi_ensemble(sol.xyt, sol.h[:,0], out_cost=cost, out_grads=grad_xyt, out_grad_h=grad_h_temp)
         grad_bound[:] = 0

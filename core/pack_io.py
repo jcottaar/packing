@@ -48,7 +48,7 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
         else:
             assert cost_overlap.compute_cost_allocate(solx)[0].get().item()<target
         return solx
-    except:
+    except Exception:
         if tolerance_rel_change==0.:
             raise Exception('Could not legalize solution')
         else:

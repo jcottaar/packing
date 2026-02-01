@@ -12,22 +12,22 @@ import math
 _TWO_PI = 2.0 * np.pi
 
 
-def _pastel_color(i, n, s=0.45, l=0.72):
+def _pastel_color(i, n, s=0.45, L=0.72):
     """
     Generate a pastel-ish RGB color.
     - i: index of the polygon
     - n: total number of polygons
     - s: saturation (lower = more gray/pastel)
-    - l: lightness (higher = lighter)
+    - L: lightness (higher = lighter)
     """
     if n <= 0:
         n = 1
     h = (i / n) % 1.0   # evenly spaced hue
-    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    r, g, b = colorsys.hls_to_rgb(h, L, s)
     return (r, g, b)
 
 
-def _rotation_color(theta, s=0.85, l=0.55):
+def _rotation_color(theta, s=0.85, L=0.55):
     """Map a rotation angle to a vivid, continuous cyclic color.
 
     The mapping is continuous on [0, 2π) and wraps seamlessly at 2π.
@@ -35,7 +35,7 @@ def _rotation_color(theta, s=0.85, l=0.55):
     # Ensure continuity and wrap at 2π (0 and 2π yield identical colors).
     t = float(theta) % _TWO_PI
     h = t / _TWO_PI
-    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    r, g, b = colorsys.hls_to_rgb(h, L, s)
     return (r, g, b)
 
 
