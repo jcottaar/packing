@@ -106,6 +106,7 @@ def legalize(sol, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_incre
         if tolerance_rel_change == 0.:
             raise Exception('Could not legalize solution')
         else:
+            # Retry with stricter criteria
             return legalize(solx, move_factor=move_factor, tolerance_rel_change=0., 
                           stop_on_cost_increase=stop_on_cost_increase, n_iter=n_iter, 
                           target=target, validate=validate)

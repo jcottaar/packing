@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from typing import Literal
 import os
 import subprocess
-import shutil
+import shutil    
+import kaggle_support as kgs
 
 
 @dataclass
@@ -366,8 +367,6 @@ def _ensure_initialized() -> None:
     if _initialized:
         return
     
-    import kaggle_support as kgs
-    
     print('init LAP CUDA')
     
     # Persist CUDA source for profiler correlation
@@ -481,7 +480,6 @@ def solve_lap_batch(
         - min_cost_col: For each column, pick min row; fast approximation
     """
     _ensure_initialized()
-    import kaggle_support as kgs
     
     if config is None:
         config = LAPConfig()
@@ -589,8 +587,6 @@ def compute_diversity_shortcut_kernel(
     # Allocate output
     total_pairs = N_pop * N_ref
     costs_out = cp.empty(total_pairs, dtype=cp.float32)  # Shape: (N_pop * N_ref,)
-
-    import kaggle_support as kgs
 
     # Launch kernel configuration
     shared_mem_bytes = 4 * N_trees * 4  # 4 arrays * N_trees * sizeof(float)
