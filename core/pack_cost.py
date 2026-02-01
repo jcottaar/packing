@@ -1082,14 +1082,8 @@ class CollisionCostSeparation(CollisionCost):
 
             pieces_b = transformed_pieces_other_tree(xb, yb, thb)
 
-            # For this pair of trees: max separation over all piece pairs
-            max_sep = 0.0
-            best_dsep_dx = 0.0
-            best_dsep_dy = 0.0
-            best_dsep_dtheta = 0.0
-
             for (pa_world, pa_local) in pieces_a:
-                for (pb_world, pb_world2) in pieces_b:
+                for (pb_world, _) in pieces_b:
                     sep, dsep_dx, dsep_dy, dsep_dtheta = \
                         self._compute_separation_distance(
                             poly1_world=pa_world,

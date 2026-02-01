@@ -1,15 +1,11 @@
 import numpy as np
 import cupy as cp
-import dill # like pickle but more powerful
+import dill
 import os
 import copy
 from dataclasses import dataclass, field, fields
 import typing
 import multiprocess
-from decorator import decorator
-from line_profiler import LineProfiler
-import shutil
-import inspect
 from shapely import affinity
 from shapely.geometry import Polygon, Point
 from shapely.prepared import prep
@@ -1660,16 +1656,6 @@ def compute_genetic_diversity_matrix_shortcut(
         (3 * np.pi / 2, True),
     ]
 
-    # Population coordinates (fixed, not transformed)
-    pop_x = population_xyt[:, :, 0]      # (N_pop, N_trees)
-    pop_y = population_xyt[:, :, 1]      # (N_pop, N_trees)
-    pop_theta = population_xyt[:, :, 2]  # (N_pop, N_trees)
-
-    # Reference base views (do NOT copy; keep immutable)
-    ref_x0 = reference_xyt[:, :, 0]      # (N_ref, N_trees)
-    ref_y0 = reference_xyt[:, :, 1]      # (N_ref, N_trees)
-    ref_theta0 = reference_xyt[:, :, 2]  # (N_ref, N_trees)
-
     # Running minimum over transformations
     min_distances = cp.full((N_pop, N_ref), cp.inf, dtype=dtype_cp)
 
@@ -1688,7 +1674,7 @@ def compute_genetic_diversity_matrix_shortcut(
                 population_xyt, reference_xyt, cos_a, sin_a, do_mirror
             )
         else:
-            raise Exception('Only implemented on main branch')
+            raise Exception('Only implemented on main branch of respitory')
                     
         min_distances = cp.minimum(min_distances, costs_this_transform)
 

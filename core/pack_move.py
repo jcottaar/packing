@@ -12,8 +12,12 @@ it (including commercially), but must give credit to the original author
 import numpy as np
 import cupy as cp
 import typing
+from typing import TYPE_CHECKING
 import kaggle_support as kgs
 from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    import pack_ga3
 
 @dataclass
 class Move(kgs.BaseClass):
@@ -25,7 +29,7 @@ class Move(kgs.BaseClass):
     """
     respect_edge_spacer_filter: bool = field(init=True, default=True)  # Whether to respect edge spacer constraints
 
-    def do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                     mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                     generator: cp.random.Generator):
         """
@@ -51,7 +55,7 @@ class Move(kgs.BaseClass):
         population.genotype.filter_move_locations_with_edge_spacer = old_val
 
 
-def _sample_trees_to_mutate(population: 'Population', inds_to_do: cp.ndarray,
+def _sample_trees_to_mutate(population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                              generator: cp.random.Generator) -> cp.ndarray:
     """
     Sample random tree indices for mutation, respecting edge spacer filtering.
@@ -122,7 +126,7 @@ class MoveSelector(Move):
     moves: list = field(init=True, default_factory=list)  # Each element: [Move, name, weight]
     _probabilities: cp.ndarray = field(init=False, default=None)  # Cached normalized probabilities
 
-    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def _do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                      mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                      generator: cp.random.Generator):
         """See do_move_vec."""
@@ -163,7 +167,7 @@ class MoveRandomTree(Move):
     Selects a random tree and moves it to a random position with random rotation.
     """
     
-    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def _do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                      mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                      generator: cp.random.Generator):
         """See do_move_vec."""
@@ -195,7 +199,7 @@ class JiggleRandomTree(Move):
     max_xy_move: float = field(init=True, default=0.1)  # Maximum position perturbation
     max_theta_move: float = field(init=True, default=np.pi)  # Maximum rotation perturbation
     
-    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def _do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                      mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                      generator: cp.random.Generator):
         """See do_move_vec."""
@@ -235,7 +239,7 @@ class JiggleCluster(Move):
     min_N_trees: int = field(init=True, default=2)  # Minimum cluster size
     max_N_trees: int = field(init=True, default=8)  # Maximum cluster size
     
-    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def _do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                      mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                      generator: cp.random.Generator):
         """See do_move_vec."""
@@ -306,7 +310,7 @@ class Translate(Move):
     wrapping coordinates at the boundary using modulo arithmetic.
     """
     
-    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def _do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                      mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                      generator: cp.random.Generator):
         """See do_move_vec."""
@@ -346,7 +350,7 @@ class Twist(Move):
     min_radius: float = field(init=True, default=0.5)  # Minimum twist radius
     max_radius: float = field(init=True, default=2.0)  # Maximum twist radius
     
-    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def _do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                      mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                      generator: cp.random.Generator):
         """See do_move_vec."""
@@ -408,7 +412,7 @@ class Crossover(Move):
     max_N_trees_ratio: float = field(init=True, default=0.5)  # Max ratio of trees to replace
     simple_mate_location: bool = field(init=True, default=True)  # Use simplified mate location logic
 
-    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def _do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                      mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                      generator: cp.random.Generator):
         """See do_move_vec."""
@@ -642,7 +646,7 @@ class Crossover2(Move):
     use_edge_clearance_when_decoupled: bool = field(init=True, default=True)  # Edge spacing
     do_90_rotation: bool = field(init=True, default=True)  # Allow 90° rotations
 
-    def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray,
+    def _do_move_vec(self, population: 'pack_ga3.Population', inds_to_do: cp.ndarray,
                      mate_sol: kgs.SolutionCollection, inds_mate: cp.ndarray,
                      generator: cp.random.Generator):
         """See do_move_vec."""
