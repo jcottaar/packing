@@ -671,7 +671,6 @@ class GAMulti(GA):
                                 worse_idx = max(i, j)
                             to_reset.add(worse_idx)
                     for idx in sorted(to_reset)[::-1]:
-                        print(idx)
                         if self.diversity_delete_instead_of_reset:
                             del self.ga_list[idx]
                         else:
@@ -734,7 +733,7 @@ class GAMulti(GA):
             # Compute diversity matrix
             N_sols = champions_pop.N_solutions
             diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(champions_pop.xyt), cp.array(champions_pop.xyt)).get()
-            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix)*0+0.1, interpolation='none')
+            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
             if not hasattr(ax, '_colorbar') or ax._colorbar is None:
                 ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
             else:

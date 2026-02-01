@@ -39,18 +39,6 @@ from contextlib import nullcontext
 '''
 Determine environment and globals
 '''
-
-def assert_mps():
-    import subprocess
-    out = subprocess.run(
-        ["bash", "-lc", "pgrep -f -x nvidia-cuda-mps-server"],
-        stdout=subprocess.PIPE,
-    )
-    if out.returncode != 0:
-        print("WARNING: CUDA MPS not active")
-        #if env=='vast':
-        #    raise Exception('no MPS')
-
 if os.path.isdir('/mnt/d/packing/'):
     env = 'local'
     d_drive = '/mnt/d/'    
@@ -58,8 +46,7 @@ elif os.path.isdir('/kaggle/working/'):
     env = 'kaggle'
 else:
     env = 'vast'
-print(env)
-assert_mps()
+print('Detected environment:', env)
 
 profiling = False
 debugging_mode = 1
@@ -71,14 +58,17 @@ match env:
         data_dir = d_drive+'/packing/data/'
         temp_dir = d_drive+'/packing/temp/'             
         code_dir = d_drive+'/packing/code/core/' 
+        submission_csv_path = temp_dir+'submission.csv'
     case 'vast':
         data_dir = '/packing/data/'
         temp_dir = '/packing/temp/'             
         code_dir = '/packing/code/core/'
+        submission_csv_path = None
     case 'kaggle':
-        data_dir = '/kaggle/temp/data/'
-        temp_dir = '/kaggle/temp/'
+        data_dir = '/kaggle/working/data/'
+        temp_dir = '/kaggle/working/'
         code_dir = '/kaggle/input/christmas-tree-library/core/'
+        submission_csv_path = '/kaggle/input/christmas-tree-solution/submission.csv'
 os.makedirs(data_dir, exist_ok=True)
 os.makedirs(temp_dir, exist_ok=True)
 
