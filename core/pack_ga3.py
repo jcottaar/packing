@@ -748,7 +748,7 @@ class GASinglePopulation(GA):
         self.move.moves.append( [pack_move.Translate(), 'Translate', 1.0] )
         self.move.moves.append( [pack_move.Twist(), 'Twist', 1.0] )
         self.move.moves.append( [pack_move.Crossover(), 'Crossover', 2.0] )
-        self.move.moves.append( [pack_move.CrossoverStripe(), 'CrossoverStripe', 2.0] )
+        self.move.moves.append( [pack_move.Crossover2(), 'Crossover2', 2.0] )
 
         super().__post_init__()
 
@@ -1197,8 +1197,8 @@ def baseline_symmetry_90():
     runner.ga.ga_base.initializer.base_solution = kgs.SolutionCollectionSquareSymmetric90()
     runner.ga.ga_base.move.moves = [m for m in runner.ga.ga_base.move.moves if m[1] not in ['Translate']]
     runner.ga.ga_base.move.moves.pop(-2) # remove square crossover
-    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square90'), 'CrossoverSquare', 2.0] )
-    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square90', decouple_mate_location=True), 
+    runner.ga.ga_base.move.moves.append( [pack_move.Crossover2(distance_function = 'square90'), 'CrossoverSquare', 2.0] )
+    runner.ga.ga_base.move.moves.append( [pack_move.Crossover2(distance_function = 'square90', decouple_mate_location=True), 
                                           'CrossoverSquareDecoupled', 2.0] )
     runner.ga.stop_check_generations_scale = 25
     return runner
@@ -1208,8 +1208,8 @@ def baseline_symmetry_180():
     runner.ga.ga_base.initializer.base_solution = kgs.SolutionCollectionSquareSymmetric180()
     runner.ga.ga_base.move.moves = [m for m in runner.ga.ga_base.move.moves if m[1] not in ['Translate']]
     runner.ga.ga_base.move.moves.pop(-2) # remove square crossover
-    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square180', max_N_trees_ratio = 0.45), 'CrossoverSquare', 2.0] )
-    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square180', decouple_mate_location=True, max_N_trees_ratio = 0.45), 
+    runner.ga.ga_base.move.moves.append( [pack_move.Crossover2(distance_function = 'square180', max_N_trees_ratio = 0.45), 'CrossoverSquare', 2.0] )
+    runner.ga.ga_base.move.moves.append( [pack_move.Crossover2(distance_function = 'square180', decouple_mate_location=True, max_N_trees_ratio = 0.45), 
                                           'CrossoverSquareDecoupled', 2.0] )
     runner.ga.stop_check_generations_scale = 35
     return runner
@@ -1218,8 +1218,8 @@ def baseline_tesselated(adapt_moves=True):
     runner = baseline()
     runner.ga.ga_base.move.moves = [m for m in runner.ga.ga_base.move.moves if m[1] not in ['Translate']]
     runner.ga.ga_base.move.moves.pop(-2) # remove square crossover
-    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square', max_N_trees_ratio = 0.45), 'CrossoverSquare', 2.0] )
-    runner.ga.ga_base.move.moves.append( [pack_move.CrossoverStripe(distance_function = 'square', decouple_mate_location=True, max_N_trees_ratio = 0.45), 
+    runner.ga.ga_base.move.moves.append( [pack_move.Crossover2(distance_function = 'square', max_N_trees_ratio = 0.45), 'CrossoverSquare', 2.0] )
+    runner.ga.ga_base.move.moves.append( [pack_move.Crossover2(distance_function = 'square', decouple_mate_location=True, max_N_trees_ratio = 0.45), 
                                           'CrossoverSquareDecoupled', 2.0] )
     runner.ga.stop_check_generations_scale = 20
     runner.ga.ga_base.reset_check_generations_ratio = 0.
@@ -1234,7 +1234,7 @@ def baseline_tesselated(adapt_moves=True):
     if adapt_moves:
         runner.ga.ga_base.initializer.base_solution.filter_move_locations_with_edge_spacer = True
         for m in runner.ga.ga_base.move.moves:
-            if isinstance(m[0], pack_move.CrossoverStripe):
+            if isinstance(m[0], pack_move.Crossover2):
                 m[0].do_90_rotation = False
                 m[0].use_edge_clearance_when_decoupled = False
                 if m[0].distance_function == 'stripe':
@@ -1258,7 +1258,7 @@ def baseline_symmetry_180_tesselated(adapt_moves=True):
     if adapt_moves:
         runner.ga.ga_base.initializer.base_solution.filter_move_locations_with_edge_spacer = True
         for m in runner.ga.ga_base.move.moves:
-            if isinstance(m[0], pack_move.CrossoverStripe):
+            if isinstance(m[0], pack_move.Crossover2):
                 m[0].do_90_rotation = False
                 m[0].use_edge_clearance_when_decoupled = False
                 if m[0].distance_function == 'stripe':
