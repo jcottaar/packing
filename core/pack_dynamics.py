@@ -42,9 +42,6 @@ class OptimizerBFGS(kgs.BaseClass):
         sol.check_constraints()
         sol = copy.deepcopy(sol)
         sol.prep_for_phenotype()
-        #sol.snap()
-
-        #print('snapped', cp.min(self.cost.compute_cost_allocate(sol)[0]))
 
         sol_tmp = copy.deepcopy(sol)
 
@@ -110,8 +107,6 @@ class OptimizerBFGS(kgs.BaseClass):
             ax.set_yscale('log')
             plt.pause(0.001)
             
-
-        #print('after', cp.min(self.cost.compute_cost_allocate(sol)[0]))
 
         sol.unprep_for_phenotype()
         return sol
@@ -190,7 +185,6 @@ class Optimizer(kgs.BaseClass):
                 dt = current_dt
             else:
                 dt = self.dt
-            #print(dt)
 
             # Save state before step (for adaptive step size)
             if self.adaptive_step_size:
@@ -200,13 +194,6 @@ class Optimizer(kgs.BaseClass):
 
             # Compute cost and gradient at current position
             self.cost.compute_cost(sol, total_cost, total_grad, bound_grad)
-
-            # Clip gradients per tree to prevent violent repulsion
-            # if self.max_grad_norm is not None:
-            #     grad_norms = cp.sqrt(cp.sum(total_grad**2, axis=2))  # (n_ensembles, n_trees)
-            #     grad_norms = cp.maximum(grad_norms, 1e-8)  # Avoid division by zero
-            #     clip_factor = cp.minimum(1.0, self.max_grad_norm / grad_norms)  # (n_ensembles, n_trees)
-            #     total_grad = total_grad * clip_factor[:, :, None]  # Apply to each component
 
             # Store cost before taking step (for adaptive and non-adaptive cases)
             if self.adaptive_step_size:

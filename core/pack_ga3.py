@@ -87,15 +87,6 @@ class Population(kgs.BaseClass):
     phenotype: kgs.SolutionCollection = field(init=True, default=None)
     fitness: np.ndarray = field(init=True, default=None)  # Shape: (N_solutions, N_components)
     parent_fitness: np.ndarray = field(init=True, default=None)  # Shape: (N_solutions, N_components)
-    # lineages: list = field(init=True, default=None)
-
-    # Lineages is a list of lists, each list gives the history for an individual. Each element is a move, itself a list:
-    # - First element describes the move (format up to the move itself, often including choices and perhaps some KPI)
-    # - Second element is a list of fitness values:
-    #  - Before the move
-    #  - After the move
-    #  - After rough relax
-    #  - After fine relax
 
     def _check_constraints(self):
         self.genotype.check_constraints()
@@ -106,7 +97,6 @@ class Population(kgs.BaseClass):
         assert self.fitness.ndim == 2  # Shape: (N_solutions, N_components)
         assert self.parent_fitness.shape[0] == self.genotype.N_solutions
         assert self.parent_fitness.ndim == 2  # Shape: (N_solutions, N_components)
-        # assert len(self.lineages) == self.configuration.N_solutions
 
     def set_dummy_fitness(self, n_components=1):
         """Initialize fitness arrays with zeros.
@@ -124,17 +114,14 @@ class Population(kgs.BaseClass):
         self.phenotype.select_ids(inds)
         self.fitness = self.fitness[inds]
         self.parent_fitness = self.parent_fitness[inds]
-        # self.lineages = [self.lineages[i] for i in inds]
 
     def create_empty(self, N_individuals, N_trees):
         genotype = self.genotype.create_empty(N_individuals, N_trees)
         phenotype = self.phenotype.create_empty(N_individuals, N_trees)
         population = type(self)(phenotype=phenotype, genotype=genotype)
-        # Initialize with same number of components as self
         n_components = self.fitness.shape[1]
         population.fitness = np.zeros((N_individuals, n_components), dtype=kgs.dtype_np)
         population.parent_fitness = np.zeros((N_individuals, n_components), dtype=kgs.dtype_np)
-        # population.lineages = [ None for _ in range(N_individuals) ]
         return population
 
     def create_clone(self, idx: int, other: 'Population', parent_id: int):
@@ -143,7 +130,6 @@ class Population(kgs.BaseClass):
         self.phenotype.create_clone(idx, other.phenotype, parent_id)
         self.fitness[idx] = other.fitness[parent_id]
         self.parent_fitness[idx] = other.fitness[parent_id]
-        # self.lineages[idx] = copy.deepcopy(other.lineages[parent_id])
 
     def create_clone_batch(self, inds: cp.ndarray, other: 'Population', parent_ids: cp.ndarray):
         """Vectorized batch clone operation."""
@@ -160,7 +146,6 @@ class Population(kgs.BaseClass):
         self.phenotype.merge(other.phenotype)
         self.fitness = np.concatenate([self.fitness, other.fitness], axis=0)
         self.parent_fitness = np.concatenate([self.parent_fitness, other.parent_fitness], axis=0)
-        # self.lineages = self.lineages + other.lineages
 
 
 # ============================================================
@@ -225,8 +210,7 @@ class InitializerRandomJiggled(Initializer):
         if not self.new_tree_placer:
             xyt = generator.uniform(-0.5, 0.5, size=sol.xyt.shape)
             xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
-            xyt = cp.array(xyt, dtype=kgs.dtype_np)    
-            #sol = copy.deepcopy(self.base_solution)
+            xyt = cp.array(xyt, dtype=kgs.dtype_np)
             sol.xyt = xyt   
             if self.fixed_h is None:
                 if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
@@ -242,12 +226,9 @@ class InitializerRandomJiggled(Initializer):
             else:
                 sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
             sol.canonicalize()
-            #pack_vis_sol.pack_vis_sol(sol)
-            #print('1')
             if self.ref_sol_crystal_type is not None:
                 axis1_offset = self.ref_sol_axis1_offset(generator)
                 axis2_offset = self.ref_sol_axis2_offset(generator)
-                #print(self.seed, axis1_offset, axis2_offset)
                 self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
                                                         axis1_offset=axis1_offset, axis2_offset=axis2_offset)
             if self.ref_N_scaling is not None:
@@ -268,9 +249,8 @@ class InitializerRandomJiggled(Initializer):
             if self.ref_sol_crystal_type is not None:
                 axis1_offset = self.ref_sol_axis1_offset(generator)
                 axis2_offset = self.ref_sol_axis2_offset(generator)
-                #print(self.seed, axis1_offset, axis2_offset)
                 self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
-                                                        axis1_offset=axis1_offset, axis2_offset=axis2_offset)            
+                                                        axis1_offset=axis1_offset, axis2_offset=axis2_offset)
             if self.ref_sol is not None:
                 ref_sol_use = copy.deepcopy(self.ref_sol)
                 if self.ref_rotate is None:
@@ -317,14 +297,9 @@ class InitializerRandomJiggled(Initializer):
                             valid_tree_indices = tree_indices[valid_mask]
                             sol.xyt[i_individual, N1 + valid_tree_indices, :] = candidates_cp[0, valid_mask, :]
                             needs_placement[i_individual, valid_tree_indices] = False
-        #print('2')
-        #raise 'stop'
         if self.do_jiggle:
             sol = self.jiggler.run_simulation(sol)
         sol.canonicalize()
-        #pack_vis_sol.pack_vis_sol(sol)
-        #plt.pause(0.001)
-        #sol.snap()
         population = Population(genotype=sol)
         return population
     
@@ -1693,32 +1668,6 @@ class Orchestrator(kgs.BaseClass):
         super().__post_init__()
 
     def _relax(self, sol_list):
-        # for s in sol_list:
-        #     fitness = self.fitness_cost.compute_cost_allocate(s.genotype, evaluate_gradient=False)[0].get()
-        #     sorted_ids = kgs.lexicographic_argsort(fitness)
-        #     n_keep = int(s.genotype.N_solutions*self.filter_before_rough)
-        #     s.select_ids(sorted_ids[:n_keep])
-        # for s in sol_list:
-        #     s.phenotype.xyt[:] = s.genotype.xyt[:]
-        #     s.phenotype.h[:] = s.genotype.h[:]
-        # conf_list = [s.phenotype for s in sol_list]
-        # if self.genotype_at == 0:
-        #     for s in sol_list:
-        #         s.genotype.xyt[:] = s.phenotype.xyt[:]
-        #         s.genotype.h[:] = s.phenotype.h[:]
-        # for relaxer in self.rough_relaxers:
-        #     pack_dynamics.run_simulation_list(relaxer, conf_list)
-        # if self.genotype_at == 1:
-        #     for s in sol_list:
-        #         s.genotype.xyt[:] = s.phenotype.xyt[:]
-        #         s.genotype.h[:] = s.phenotype.h[:]
-        # for relaxer in self.fine_relaxers:
-        #     pack_dynamics.run_simulation_list(relaxer, conf_list)
-        # if self.genotype_at == 2:
-        #     for s in sol_list:
-        #         s.genotype.xyt[:] = s.phenotype.xyt[:]
-        #         s.genotype.h[:] = s.phenotype.h[:]
-
         assert self.genotype_at==1
         for s in sol_list:
             fitness = self.fitness_cost.compute_cost_allocate(s.genotype, evaluate_gradient=False)[0].get()
@@ -1807,7 +1756,6 @@ class Orchestrator(kgs.BaseClass):
                 # Initialize
                 self.ga.initialize(self._generator)
                 self.ga.reset(self._generator)
-                #self._relax(self.ga.get_list_for_simulation())    
                 self.ga.score(self._generator, register_best=True)
 
 
@@ -1863,11 +1811,7 @@ def baseline():
     runner.ga.mate_distance=6
 
     ga_base = GASinglePopulationOld(N_trees_to_do=-1)
-    #value = 0.125
-    #ga_base.population_size = int(ga_base.population_size * value)
-    #ga_base.selection_size = [int( (s-1) * value)+1 for s in ga_base.selection_size]
     ga_base.population_size = 1500 
-    #ga_base.selection_size = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 23, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200, 225, 250]
     ga_base.reset_check_generations = 100
     ga_base.reset_check_threshold = 0.5
     ga_base.freeze_duration = 100

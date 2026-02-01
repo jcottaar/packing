@@ -96,12 +96,11 @@ def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1., return_sco
                     pack_metric.score(submission_copy, submission_copy, '', allow_error=False)
                     return False
                 except Exception:
-                    #rint(err)
                     return True
 
             import boolean_line_search
             factor = boolean_line_search.boolean_line_search(f, 0.9, compact_hi)
-            #print(sol.N_trees, factor)
+
             submission['x'] *= factor
             submission['y'] *= factor
 

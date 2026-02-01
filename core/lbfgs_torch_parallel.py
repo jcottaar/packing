@@ -669,13 +669,10 @@ def lbfgs(
         converged_loss = (loss_change_buffer < tolerance_change) & active
         active &= ~converged_loss
 
-        #print(loss)
-
         if tolerance_rel_change > 0 and n_iter>history_size:
             rel_change = (loss_change_buffer / (prev_loss_iter.abs() + 1e-12))
             converged_rel = (rel_change < tolerance_rel_change) & active
             active &= ~converged_rel
-            #print(loss_change_buffer, prev_loss_iter, rel_change, converged_rel, active)
         
         if stop_on_cost_increase:            
             cost_increase = (loss > prev_loss) & active

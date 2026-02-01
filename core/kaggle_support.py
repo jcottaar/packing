@@ -1,8 +1,3 @@
-# import os, subprocess
-# print("CUDA_MPS_PIPE_DIRECTORY =", os.environ.get("CUDA_MPS_PIPE_DIRECTORY"))
-# print("CUDA_MPS_LOG_DIRECTORY  =", os.environ.get("CUDA_MPS_LOG_DIRECTORY"))
-# print("mps-server running =", subprocess.run(["bash","-lc","pgrep -x nvidia-cuda-mps-server"], capture_output=True).returncode == 0)
-
 import numpy as np
 import cupy as cp
 import dill # like pickle but more powerful
