@@ -141,7 +141,7 @@ def test_costs():
 
         for sol_single in sol_list:
 
-            if (isinstance(c, pack_cost.BoundaryDistanceCost) or isinstance(c, pack_cost.BoundaryCost)) and sol_single.periodic:
+            if (isinstance(c, pack_cost.BoundaryDistanceCost)) and sol_single.periodic:
                 continue
             
             # Store for vectorized check
@@ -237,7 +237,7 @@ def test_costs():
             max_diff_bound = cp.max(cp.abs(grad_bound_num - grad_bound_fast_flat)).get().item()
             assert cp.allclose(grad_bound_num, grad_bound_ref.ravel(), rtol=1e-4, atol=1e-4), f"Finite-diff bound gradient mismatch (max diff {max_diff_bound})"
         
-        for todo in ([[2,3]] if (isinstance(c, pack_cost.BoundaryDistanceCost) or isinstance(c, pack_cost.BoundaryCost)) else [[2,3],[4,5]]):
+        for todo in ([[2,3]] if (isinstance(c, pack_cost.BoundaryDistanceCost)) else [[2,3],[4,5]]):
             # Vectorized check: call with all xyt and bounds for this cost function
             print(f"  Vectorized check for {c.__class__.__name__}")
             full_xyt = cp.concatenate(all_xyt[todo[0]:todo[-1]+1], axis=0)

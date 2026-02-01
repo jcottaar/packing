@@ -824,16 +824,15 @@ class CollisionCostSeparation(CollisionCost):
                             th1=th1,
                         )
 
-                # Sum contributions over all piece-pairs instead of taking the max.
-                if sep <= 0.0:
-                    continue
-                # Add sep^2 contribution and its gradient 2*sep*dsep
-                total_sep_squared += sep ** 2
-                grad = cp.zeros_like(xyt1)
-                grad[0] = 2.0 * sep * float(dsep_dx)
-                grad[1] = 2.0 * sep * float(dsep_dy)
-                grad[2] = 2.0 * sep * float(dsep_dtheta)
-                total_grad += grad
+                    if sep <= 0.0:
+                        continue
+                    # Add sep^2 contribution and its gradient 2*sep*dsep
+                    total_sep_squared += sep ** 2
+                    grad = cp.zeros_like(xyt1)
+                    grad[0] = 2.0 * sep * float(dsep_dx)
+                    grad[1] = 2.0 * sep * float(dsep_dy)
+                    grad[2] = 2.0 * sep * float(dsep_dtheta)
+                    total_grad += grad
 
         return cp.array(total_sep_squared), total_grad
     
