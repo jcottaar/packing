@@ -1,6 +1,10 @@
 """
 I/O Module for Packing Solutions
 
+This code is released under CC BY-SA 4.0, meaning you can freely use and adapt it 
+(including commercially), but must give credit to the original author (Jeroen 
+Cottaar) and keep it under this license.
+
 This module handles conversion between internal solution representations and external formats
 (pandas DataFrames for Kaggle submissions). It also provides solution legalization functionality
 to ensure solutions meet competition constraints (no overlaps, within boundaries).
