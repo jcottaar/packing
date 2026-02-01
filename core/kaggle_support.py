@@ -141,11 +141,11 @@ def clear_gpu():
     cache = cp.fft.config.get_plan_cache()
     cache.clear()
     cp.get_default_memory_pool().free_all_blocks()
+
     
 '''
-The trees!
+Define the trees
 '''
-
 scale_factor = 1.
 TREE_EXPANSION = 0.0  # Outward expansion distance for trees
 
@@ -288,7 +288,11 @@ class TreeList(BaseClass):
             tree = create_tree(self.x[i], self.y[i], self.theta[i]*360/(2*np.pi))
             trees.append(tree)
         return trees
-    
+
+
+'''
+Population management
+'''
 @dataclass
 class EdgeSpacer(BaseClass):
     def check_valid(self, xyt, h, margin=0.):
@@ -1544,12 +1548,9 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
             self.angles = cp.full((self.N_solutions,), np.pi / 2, dtype=dtype_cp)
         return self.angles
     
-
-
-
-# ============================================================
-# Fitness comparison utilities for tuple-based fitness
-# ============================================================
+'''
+Fitness comparison utilities for tuple-based fitness
+'''
 
 def lexicographic_argmin(fitness_array: np.ndarray) -> int:
     """Find index of minimum fitness value using lexicographic ordering.
@@ -1622,6 +1623,9 @@ def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
             return False
     return False  # Equal
 
+'''
+Genetic diversity calculation utilities
+'''
 
 def compute_genetic_diversity_matrix_shortcut(
     population_xyt: cp.ndarray,
@@ -1674,7 +1678,7 @@ def compute_genetic_diversity_matrix_shortcut(
                 population_xyt, reference_xyt, cos_a, sin_a, do_mirror
             )
         else:
-            raise Exception('Only implemented on main branch of respitory')
+            raise Exception('Only implemented on ''full'' branch of repository')
                     
         min_distances = cp.minimum(min_distances, costs_this_transform)
 
@@ -1845,6 +1849,11 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     result_matrix = compute_genetic_diversity_matrix(population_xyt, reference_batch, lap_config=lap_config, transform=transform)  # (N_pop, 1)
     
     return result_matrix[:, 0]  # (N_pop,)
+
+'''
+Initialize crystalline solutions. This uses packings_optimized_unique.pickle, which contains the six crystals.
+This file is generate using test_dimer2.ipynb in the 'full' branch of the repository.
+'''
 
 packings = dill_load(code_dir + '/../res/packings_optimized_unique.pickle')
 def create_tiled_solution(name, n_tilings, make_symmetric=False, axis1_offset = 0., axis2_offset=0.):
