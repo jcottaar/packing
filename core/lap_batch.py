@@ -21,17 +21,7 @@ import shutil
 
 @dataclass
 class LAPConfig:
-    algorithm: Literal['hungarian', 'auction', 'min_cost_row', 'min_cost_col'] = 'hungarian'
-
-    # Auction algorithm hyperparameters (Bertsekas auction w/ optional epsilon scaling)
-    # Notes:
-    # - Smaller epsilon_final is closer to exact but slower.
-    # - For many use-cases (binary "similar vs not"), larger eps can be fine.
-    auction_epsilon_init: float = 0.1
-    auction_epsilon_final: float = 1e-3
-    auction_epsilon_decay: float = 0.8
-    auction_max_rounds: int = 1
-    auction_max_iters: int = 0  # 0 => choose based on N on the host
+    algorithm: Literal['hungarian', 'min_cost_row', 'min_cost_col'] = 'hungarian'
 
     # Diversity shortcut kernel option (for min_cost_row/min_cost_col)
     use_diversity_kernel: bool = True
@@ -141,101 +131,6 @@ __global__ void hungarian_kernel(
             my_col_match[cur_col] = prev_row;
             cur_col = prev_col;
         }
-    }
-}
-
-
-// Auction algorithm kernel - one block per problem, one thread per block
-// Parallelism comes from solving many independent problems in the batch.
-__global__ void auction_kernel(
-    const float* __restrict__ costs_in,  // (batch_size, N, N)
-    int* __restrict__ row_match,         // (batch_size, N) row->col
-    int* __restrict__ col_match,         // (batch_size, N) col->row
-    float* __restrict__ prices,          // (batch_size, N) prices for columns
-    const int batch_size,
-    const int N,
-    const float epsilon_init,
-    const float epsilon_final,
-    const float epsilon_decay,
-    const int max_rounds,
-    const int max_iters
-) {
-    const int bid = blockIdx.x;
-    if (bid >= batch_size) return;
-    if (threadIdx.x != 0) return;
-
-    const float* my_costs = costs_in + bid * N * N;
-    int* my_row_match = row_match + bid * N;
-    int* my_col_match = col_match + bid * N;
-    float* my_prices = prices + bid * N;
-
-    // Initialize
-    for (int i = 0; i < N; i++) {
-        my_row_match[i] = -1;
-        my_col_match[i] = -1;
-        my_prices[i] = 0.0f;
-    }
-
-    float eps = epsilon_init;
-    for (int round = 0; round < max_rounds; round++) {
-        // Epsilon scaling refinement: keep prices but re-run assignment so later
-        // rounds can improve the solution.
-        if (round > 0) {
-            for (int i = 0; i < N; i++) {
-                my_row_match[i] = -1;
-                my_col_match[i] = -1;
-            }
-        }
-
-        // Run auction iterations for current epsilon
-        for (int it = 0; it < max_iters; it++) {
-            bool all_assigned = true;
-            for (int i = 0; i < N; i++) {
-                if (my_row_match[i] < 0) { all_assigned = false; break; }
-            }
-            if (all_assigned) break;
-
-            for (int i = 0; i < N; i++) {
-                if (my_row_match[i] >= 0) continue;  // already assigned
-
-                float best_val = -1e30f;
-                float second_val = -1e30f;
-                int best_j = -1;
-
-                // Find best and second best column for bidder i
-                const float* row_costs = my_costs + i * N;
-                for (int j = 0; j < N; j++) {
-                    // We solve min-cost assignment by maximizing (-cost - price)
-                    float val = -row_costs[j] - my_prices[j];
-                    if (val > best_val) {
-                        second_val = best_val;
-                        best_val = val;
-                        best_j = j;
-                    } else if (val > second_val) {
-                        second_val = val;
-                    }
-                }
-
-                // If N==1, second_val can stay at -inf-ish
-                float increment = (best_val - second_val) + eps;
-                if (best_j < 0) continue;
-
-                my_prices[best_j] += increment;
-
-                // Assign bidder i to best_j (possibly unassign previous owner)
-                int prev_i = my_col_match[best_j];
-                my_col_match[best_j] = i;
-                my_row_match[i] = best_j;
-                if (prev_i >= 0) {
-                    my_row_match[prev_i] = -1;
-                }
-            }
-        }
-
-        // Epsilon scaling schedule
-        if (eps <= epsilon_final) break;
-        eps = eps * epsilon_decay;
-        if (eps < epsilon_final) eps = epsilon_final;
     }
 }
 
@@ -389,7 +284,6 @@ __global__ void diversity_shortcut_kernel(
 
 _module: cp.RawModule | None = None
 _hungarian_kernel: cp.RawKernel | None = None
-_auction_kernel: cp.RawKernel | None = None
 _compute_costs_kernel: cp.RawKernel | None = None
 _diversity_shortcut_kernel: cp.RawKernel | None = None
 _initialized: bool = False
@@ -407,7 +301,7 @@ def _ensure_initialized() -> None:
     of public API functions.
     """
     global _initialized, _module
-    global _hungarian_kernel, _auction_kernel, _compute_costs_kernel, _diversity_shortcut_kernel
+    global _hungarian_kernel, _compute_costs_kernel, _diversity_shortcut_kernel
     
     if _initialized:
         return
@@ -487,7 +381,6 @@ def _ensure_initialized() -> None:
     
     # Extract kernel functions
     _hungarian_kernel = _module.get_function("hungarian_kernel")
-    _auction_kernel = _module.get_function("auction_kernel")
     _compute_costs_kernel = _module.get_function("compute_costs")
     _diversity_shortcut_kernel = _module.get_function("diversity_shortcut_kernel")
     
@@ -502,7 +395,6 @@ def _ensure_initialized() -> None:
         print(f"  Local memory (bytes): {kernel.local_size_bytes}")
     
     print_kernel_attributes(_hungarian_kernel, "hungarian_kernel")
-    print_kernel_attributes(_auction_kernel, "auction_kernel")
     print_kernel_attributes(_compute_costs_kernel, "compute_costs")
     print_kernel_attributes(_diversity_shortcut_kernel, "diversity_shortcut_kernel")
     
@@ -511,7 +403,7 @@ def _ensure_initialized() -> None:
 
 def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = None) -> tuple[cp.ndarray, cp.ndarray]:
     """
-    Solve batched LAP using GPU Hungarian (exact) or GPU Auction algorithm.
+    Solve batched LAP using GPU Hungarian algorithm.
     
     Single kernel launch solves all problems in parallel.
     All computation stays on GPU - no CPU transfers.
@@ -549,41 +441,12 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = No
         costs_work = cp.empty_like(cost_matrices_gpu)
         u = cp.zeros((batch_size, N), dtype=cp.float32)
         v = cp.zeros((batch_size, N), dtype=cp.float32)
-
-        if kgs.profiling:
-            cp.cuda.Device().synchronize()
+        
         # One block per problem, ONE thread per block
         _hungarian_kernel(
             (batch_size,), (1,),
             (cost_matrices_gpu, costs_work, row_match, col_match, u, v, batch_size, N)
         )
-
-        if kgs.profiling:
-            cp.cuda.Device().synchronize()
-    elif config.algorithm == 'auction':
-        prices = cp.zeros((batch_size, N), dtype=cp.float32)
-
-        eps_init = float(config.auction_epsilon_init)
-        eps_final = float(config.auction_epsilon_final)
-        eps_decay = float(config.auction_epsilon_decay)
-        max_rounds = int(config.auction_max_rounds)
-        max_iters = int(config.auction_max_iters)
-        if max_iters <= 0:
-            # Practical upper bound for convergence; tuned for float32 and typical dense problems.
-            max_iters = max(10, 5 * N * N)
-
-        if kgs.profiling:
-            cp.cuda.Device().synchronize()
-
-        _auction_kernel(
-            (batch_size,), (1,),
-            (cost_matrices_gpu, row_match, col_match, prices, batch_size, N,
-             cp.float32(eps_init), cp.float32(eps_final), cp.float32(eps_decay),
-             max_rounds, max_iters)
-        )
-        
-        if kgs.profiling:
-            cp.cuda.Device().synchronize()
     elif config.algorithm == 'min_cost_row':
         # For each row take min over columns, then sum rows -> total cost.
         min_per_row = cp.amin(cost_matrices_gpu, axis=2)  # shape (batch_size, N)
@@ -595,9 +458,9 @@ def solve_lap_batch(cost_matrices_gpu: cp.ndarray, config: LAPConfig | None = No
     else:
         raise ValueError(f"Unknown LAPConfig.algorithm={config.algorithm!r}")
 
-    # If we ran Hungarian/Auction, compute costs from assignments; otherwise
+    # If we ran Hungarian, compute costs from assignments; otherwise
     # `total_costs` was computed directly above.
-    if config.algorithm in ('hungarian', 'auction'):
+    if config.algorithm == 'hungarian':
         blocks = (batch_size + 255) // 256
         _compute_costs_kernel(
             (blocks,), (256,),
@@ -662,9 +525,7 @@ def compute_diversity_shortcut_kernel(
     costs_out = cp.empty(total_pairs, dtype=cp.float32)
 
     import kaggle_support as kgs
-    if kgs.profiling:
-        cp.cuda.Device().synchronize()
-    
+
     # Launch kernel: 1 block per pair, N_trees threads per block
     # Shared memory: 4 * N_trees floats (ref_x, ref_y, ref_t, partial_sums)
     shared_mem_bytes = 4 * N_trees * 4  # 4 arrays * N_trees * sizeof(float)
@@ -677,9 +538,6 @@ def compute_diversity_shortcut_kernel(
          1 if do_mirror else 0),
         shared_mem=shared_mem_bytes
     )
-
-    if kgs.profiling:
-        cp.cuda.Device().synchronize()
     
     # Reshape and cast back to original dtype
     result = costs_out.reshape(N_pop, N_ref)

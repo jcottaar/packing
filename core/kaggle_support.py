@@ -30,10 +30,7 @@ else:
     env = 'vast'
 print('Detected environment:', env)
 
-profiling = False
 debugging_mode = 1
-verbosity = 1
-disable_any_parallel = False
 
 match env:
     case 'local':
@@ -76,23 +73,6 @@ def set_float32(use_float32:bool):
 '''
 Helper classes and functions
 '''
-
-def list_attrs(obj):
-    for name, val in inspect.getmembers(obj):
-        if name.startswith("_"):
-            continue
-        # # skip methods, but let descriptors through
-        # if callable(val) and not isinstance(val, property):
-        #     continue
-        print(f"{name} = {val}")
-
-def remove_and_make_dir(path):
-    try:
-        shutil.rmtree(path)
-    except Exception:
-        pass
-    os.makedirs(path)
-
 # Helper class - doesn't allow new properties after construction, and enforces property types. Partially written by ChatGPT.
 @dataclass
 class BaseClass:
@@ -148,90 +128,6 @@ def dill_save(filename, data):
     data = dill.dump(data, filehandler)
     filehandler.close()
     return data
-
-@decorator
-def profile_each_line(func, *args, **kwargs):
-    if not profiling:
-        return func(*args, **kwargs)
-    profiler = LineProfiler()
-    profiled_func = profiler(func)
-    try:
-        s=profiled_func(*args, **kwargs)
-        profiler.print_stats()
-        return s
-    except:
-        profiler.print_stats()
-        raise
-
-def profile_print(string):
-    if profiling:
-        print(string)
-
-module_profiler = None
-
-def enable_module_profiling(module, include_private=True):
-    """Enable profiling for all functions and methods in a module
-
-    Parameters
-    ----------
-    module : module
-        The module to profile
-    include_private : bool, default=True
-        If True, includes methods starting with single underscore (e.g., _do_move)
-        Always excludes dunder methods except __init__ and __call__
-    """
-    global module_profiler
-
-    module_profiler = LineProfiler()
-
-    for name, obj in inspect.getmembers(module):
-        # Profile module-level functions
-        if inspect.isfunction(obj) and obj.__module__ == module.__name__:
-            print(f'Added function: {name}')
-            module_profiler.add_function(obj)
-
-        # Profile class methods
-        elif inspect.isclass(obj) and obj.__module__ == module.__name__:
-            print(f'Processing class: {name}')
-            for method_name, method in inspect.getmembers(obj):
-                if inspect.isfunction(method) or inspect.ismethod(method):
-                    # Determine if we should include this method
-                    should_include = False
-
-                    if method_name.startswith('__'):
-                        # Only include specific dunder methods
-                        should_include = method_name in ['__init__', '__call__']
-                    elif method_name.startswith('_'):
-                        # Single underscore - include if include_private is True
-                        should_include = include_private
-                    else:
-                        # Public method - always include
-                        should_include = True
-
-                    if should_include:
-                        print(f'  Added method: {name}.{method_name}')
-                        module_profiler.add_function(method)
-
-    module_profiler.enable()
-
-def print_module_profile():
-    """Print accumulated profiling stats"""
-    global module_profiler
-    if module_profiler:
-        module_profiler.disable()
-        module_profiler.print_stats()
-
-
-def add_cursor(sc):
-
-    import mplcursors
-    cursor = mplcursors.cursor(sc, hover=True)
-
-    @cursor.connect("add")
-    def on_add(sel):
-        i = sel.index
-        sel.annotation.set_text(f"index={i}")
-
 
 def to_cpu(array):
     if isinstance(array, cp.ndarray):
@@ -808,11 +704,6 @@ class SolutionCollectionSquare(SolutionCollection):
                     # Sample within full square
                     cand_x = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, dtype=dtype_cp) + offset_x[remaining_mask]
                     cand_y = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, dtype=dtype_cp) + offset_y[remaining_mask]
-                    #ref_x,ref_y = dill_load(temp_dir + '/debug_move_centers.pkl')
-                    #print(ref_x-cand_x, ref_y-cand_y)
-                    #print(cand_x, cand_y)
-                    #raise 'stop'    
-
 
                     # Validate against the configured edge spacer
                     candidate_xyt = cp.zeros((n_remaining, 1, 3), dtype=dtype_cp)
@@ -843,10 +734,6 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
         if self.xyt is None:
             return 0
         return 4*self.xyt.shape[1]
-    
-    
-    #def rotate(self):
-    #    raise Exception('rotate not implemented for SolutionCollectionSquare')
     
     def canonicalize_xyt(self, xyt:cp.ndarray):
         """Canonicalize genotype to x<=0, y<=0 quadrant.
@@ -1049,9 +936,6 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
         if self.xyt is None:
             return 0
         return 2*self.xyt.shape[1]
-    
-    #def rotate(self):
-   #     raise Exception('rotate not implemented for SolutionCollectionSquareSymmetric180')
     
     def canonicalize_xyt(self, xyt:cp.ndarray):
         """Canonicalize genotype to one half-plane.
@@ -1432,7 +1316,6 @@ class SolutionCollectionLattice(SolutionCollection):
         crystal_axes[:, 1, 0] = self.h[:, 1] * cp.cos(self.h[:, 2])  # b_x
         crystal_axes[:, 1, 1] = self.h[:, 1] * cp.sin(self.h[:, 2])  # b_y
 
-    @profile_each_line
     def snap(self):
         if not self.do_snap:
             return
@@ -1790,9 +1673,6 @@ def compute_genetic_diversity_matrix_shortcut(
     # Running minimum over transformations
     min_distances = cp.full((N_pop, N_ref), cp.inf, dtype=dtype_cp)
 
-    if profiling:
-        cp.cuda.Device().synchronize()
-
     for rot_angle, do_mirror in transformations:
         # ---------------------------------------------------------
         # Compute transformation + pairwise cost + assignment reduction
@@ -1808,58 +1688,9 @@ def compute_genetic_diversity_matrix_shortcut(
                 population_xyt, reference_xyt, cos_a, sin_a, do_mirror
             )
         else:
-            # Original CuPy implementation
-            # Step 1: Apply transformation to reference (no .copy())
-            ref_x = ref_x0
-            ref_y = ref_y0
-            ref_theta = ref_theta0
-
-            if do_mirror:
-                # creates new arrays; does not mutate the base views
-                ref_y = -ref_y
-                ref_theta = cp.pi - ref_theta
-
-            if rot_angle != 0.0:
-                new_x = ref_x * cos_a - ref_y * sin_a
-                new_y = ref_x * sin_a + ref_y * cos_a
-                ref_x = new_x
-                ref_y = new_y
-                ref_theta = ref_theta + rot_angle
-
-            # Wrap to [-pi, pi]
-            ref_theta = cp.remainder(ref_theta + np.pi, 2 * np.pi) - np.pi
-
-            # Step 2: Pairwise cost
-            dx = pop_x[:, :, cp.newaxis, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :, :]
-            dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
-            dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
-            dtheta = cp.remainder(dtheta + np.pi, 2 * np.pi) - np.pi
-
-            if profiling:
-                cp.cuda.Device().synchronize()
-
-            # (N_pop, N_trees, N_ref, N_trees)
-            cost_matrices = dx**2 + dy**2 + dtheta**2
-
-            if profiling:
-                cp.cuda.Device().synchronize()
-
-            # Step 3: Shortcut assignment reduction for this transform
-            batched = cost_matrices.transpose(0, 2, 1, 3).reshape(-1, N_trees, N_trees)  # (N_pop*N_ref, N, N)
-
-            if lap_config.algorithm == "min_cost_row":
-                min_per_row = cp.amin(batched, axis=2)                 # (N_pop*N_ref, N)
-                assignment_costs = cp.sum(cp.sqrt(min_per_row), axis=1) # (N_pop*N_ref,)
-            else:  # "min_cost_col"
-                min_per_col = cp.amin(batched, axis=1)                 # (N_pop*N_ref, N)
-                assignment_costs = cp.sum(cp.sqrt(min_per_col), axis=1) # (N_pop*N_ref,)
-
-            costs_this_transform = assignment_costs.reshape(N_pop, N_ref)  # (N_pop, N_ref)
-
+            raise Exception('Only implemented on main branch')
+                    
         min_distances = cp.minimum(min_distances, costs_this_transform)
-
-        if profiling:
-            cp.cuda.Device().synchronize()
 
     return min_distances
 
@@ -1939,8 +1770,6 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     
     # Compute cost matrices for all 8 transformations on GPU
     all_cost_matrices = []
-    if profiling:
-        cp.cuda.Device().synchronize()
     for rot_angle, do_mirror in transformations:
         # ---------------------------------------------------------
         # Step 1: Apply transformation to reference individuals (GPU)
@@ -1975,11 +1804,7 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
         dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
         dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
         dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
-        if profiling:
-            cp.cuda.Device().synchronize()
         cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)
-        if profiling:
-            cp.cuda.Device().synchronize()
         
         all_cost_matrices.append(cost_matrices)
     
@@ -1990,22 +1815,13 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     # Then reshape to (8*N_pop*N_ref, N_trees, N_trees) for batched solving
     stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_ref, N_trees)
     batched = stacked.transpose(0, 1, 3, 2, 4).reshape(-1, N_trees, N_trees)  # (8*N_pop*N_ref, N_trees, N_trees)
-
-    if profiling:
-        cp.cuda.Device().synchronize()
     
     # Solve all LAPs on GPU
     _, all_assignment_costs = lap_batch.solve_lap_batch(batched, config=lap_config)  # (8*N_pop*N_ref,)
-
-    if profiling:
-        cp.cuda.Device().synchronize()
     
     # Reshape back and take minimum across transformations
     all_costs_array = all_assignment_costs.reshape(8 if transform else 1, N_pop, N_ref)  # (8, N_pop, N_ref)
     min_distances = all_costs_array.min(axis=0)  # (N_pop, N_ref)
-    
-    if profiling:
-        cp.cuda.Device().synchronize()
     
     return min_distances
 
@@ -2043,208 +1859,6 @@ def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndar
     result_matrix = compute_genetic_diversity_matrix(population_xyt, reference_batch, lap_config=lap_config, transform=transform)  # (N_pop, 1)
     
     return result_matrix[:, 0]  # (N_pop,)
-
-
-def find_best_transformation(xyt1: cp.ndarray, xyt2: cp.ndarray) -> tuple:
-    """
-    Find the transformation of xyt2 that minimizes genetic diversity with xyt1.
-
-    Both individuals are centered at their centroids before comparison to make
-    the result invariant to initial translation.
-
-    Parameters
-    ----------
-    xyt1 : cp.ndarray
-        Shape (N_trees, 3) - first individual (x, y, theta)
-    xyt2 : cp.ndarray
-        Shape (N_trees, 3) - second individual to transform
-
-    Returns
-    -------
-    transformed_xyt2 : cp.ndarray
-        Shape (N_trees, 3) - xyt2 after applying best transformation, centered at origin
-    rotation_angle : float
-        Rotation angle applied in radians (0, π/2, π, 3π/2)
-    mirrored : bool
-        Whether x-axis mirroring was applied
-    """
-    import lap_batch
-
-    N_trees = xyt1.shape[0]
-
-    # Validate shapes
-    assert xyt1.shape == (N_trees, 3), f"xyt1 shape {xyt1.shape} doesn't match expected ({N_trees}, 3)"
-    assert xyt2.shape == (N_trees, 3), f"xyt2 shape {xyt2.shape} doesn't match expected ({N_trees}, 3)"
-
-    # Center both individuals at origin (immune to transforms)
-    xyt1_centered = xyt1.copy()
-    xyt1_centered[:, 0] -= cp.mean(xyt1[:, 0])
-    xyt1_centered[:, 1] -= cp.mean(xyt1[:, 1])
-
-    xyt2_centered = xyt2.copy()
-    xyt2_centered[:, 0] -= cp.mean(xyt2[:, 0])
-    xyt2_centered[:, 1] -= cp.mean(xyt2[:, 1])
-
-    # Define the 8 transformations (rotation_angle, mirror_x)
-    transformations = [
-        (0.0,        False),  # Identity
-        (np.pi/2,    False),  # 90° rotation
-        (np.pi,      False),  # 180° rotation
-        (3*np.pi/2,  False),  # 270° rotation
-        (0.0,        True),   # Mirror only
-        (np.pi/2,    True),   # Mirror + 90° rotation
-        (np.pi,      True),   # Mirror + 180° rotation
-        (3*np.pi/2,  True),   # Mirror + 270° rotation
-    ]
-
-    # Fixed reference (xyt1_centered)
-    ref_x = xyt1_centered[:, 0]      # (N_trees,)
-    ref_y = xyt1_centered[:, 1]      # (N_trees,)
-    ref_theta = xyt1_centered[:, 2]  # (N_trees,)
-
-    # Track best transformation
-    best_cost = float('inf')
-    best_transform_idx = 0
-    best_transformed_xyt2 = None
-    best_assignment = None
-
-    # Try all 8 transformations
-    for idx, (rot_angle, do_mirror) in enumerate(transformations):
-        # Apply transformation to xyt2_centered
-        trans_x = xyt2_centered[:, 0].copy()
-        trans_y = xyt2_centered[:, 1].copy()
-        trans_theta = xyt2_centered[:, 2].copy()
-
-        if do_mirror:
-            trans_y = -trans_y
-            trans_theta = cp.pi - trans_theta
-
-        if rot_angle != 0.0:
-            cos_a = np.cos(rot_angle)
-            sin_a = np.sin(rot_angle)
-            new_x = trans_x * cos_a - trans_y * sin_a
-            new_y = trans_x * sin_a + trans_y * cos_a
-            trans_x = new_x
-            trans_y = new_y
-            trans_theta = trans_theta + rot_angle
-
-        trans_theta = cp.remainder(trans_theta + np.pi, 2*np.pi) - np.pi
-
-        # Compute pairwise cost matrix
-        # ref: (N_trees,), trans: (N_trees,) -> cost_matrix: (N_trees, N_trees)
-        dx = ref_x[:, cp.newaxis] - trans_x[cp.newaxis, :]
-        dy = ref_y[:, cp.newaxis] - trans_y[cp.newaxis, :]
-        dtheta = ref_theta[:, cp.newaxis] - trans_theta[cp.newaxis, :]
-        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
-        cost_matrix = cp.sqrt(dx**2 + dy**2 + dtheta**2)
-
-        # Solve assignment problem
-        cost_matrix_batch = cost_matrix[cp.newaxis, :, :]  # (1, N_trees, N_trees)
-        assignments, assignment_costs = lap_batch.solve_lap_batch(cost_matrix_batch)
-        assignment_cost = float(assignment_costs[0])
-
-        # Track best
-        if assignment_cost < best_cost:
-            best_cost = assignment_cost
-            best_transform_idx = idx
-            best_transformed_xyt2 = cp.stack([trans_x, trans_y, trans_theta], axis=1)
-            best_assignment = assignments[0]  # (N_trees,) - col indices for each row
-
-    # Extract best transformation parameters
-    best_rotation_angle, best_mirrored = transformations[best_transform_idx]
-
-    # Reorder trees in transformed_xyt2 to match xyt1 ordering
-    # best_assignment[i] tells us which tree in transformed_xyt2 corresponds to tree i in xyt1
-    best_transformed_xyt2_reordered = best_transformed_xyt2[best_assignment]
-
-    return best_transformed_xyt2_reordered, best_rotation_angle, best_mirrored
-
-def copy_inner_part(xyt1, xyt2, N):
-    # Copies the inner N trees from xyt2 to xyt1, modifying in place
-    assert xyt1.shape[1] == 3
-    assert xyt2.shape[1] == 3
-    assert N<=xyt2.shape[0]
-    assert N<=xyt1.shape[0]
-
-    # Find trees to copy
-    distance_from_center = xyt2[:, :2]# - cp.mean(xyt2[:, :2], axis=0, keepdims=True)
-    distances = cp.linalg.norm(distance_from_center, axis=1, ord=cp.inf)  # (N_trees,)
-    sorted_indices = cp.argsort(distances)
-    selected_indices = sorted_indices[:N]
-    xyt_to_copy = xyt2[selected_indices]
-
-    # Reorder sol1 to match sol2
-    #reorder_to_match(xyt1, xyt2)
-
-    # Copy into sol1
-    xyt1[:N] = xyt_to_copy
-
-def reorder_to_match(xyt1: cp.ndarray, xyt2: cp.ndarray):
-    """
-    Reorders xyt1 in-place to minimize the distance to xyt2.
-    xyt2 can be smaller than xyt1.
-    This solves the rectangular assignment problem to find the best subset
-    of xyt1 that matches xyt2.
-
-    Parameters
-    ----------
-    xyt1 : cp.ndarray
-        Shape (N1, 3) - array to be reordered in-place.
-    xyt2 : cp.ndarray
-        Shape (N2, 3) - array to match against, where N2 <= N1.
-    """
-    from scipy.optimize import linear_sum_assignment
-
-    N1 = xyt1.shape[0]
-    N2 = xyt2.shape[0]
-
-    if N1 < N2:
-        raise ValueError(f"xyt1 ({N1} trees) cannot be smaller than xyt2 ({N2} trees).")
-
-    if N1 == 0 or N2 == 0:
-        return # Nothing to do
-
-    # Compute the pairwise distance matrix (cost matrix)
-    # Shape: (N1, N2)
-    dist_matrix = cp.sum((xyt1[:, cp.newaxis, :2] - xyt2[cp.newaxis, :, :2])**2, axis=2)
-
-    # Solve the rectangular assignment problem using scipy
-    # scipy requires numpy arrays, so convert from cupy to numpy
-    dist_matrix_np = cp.asnumpy(dist_matrix)
-    
-    # row_ind corresponds to indices in xyt1, col_ind to indices in xyt2
-    row_ind, col_ind = linear_sum_assignment(dist_matrix_np)
-    
-    # Convert back to cupy arrays
-    row_ind = cp.asarray(row_ind)
-    col_ind = cp.asarray(col_ind)
-
-    # The assignment gives us N2 pairs.
-    # We need to reorder xyt1 so that the chosen N2 trees are first,
-    # and in the correct order to match xyt2.
-
-    # Create a mapping from the original xyt1 index to its new position
-    new_order = -cp.ones(N1, dtype=cp.int32)
-    
-    # The trees from xyt1 that are matched (row_ind) should be ordered
-    # according to their corresponding match in xyt2 (col_ind).
-    # Example: if xyt1[i] is matched with xyt2[j], then xyt1[i] should go to position j.
-    new_order[row_ind] = col_ind
-
-    # Get the indices of unassigned trees in xyt1
-    unassigned_mask = cp.ones(N1, dtype=bool)
-    unassigned_mask[row_ind] = False
-    unassigned_indices = cp.where(unassigned_mask)[0]
-
-    # Place unassigned trees at the end
-    new_order[unassigned_indices] = cp.arange(N2, N1)
-
-    # Create the permutation index to reorder xyt1
-    permutation = cp.argsort(new_order)
-
-    # Reorder xyt1 in-place
-    original_xyt1 = xyt1.copy()
-    xyt1[:] = original_xyt1[permutation]
 
 packings = dill_load(code_dir + '/../res/packings_optimized_unique.pickle')
 def create_tiled_solution(name, n_tilings, make_symmetric=False, axis1_offset = 0., axis2_offset=0.):

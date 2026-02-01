@@ -21,6 +21,7 @@ def run_all_tests(regenerate_reference=False):
     test_costs()               
     pack_cuda_primitives_test.run_all_tests()    
     print("All tests passed.")
+    kgs.set_float32(True)
 
 def test_ga(regenerate_reference, test_case, do_resume):
     match test_case:
