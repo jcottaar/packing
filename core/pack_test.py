@@ -7,10 +7,8 @@ import kaggle_support as kgs
 from dataclasses import dataclass, field, fields
 from typeguard import typechecked
 import pack_cost
-import pack_basics
 import pack_cuda
 import pack_cuda_primitives_test
-import pack_runner
 import pack_ga3
 import matplotlib.pyplot as plt
 import pack_vis_sol
@@ -74,17 +72,17 @@ def test_costs():
     sol_list = []
     sol_list = []
     sol_list.append(kgs.SolutionCollectionSquareSymmetric180())
-    sol_list[-1].xyt = cp.array([pack_basics.place_random(3, 1.5, generator=np.random.default_rng(seed=1)).xyt], dtype=cp.float64)
+    sol_list[-1].xyt = cp.array([place_random(3, 1.5, generator=np.random.default_rng(seed=1)).xyt], dtype=cp.float64)
     sol_list[-1].h = cp.array([[0.5, 0., 0.]])
     sol_list.append(kgs.SolutionCollectionSquareSymmetric90())
-    sol_list[-1].xyt = cp.array([pack_basics.place_random(3, 1.5, generator=np.random.default_rng(seed=1)).xyt], dtype=cp.float64)
+    sol_list[-1].xyt = cp.array([place_random(3, 1.5, generator=np.random.default_rng(seed=1)).xyt], dtype=cp.float64)
     sol_list[-1].h = cp.array([[0.5, 0., 0.]])
     sol_list.append(kgs.SolutionCollectionSquare())
-    sol_list[-1].xyt = cp.array([pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=0)).xyt], dtype=cp.float64)
+    sol_list[-1].xyt = cp.array([place_random(10, 1.5, generator=np.random.default_rng(seed=0)).xyt], dtype=cp.float64)
     sol_list[-1].h = cp.array([[0.5, 0.2, 0.4]])
     sol_list[-1].override_phenotype = True
     sol_list.append(kgs.SolutionCollectionSquare())
-    sol_list[-1].xyt = cp.array([pack_basics.place_random(10, 1.5, generator=np.random.default_rng(seed=2)).xyt], dtype=cp.float64)
+    sol_list[-1].xyt = cp.array([place_random(10, 1.5, generator=np.random.default_rng(seed=2)).xyt], dtype=cp.float64)
     sol_list[-1].h = cp.array([[2., -0.1, -0.15]])
     sol_list[-1].override_phenotype = True
     sol_list.append(kgs.SolutionCollectionLattice())
@@ -308,5 +306,16 @@ def test_costs():
         # kgs.debugging_mode = 2
 
 
-if __name__ == "__main__":
-    run_all_tests()
+def place_random(N, inner_size, generator=None):
+    '''
+    Place trees randomly
+    '''
+    # IDEA: force all trees inside inner_size, rather than their centers
+    if generator is None:
+        generator = np.random.default_rng(seed=42)   
+    tree_list = kgs.TreeList()
+    # use Generator.random (uniform [0,1)) and scale by inner_size
+    tree_list.x =  generator.random(N) * inner_size - inner_size/2
+    tree_list.y =  generator.random(N) * inner_size - inner_size/2
+    tree_list.theta = generator.random(N) * 2 * np.pi
+    return tree_list
