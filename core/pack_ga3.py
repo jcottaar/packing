@@ -104,17 +104,13 @@ class Initializer(kgs.BaseClass):
         return population        
 
 @dataclass
-class InitializerRandom(Initializer):
-    size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
+class InitializerRandom(Initializer): 
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array    
-    use_fixed_h_for_size_setup: bool = field(init=True, default=True)
     ref_sol_crystal_type: str = field(init=True, default=None)
     ref_sol_axis1_offset: object = field(init=True, default=None)
     ref_sol_axis2_offset: object = field(init=True, default=None)
     ref_sol: kgs.SolutionCollection = field(init=True, default=None)
-    ref_N_scaling: float = field(init=True, default=25./68.)
-    ref_N: int = field(init=True, default=None)
     ref_rotate: float = field(init=True, default=0.) # in radians
 
     new_tree_placer: bool = field(init=True, default=False)
@@ -122,9 +118,7 @@ class InitializerRandom(Initializer):
     def _initialize_population(self, N_individuals, N_trees):
         self.check_constraints()
         sol = self.base_solution.create_empty(N_individuals, N_trees)
-        size_setup_scaled = self.size_setup * np.sqrt(N_trees)
-        if self.use_fixed_h_for_size_setup:
-            size_setup_scaled = float(cp.asnumpy(self.fixed_h[0]))
+        size_setup_scaled = float(cp.asnumpy(self.fixed_h[0]))
         generator = np.random.default_rng(seed=self.seed)
         if not self.new_tree_placer:
             xyt = generator.uniform(-0.5, 0.5, size=sol.xyt.shape)
@@ -133,23 +127,7 @@ class InitializerRandom(Initializer):
             sol.xyt = xyt   
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
             sol.canonicalize()
-            if self.ref_sol_crystal_type is not None:
-                axis1_offset = self.ref_sol_axis1_offset(generator)
-                axis2_offset = self.ref_sol_axis2_offset(generator)
-                self.ref_sol = kgs.create_tiled_solution(self.ref_sol_crystal_type, 25, make_symmetric=not isinstance(self.base_solution, kgs.SolutionCollectionSquare), 
-                                                        axis1_offset=axis1_offset, axis2_offset=axis2_offset)
-            if self.ref_N_scaling is not None:
-                self.ref_N = int(self.ref_N_scaling * N_trees)
-            if self.ref_sol is not None:
-                ref_sol_use = copy.deepcopy(self.ref_sol)
-                if self.ref_rotate is None:
-                    ref_rotate = generator.uniform(0., 2*np.pi)
-                else:
-                    ref_rotate = self.ref_rotate
-                ref_sol_use.rotate(cp.array([ref_rotate], dtype=kgs.dtype_cp))
-                ref_sol_use.canonicalize()
-                for i in range(N_individuals):
-                    kgs.copy_inner_part(sol.xyt[i], ref_sol_use.xyt[0], self.ref_N)
+            assert self.ref_sol_crystal_type is None and self.ref_sol is None            
         else:
             assert self.fixed_h is not None
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))      
@@ -231,9 +209,7 @@ class GA(kgs.BaseClass):
     reset_check_generations: int = field(init=True, default=None)
     reset_check_generations_ratio: float = field(init=True, default=0.1)
     reset_check_threshold: float = field(init=True, default=0.1)
-    always_allow_mate_with_better: bool = field(init=True, default=True)
-    allow_mate_with_better_controls_all: bool = field(init=True, default=False) # if true, no mating allowed at all if _allow_mate_with_better is false
-    target_score: float = field(init=True, default=0.) # stop if reached
+    always_allow_mate_with_better: bool = field(init=True, default=False)
     
     make_own_fig = None # input to plt.subplots()
     make_own_fig_size = None
@@ -291,8 +267,6 @@ class GA(kgs.BaseClass):
                 b = self.best_ever[i]
                 if kgs.lexicographic_less_than(c.fitness[0], b.fitness[0]):
                     self.best_ever[i] = copy.deepcopy(c)
-            if self.best_costs_per_generation[0][-1][0]<=self.target_score:
-                self._stopped = True
             if self.stop_check_generations is not None and len(self.champions)>0:
                 assert len(self.best_costs_per_generation)==1
                 effective_stop_check_generations = self.stop_check_generations + self.champions[0].phenotype.N_trees * self.stop_check_generations_scale 
@@ -346,10 +320,6 @@ class GA(kgs.BaseClass):
                     filtered_mate_sol.select_ids(allowed_idx)
                     filtered_mate_costs = mate_costs_np[allowed_idx]
                     filtered_mate_weights = np.asarray(mate_weights)[allowed_idx]                    
-            if self.allow_mate_with_better_controls_all and not self._allow_mate_with_better:
-                filtered_mate_sol = None
-                filtered_mate_weights = None
-                filtered_mate_costs = None
         res = self._generate_offspring(filtered_mate_sol, filtered_mate_weights, filtered_mate_costs, generator)        
         self._cached_offspring = res
         return res
@@ -437,13 +407,14 @@ class GA(kgs.BaseClass):
 @dataclass
 class GAMulti(GA):
     # Configuration    
-    ga_list: list = field(init=True, default=None)
+    ga_list: list = field(init=True, default=None)    
+
+    allow_reset_ratio: float = field(init=True, default=0.95) # allow only the worst X% of subpopulations to reset
+    diversity_reset_threshold: float = field(init=True, default=0.01/40) # diversity required to avoid reset
+    diversity_reset_check_frequency: int = field(init=True, default=5) # in generations
+
     plot_diversity_ax = None
     plot_subpopulation_costs_per_generation_ax = None
-    allow_reset_ratio: float = field(init=True, default=1.) # allow only the worst X% of subpopulations to reset
-    diversity_reset_threshold: float = field(init=True, default=np.inf) # diversity required to avoid reset
-    diversity_reset_check_frequency: int = field(init=True, default=5) # in generations
-    diversity_delete_instead_of_reset: bool = field(init=True, default=False)
 
     def _check_constraints(self):
         super()._check_constraints()
@@ -512,16 +483,13 @@ class GAMulti(GA):
                                 worse_idx = max(i, j)
                             to_reset.add(worse_idx)
                     for idx in sorted(to_reset)[::-1]:
-                        if self.diversity_delete_instead_of_reset:
-                            del self.ga_list[idx]
-                        else:
-                            ga_to_reset = self.ga_list[idx]
-                            if ga_to_reset.best_costs_per_generation and ga_to_reset.best_costs_per_generation[0]:
-                                ga_to_reset.best_costs_per_generation[0].pop(-1)
-                            ga_to_reset.reset(generator)
-                            ga_to_reset.score(generator, register_best=True)
-                            ga_to_reset._skip_next_selection = True
-                            costs_per_ga[idx] = ga_to_reset.champions[0].fitness[0]
+                        ga_to_reset = self.ga_list[idx]
+                        if ga_to_reset.best_costs_per_generation and ga_to_reset.best_costs_per_generation[0]:
+                            ga_to_reset.best_costs_per_generation[0].pop(-1)
+                        ga_to_reset.reset(generator)
+                        ga_to_reset.score(generator, register_best=True)
+                        ga_to_reset._skip_next_selection = True
+                        costs_per_ga[idx] = ga_to_reset.champions[0].fitness[0]
 
     def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         return sum([
@@ -657,7 +625,7 @@ class GAMultiIsland(GAMultiSimilar):
 @dataclass
 class GAMultiRing(GAMultiIsland):
     # Configuration
-    mate_distance: int = field(init=True, default=4)
+    mate_distance: int = field(init=True, default=6)
     star_topology: bool = field(init=True, default=False)  # Connect all islands to island 0
     asymmetric_star: bool = field(init=True, default=False)  # If True with star_topology, hub receives but doesn't send
     small_world_rewiring: float = field(init=True, default=0.0)  # Probability of rewiring edges
@@ -720,20 +688,23 @@ ref_solution = None
 class GASinglePopulation(GA):
     # Configuration
     N_trees_to_do: int = field(init=True, default=None)
-    population_size:int = field(init=True, default=4000) 
+    population_size:int = field(init=True, default=1500) 
     initializer: Initializer = field(init=True, default_factory=InitializerRandom)
     move: pack_move.Move = field(init=True, default=None)
     fixed_h: float = field(init=True, default=-1.)
+    ref_score_scale: float = field(init=True, default=1.1)
     reduce_h_threshold: float = field(init=True, default=1e-5/40) # scaled by N_trees
     reduce_h_amount: float = field(init=True, default=2e-3/np.sqrt(40)) # scaled by sqrt(N_trees)
-    reduce_h_per_individual: bool = field(init=True, default=False)
-    ref_score_scale: float = field(init=True, default=1.1)
+    reduce_h_per_individual: bool = field(init=True, default=False)    
 
     plot_diversity_ax = None
     plot_diversity_alt_ax = None
     plot_population_fitness_ax = None
+
     remove_population_after_abbreviate: bool = field(init=True, default=True)
 
+    _initial_population_size: int = field(init=False, default=None) # set by subclass in initialize()
+    
     # Results
     population: Population = field(init=True, default=None)
 
@@ -773,7 +744,7 @@ class GASinglePopulation(GA):
             else:
                 self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
             self.initializer.base_solution.use_fixed_h = True
-        self.population = self.initializer.initialize_population(len(self.selection_size), self.N_trees_to_do)    
+        self.population = self.initializer.initialize_population(self._initial_population_size, self.N_trees_to_do)    
         self.population.check_constraints()        
 
     def _score(self, generator, register_best):
@@ -828,12 +799,11 @@ class GASinglePopulation(GA):
     
 
 @dataclass
-class GASinglePopulationOld(GASinglePopulation):
+class GASinglePopulationDiversity(GASinglePopulation):
 
-    population_size:int = field(init=True, default=4000)
+    population_size:int = field(init=True, default=1500)
     generate_extra: float = field(init=True, default=0.4)  # Make this equal to Orchestrator.filter_before_rought
-    selection_size:list = field(init=True, default=None)#lambda: [int(4.*(x-1))+1 for x in [1,2,3,4,5,6,7,8,9,10,12,14,16,18,20,25,30,35,40,45,50,60,70,80,90,100,120,140,160,180,200,250,300,350,400,450,500]])
-    prob_mate_own: float = field(init=True, default=0.5)
+    prob_mate_own: float = field(init=True, default=0.7)
     
     # Parameters for generating selection_size (used only if selection_size is None)
     # These are ratios that remain constant when scaling population_size
@@ -846,20 +816,20 @@ class GASinglePopulationOld(GASinglePopulation):
     lap_config: lap_batch.LAPConfig = field(init=True, default_factory=lambda: lap_batch.LAPConfig(algorithm='min_cost_row'))
 
     def _initialize(self, generator):
-        # Generate selection_size from parameters if not provided
-        if self.selection_size is None:
-            total_survivors = max(2, int(self.population_size * self.survival_rate))
-            n_elite = max(1, int(total_survivors * self.elitism_fraction))
-            n_diversity_tiers = total_survivors - n_elite
-            max_tier = max(n_elite + 1, int(self.population_size * self.search_depth))
-            
-            elite = list(range(1, n_elite + 1))
-            if n_diversity_tiers > 0:
-                tiers = np.geomspace(n_elite + 1, max_tier, n_diversity_tiers).astype(int)
-                tiers = list(np.unique(tiers))
-            else:
-                tiers = []
-            self.selection_size = elite + tiers
+        # Convoluted way to find _initial_population_size (due to legacy)
+        total_survivors = max(2, int(self.population_size * self.survival_rate))
+        n_elite = max(1, int(total_survivors * self.elitism_fraction))
+        n_diversity_tiers = total_survivors - n_elite
+        max_tier = max(n_elite + 1, int(self.population_size * self.search_depth))
+        
+        elite = list(range(1, n_elite + 1))
+        if n_diversity_tiers > 0:
+            tiers = np.geomspace(n_elite + 1, max_tier, n_diversity_tiers).astype(int)
+            tiers = list(np.unique(tiers))
+        else:
+            tiers = []
+        selection_size = elite + tiers
+        self._initial_population_size = len(selection_size)
         super()._initialize(generator)
 
     def _apply_selection(self):
@@ -867,7 +837,7 @@ class GASinglePopulationOld(GASinglePopulation):
         current_pop.select_ids(kgs.lexicographic_argsort(current_pop.fitness))  # Sort by fitness lexicographically
         current_xyt = current_pop.genotype.xyt  # (N_individuals, N_trees, 3)
 
-        # Alternative selection, based on best individuals that meet diversity criterion
+        # Based on best individuals that meet diversity criterion
         
         # Calculate how many to select
         total_survivors = max(2, int(self.population_size * self.survival_rate))
@@ -1039,8 +1009,8 @@ class Orchestrator(kgs.BaseClass):
     # Configuration
     ga: GA = field(init=True, default=None)
     fitness_cost: pack_cost.Cost = field(init=True, default=None)    
-    rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps
     filter_before_rough: float = field(init=True, default=0.4)  # fraction of solutions to keep before rough relax
+    rough_relaxers: list = field(init=True, default=None) # meant to prevent heavy overlaps    
     fine_relaxers: list = field(init=True, default=None)  # meant to refine solutions
     n_generations: int = field(init=True, default=200)
     genotype_at: int = field(init=True, default=1)  # 0:before relax, 1:after rough relax, 2:after fine relax(=phenotype)
@@ -1165,21 +1135,13 @@ class Orchestrator(kgs.BaseClass):
 def baseline():
     runner = Orchestrator(n_generations=60000)
     runner.ga = GAMultiRing(N=16)
-    runner.ga.diversity_reset_threshold = 0.01/40
-    runner.ga.mate_distance=6
 
-    ga_base = GASinglePopulationOld(N_trees_to_do=-1)
-    ga_base.population_size = 1500 
+    ga_base = GASinglePopulationDiversity(N_trees_to_do=-1) # N_trees_to_do to be set by client    
     ga_base.reset_check_generations = 100
     ga_base.reset_check_threshold = 0.5
-    ga_base.prob_mate_own = 0.7
-    ga_base.reduce_h_threshold = 1e-5/40
-    ga_base.always_allow_mate_with_better = False
-    ga_base.fixed_h = -1.
 
     runner.ga.ga_base = ga_base
     runner.ga.do_legalize = True
-    runner.ga.allow_reset_ratio = 0.95
 
     runner.ga.make_own_fig = (2,3)
     runner.ga.make_own_fig_size = (18,12)
@@ -1188,7 +1150,7 @@ def baseline():
     runner.ga.champion_genotype_ax = (1,2)
     runner.ga.champion_phenotype_ax = (0,2)
     runner.ga.plot_diversity_ax = (1,0)
-    runner.plot_every = 3
+    runner.plot_every = 20
 
     return runner
 
@@ -1248,7 +1210,7 @@ def baseline_symmetry_180_tesselated(adapt_moves=True):
     runner = baseline_symmetry_180()
     runner.ga.ga_base.initializer.ref_sol_crystal_type = 'Perfect dimer'
     runner.ga.ga_base.initializer.ref_sol_axis1_offset = lambda r:r.choice([0.,0.5]).item()
-    runner.ga.ga_base.initializer.ref_sol_axis2_offset = 'set!'
+    runner.ga.ga_base.initializer.ref_sol_axis2_offset = 'set!' # must be configured by client
     runner.ga.stop_check_generations_scale = 10
     runner.ga.ga_base.reset_check_generations_ratio = 0.
 
