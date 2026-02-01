@@ -1,3 +1,19 @@
+"""Kaggle Support Module - Core data structures and utilities for tree packing.
+
+This code is released under CC BY-SA 4.0, meaning you can freely use and adapt
+it (including commercially), but must give credit to the original author
+(Jeroen Cottaar) and keep it under this license.
+
+This module provides:
+- Base classes with type checking and frozen attribute enforcement
+- Tree geometry creation and manipulation (Christmas tree polygons)
+- TreeList for managing collections of tree positions/rotations
+- SolutionCollection classes for batched optimization solutions
+- Environment detection and path configuration
+- Precision control (float32/float64) for GPU computations
+- Several utility functions, including for genetic diversity calculation
+"""
+
 import numpy as np
 import cupy as cp
 import dill
@@ -14,29 +30,32 @@ from typeguard import typechecked
 multiprocess.set_start_method('spawn', force=True)
 
 
-'''
-Determine environment and globals
-'''
+# =============================================================================
+# Environment Detection and Global Paths
+# =============================================================================
+
+# Detect runtime environment based on directory structure
 if os.path.isdir('/mnt/d/packing/'):
     env = 'local'
-    d_drive = '/mnt/d/'    
+    d_drive = '/mnt/d/'
 elif os.path.isdir('/kaggle/working/'):
     env = 'kaggle'
 else:
     env = 'vast'
 print('Detected environment:', env)
 
-debugging_mode = 1
+debugging_mode = 1  # Controls type checking and constraint validation
 
+# Set environment-specific paths
 match env:
     case 'local':
-        data_dir = d_drive+'/packing/data/'
-        temp_dir = d_drive+'/packing/temp/'             
-        code_dir = d_drive+'/packing/code/core/' 
-        submission_csv_path = temp_dir+'submission.csv'
+        data_dir = d_drive + '/packing/data/'
+        temp_dir = d_drive + '/packing/temp/'
+        code_dir = d_drive + '/packing/code/core/'
+        submission_csv_path = temp_dir + 'submission.csv'
     case 'vast':
         data_dir = '/packing/data/'
-        temp_dir = '/packing/temp/'             
+        temp_dir = '/packing/temp/'
         code_dir = '/packing/code/core/'
         submission_csv_path = None
     case 'kaggle':
@@ -44,223 +63,354 @@ match env:
         temp_dir = '/kaggle/working/'
         code_dir = '/kaggle/input/christmas-tree-library/core/'
         submission_csv_path = '/kaggle/input/christmas-tree-solution/submission.csv'
+
 os.makedirs(data_dir, exist_ok=True)
 os.makedirs(temp_dir, exist_ok=True)
 
 
-'''
-Precision control - note set to float32 at the end of the module
-'''
+# =============================================================================
+# Precision Control
+# =============================================================================
+
+# Global precision settings (initialized by set_float32, called at module end)
 USE_FLOAT32, dtype_cp, dtype_np, just_over_one = None, None, None, None
-def set_float32(use_float32:bool):
+
+
+def set_float32(use_float32: bool):
+    """Set global floating-point precision for GPU and CPU arrays.
+
+    Args:
+        use_float32: If True, use float32 precision; otherwise use float64.
+
+    Side Effects:
+        Sets global variables: USE_FLOAT32, dtype_cp, dtype_np, just_over_one,
+        TREE_EXPANSION. Also reinitializes tree geometry via
+        initialize_tree_globals().
+    """
     global USE_FLOAT32, dtype_cp, dtype_np, just_over_one, TREE_EXPANSION
+
     if use_float32:
         USE_FLOAT32, dtype_cp, dtype_np = True, cp.float32, np.float32
         just_over_one = 1.000001
     else:
         USE_FLOAT32, dtype_cp, dtype_np = False, cp.float64, np.float64
         just_over_one = 1.00000000000001
-    TREE_EXPANSION = 20*(1.000001-1)
 
-    # Initialize tree globals after dtype is set (defined later in module)
-    # Use late binding to avoid forward reference issues
+    TREE_EXPANSION = 20 * (1.000001 - 1)
+    # Tree expansion makes trees slightly bigger to be sure our solutions are legal for Kaggle
+    # In my full submission, I also did a final compression step in float64 with a smaller TREE_EXPANSION
+
     initialize_tree_globals()
 
-'''
-Helper classes and functions
-'''
-# Helper class - doesn't allow new properties after construction, and enforces property types. Partially written by ChatGPT.
+
+# =============================================================================
+# Helper Classes and Functions
+# =============================================================================
+
 @dataclass
 class BaseClass:
-    _is_frozen: bool = field(default=False, init=False, repr=False)
-    comment:str = field(init=True, default='')
+    """Base dataclass with frozen attributes and runtime type checking.
 
-    def check_constraints(self, debugging_mode_offset = 0):
+    After construction, new attributes cannot be added. When debugging_mode > 0,
+    check_constraints() validates field types and subclass-specific constraints.
+
+    Note:
+        Subclasses should override _check_constraints() for custom validation.
+    """
+    _is_frozen: bool = field(default=False, init=False, repr=False)  # Freeze flag
+    comment: str = field(init=True, default='')  # Optional description
+
+    def check_constraints(self, debugging_mode_offset=0):
+        """Validate types and constraints if debugging_mode > 0.
+
+        Args:
+            debugging_mode_offset: Temporarily adjust global debugging_mode.
+        """
         global debugging_mode
-        debugging_mode = debugging_mode+debugging_mode_offset
+        debugging_mode = debugging_mode + debugging_mode_offset
         try:
             if debugging_mode > 0:
                 self._check_types()
                 self._check_constraints()
-            return
         finally:
             debugging_mode = debugging_mode - debugging_mode_offset
 
     def _check_constraints(self):
+        """Override in subclasses for custom constraint validation."""
         pass
 
     def _check_types(self):
+        """Verify all fields match their declared type hints."""
         type_hints = typing.get_type_hints(self.__class__)
         for field_info in fields(self):
             field_name = field_info.name
             expected_type = type_hints.get(field_name)
             actual_value = getattr(self, field_name)
-            
-            if expected_type and not isinstance(actual_value, expected_type) and actual_value is not None:
+
+            if (expected_type and
+                    not isinstance(actual_value, expected_type) and
+                    actual_value is not None):
                 raise TypeError(
                     f"Field '{field_name}' expected type {expected_type}, "
                     f"but got value {actual_value} of type {type(actual_value).__name__}.")
 
     def __post_init__(self):
-        # Mark the object as frozen after initialization
         object.__setattr__(self, '_is_frozen', True)
 
     def __setattr__(self, key, value):
-        # If the object is frozen, prevent setting new attributes
         if self._is_frozen and not hasattr(self, key):
             raise AttributeError(f"Cannot add new attribute '{key}' to frozen instance")
         super().__setattr__(key, value)
 
-# Small wrapper for dill loading
+
 def dill_load(filename):
+    """Load a pickled object from file using dill.
+
+    Args:
+        filename: Path to the pickle file.
+
+    Returns:
+        The deserialized Python object.
+    """
     filehandler = open(filename, 'rb')
     data = dill.load(filehandler)
     filehandler.close()
     return data
 
-# Small wrapper for dill saving
+
 def dill_save(filename, data):
+    """Save an object to file using dill serialization.
+
+    Args:
+        filename: Path to save the pickle file.
+        data: Python object to serialize.
+
+    Returns:
+        None (return value of dill.dump).
+    """
     filehandler = open(filename, 'wb')
     data = dill.dump(data, filehandler)
     filehandler.close()
     return data
 
+
 def to_cpu(array):
+    """Convert array to CPU (NumPy). Passes through if already NumPy.
+
+    Args:
+        array: CuPy or NumPy array.
+
+    Returns:
+        NumPy array.
+    """
     if isinstance(array, cp.ndarray):
         return array.get()
     else:
         return array
 
+
 def to_gpu(array):
+    """Convert array to GPU (CuPy). Passes through if already CuPy.
+
+    Args:
+        array: NumPy or CuPy array.
+
+    Returns:
+        CuPy array.
+    """
     if isinstance(array, cp.ndarray):
         return array
     else:
         return cp.array(array)
-    
+
+
 def clear_gpu():
+    """Free GPU memory by clearing FFT plan cache and memory pools."""
     cache = cp.fft.config.get_plan_cache()
     cache.clear()
     cp.get_default_memory_pool().free_all_blocks()
 
-    
-'''
-Define the trees
-'''
-scale_factor = 1.
-TREE_EXPANSION = 0.0  # Outward expansion distance for trees
+
+# =============================================================================
+# Tree Geometry Definition
+# =============================================================================
+
+scale_factor = 1.0
+TREE_EXPANSION = 0.0  # Outward expansion distance for collision tolerance
+
 
 def create_center_tree():
-    """Initializes the Christmas tree"""
+    """Create the canonical Christmas tree polygon centered at origin.
 
-    trunk_w = 0.15 + 2*TREE_EXPANSION
+    The tree has 3 tiers (top, middle, bottom) plus a trunk. Dimensions are
+    controlled by TREE_EXPANSION which adds tolerance for collision detection.
+
+    Returns:
+        tuple: (polygon, convex_breakdown, max_radius, centroid_offset)
+            - polygon: Shapely Polygon of the complete tree.
+            - convex_breakdown: List of 4 convex Polygons decomposing the tree.
+            - max_radius: Maximum distance from centroid to any vertex.
+            - centroid_offset: (cx, cy) original centroid before recentering.
+    """
+    # Tree dimensions with expansion tolerance
+    trunk_w = 0.15 + 2 * TREE_EXPANSION
     trunk_h = 0.2 + TREE_EXPANSION
-    base_w = 0.7 + 4*TREE_EXPANSION
-    mid_w = 0.4 + 6*TREE_EXPANSION
-    top_w = 0.25 + 4*TREE_EXPANSION
+    base_w = 0.7 + 4 * TREE_EXPANSION
+    mid_w = 0.4 + 6 * TREE_EXPANSION
+    top_w = 0.25 + 4 * TREE_EXPANSION
+
+    # Vertical positions (y-coordinates)
     tip_y = 0.8 + TREE_EXPANSION
     tier_1_y = 0.5 - TREE_EXPANSION
     tier_2_y = 0.25 - TREE_EXPANSION
     base_y = 0.0 - TREE_EXPANSION
     trunk_bottom_y = -trunk_h
-    
+
+    # Build the tree polygon vertices (clockwise from tip)
     sf = scale_factor
-    initial_polygon = Polygon(
-        [
-            # Start at Tip
-            (0.0 * sf, tip_y * sf),
-            # Right side - Top Tier
-            (top_w / 2 * sf, tier_1_y * sf),
-            (top_w / 4 * sf, tier_1_y * sf),
-            # Right side - Middle Tier
-            (mid_w / 2 * sf, tier_2_y * sf),
-            (mid_w / 4 * sf, tier_2_y * sf),
-            # Right side - Bottom Tier
-            (base_w / 2 * sf, base_y * sf),
-            # Right Trunk
-            (trunk_w / 2 * sf, base_y * sf),
-            (trunk_w / 2 * sf, trunk_bottom_y * sf),
-            # Left Trunk
-            (-(trunk_w / 2) * sf, trunk_bottom_y * sf),
-            (-(trunk_w / 2) * sf, base_y * sf),
-            # Left side - Bottom Tier
-            (-(base_w / 2) * sf, base_y * sf),
-            # Left side - Middle Tier
-            (-(mid_w / 4) * sf, tier_2_y * sf),
-            (-(mid_w / 2) * sf, tier_2_y * sf),
-            # Left side - Top Tier
-            (-(top_w / 4) * sf, tier_1_y * sf),
-            (-(top_w / 2) * sf, tier_1_y * sf),
-        ]
-    )
-    convex_breakdown = [ Polygon([(0.0 * sf, tip_y * sf), (top_w / 2 * sf, tier_1_y * sf), (-(top_w / 2) * sf, tier_1_y * sf)]),
-                        Polygon([(top_w / 4 * sf, tier_1_y * sf), (mid_w / 2 * sf, tier_2_y * sf), (-mid_w / 2 * sf, tier_2_y * sf), (-top_w / 4 * sf, tier_1_y * sf)]),
-                        Polygon([(mid_w / 4 * sf, tier_2_y * sf), (base_w / 2 * sf, base_y * sf), (-base_w / 2 * sf, base_y * sf), (-mid_w / 4 * sf, tier_2_y * sf)]),
-                        Polygon([(trunk_w / 2 * sf, base_y * sf), (trunk_w / 2 * sf, trunk_bottom_y * sf), (-trunk_w / 2 * sf, trunk_bottom_y * sf), (-trunk_w / 2 * sf, base_y * sf)])  ]
+    initial_polygon = Polygon([
+        (0.0 * sf, tip_y * sf),                   # Tip
+        (top_w / 2 * sf, tier_1_y * sf),          # Right top tier outer
+        (top_w / 4 * sf, tier_1_y * sf),          # Right top tier inner
+        (mid_w / 2 * sf, tier_2_y * sf),          # Right mid tier outer
+        (mid_w / 4 * sf, tier_2_y * sf),          # Right mid tier inner
+        (base_w / 2 * sf, base_y * sf),           # Right base
+        (trunk_w / 2 * sf, base_y * sf),          # Right trunk top
+        (trunk_w / 2 * sf, trunk_bottom_y * sf),  # Right trunk bottom
+        (-(trunk_w / 2) * sf, trunk_bottom_y * sf),  # Left trunk bottom
+        (-(trunk_w / 2) * sf, base_y * sf),       # Left trunk top
+        (-(base_w / 2) * sf, base_y * sf),        # Left base
+        (-(mid_w / 4) * sf, tier_2_y * sf),       # Left mid tier inner
+        (-(mid_w / 2) * sf, tier_2_y * sf),       # Left mid tier outer
+        (-(top_w / 4) * sf, tier_1_y * sf),       # Left top tier inner
+        (-(top_w / 2) * sf, tier_1_y * sf),       # Left top tier outer
+    ])
 
+    # Convex decomposition into 4 pieces for GPU collision detection
+    convex_breakdown = [
+        Polygon([(0.0 * sf, tip_y * sf),
+                 (top_w / 2 * sf, tier_1_y * sf),
+                 (-(top_w / 2) * sf, tier_1_y * sf)]),
+        Polygon([(top_w / 4 * sf, tier_1_y * sf),
+                 (mid_w / 2 * sf, tier_2_y * sf),
+                 (-mid_w / 2 * sf, tier_2_y * sf),
+                 (-top_w / 4 * sf, tier_1_y * sf)]),
+        Polygon([(mid_w / 4 * sf, tier_2_y * sf),
+                 (base_w / 2 * sf, base_y * sf),
+                 (-base_w / 2 * sf, base_y * sf),
+                 (-mid_w / 4 * sf, tier_2_y * sf)]),
+        Polygon([(trunk_w / 2 * sf, base_y * sf),
+                 (trunk_w / 2 * sf, trunk_bottom_y * sf),
+                 (-trunk_w / 2 * sf, trunk_bottom_y * sf),
+                 (-trunk_w / 2 * sf, base_y * sf)])
+    ]
 
-    # Compute the polygon centroid and recenter geometry so centroid is at origin.
+    # Recenter polygon so centroid is at origin
     centroid = initial_polygon.centroid
     cx, cy = centroid.x, centroid.y
     if (cx, cy) != (0.0, 0.0):
         initial_polygon = affinity.translate(initial_polygon, xoff=-cx, yoff=-cy)
-        convex_breakdown = [affinity.translate(p, xoff=-cx, yoff=-cy) for p in convex_breakdown]
+        convex_breakdown = [
+            affinity.translate(p, xoff=-cx, yoff=-cy) for p in convex_breakdown
+        ]
 
-    # Find maximum distance from centroid (now at origin) to any vertex
+    # Compute bounding radius from origin
     max_radius = 0.0
     origin = Point(0, 0)
-    for x, y in initial_polygon.exterior.coords[:-1]:  # skip closing vertex
+    for x, y in initial_polygon.exterior.coords[:-1]:
         dist = Point(x, y).distance(origin)
         if dist > max_radius:
             max_radius = dist
+
     return initial_polygon, convex_breakdown, max_radius, (cx, cy)
 
-# Global tree properties - initialized by calling initialize_tree_globals()
-center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset = None, None, None, None
-center_tree_prepped = None
-tree_area = None
-tree_vertices = None
+
+# Global tree properties (initialized by set_float32 -> initialize_tree_globals)
+center_tree = None           # Shapely Polygon of canonical tree
+convex_breakdown = None      # List of 4 convex Polygons
+tree_max_radius = None       # Max distance from centroid to vertex
+tree_centroid_offset = None  # (cx, cy) original centroid offset
+center_tree_prepped = None   # Prepared geometry for fast containment checks
+tree_area = None             # Area of one tree
+tree_vertices = None         # CuPy array of vertices, shape (n_vertices, 2)
+
 
 def initialize_tree_globals():
-    """Initialize global tree properties. Must be called explicitly before using trees."""
+    """Initialize global tree geometry. Called automatically by set_float32().
+
+    Side Effects:
+        Sets globals: center_tree, convex_breakdown, tree_max_radius,
+        tree_centroid_offset, center_tree_prepped, tree_area, tree_vertices.
+    """
     global center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset
     global center_tree_prepped, tree_area, tree_vertices
 
-    center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset = create_center_tree()
+    result = create_center_tree()
+    center_tree, convex_breakdown, tree_max_radius, tree_centroid_offset = result
+
     center_tree_prepped = prep(center_tree)
     tree_area = center_tree.area
-    tree_vertices = cp.array(np.array(center_tree.exterior.coords[:-1]), dtype=dtype_cp)  # (n_vertices, 2)
+    tree_vertices = cp.array(
+        np.array(center_tree.exterior.coords[:-1]), dtype=dtype_cp
+    )  # (n_vertices, 2)
 
 
 @typechecked
-def create_tree(center_x:float, center_y:float, angle:float):
-    """Initializes the Christmas tree with a specific position and rotation."""
+def create_tree(center_x: float, center_y: float, angle: float):
+    """Create a positioned and rotated Christmas tree polygon.
+
+    Args:
+        center_x: X coordinate of tree center.
+        center_y: Y coordinate of tree center.
+        angle: Rotation angle in degrees.
+
+    Returns:
+        Shapely Polygon of the transformed tree.
+    """
     rotated = affinity.rotate(center_tree, angle, origin=(0, 0))
-    polygon = affinity.translate(rotated,
-                                 xoff=center_x * scale_factor,
-                                 yoff=center_y * scale_factor)
+    polygon = affinity.translate(
+        rotated, xoff=center_x * scale_factor, yoff=center_y * scale_factor
+    )
     return polygon
+
 
 @dataclass
 class TreeList(BaseClass):
-    x: np.ndarray = field(default=None)
-    y: np.ndarray = field(default=None)
-    theta: np.ndarray = field(default=None)
+    """Collection of tree positions and rotations.
 
-    # dynamic dependent property N (updates automatically)
+    Stores N trees with their x, y coordinates and rotation angles (theta).
+    Provides both individual array access and combined xyt array property.
+
+    This is a legacy class, used by some older functionality. Core algorithms use 
+    SolutionCollection instead (see below).
+    """
+    x: np.ndarray = field(default=None)      # X coordinates, shape (N,)
+    y: np.ndarray = field(default=None)      # Y coordinates, shape (N,)
+    theta: np.ndarray = field(default=None)  # Rotation angles in radians, shape (N,)
+
     @property
     def N(self) -> int:
+        """Number of trees in the list."""
         return 0 if self.x is None else len(self.x)
 
     @property
     def xyt(self) -> np.ndarray:
-        """Return an (N,3) array with columns [x, y, theta]. Assumes x,y,theta are not None."""
+        """Combined position/rotation array.
+
+        Returns:
+            NumPy array of shape (N, 3) with columns [x, y, theta].
+        """
         return np.column_stack((np.asarray(self.x).ravel(),
                                 np.asarray(self.y).ravel(),
                                 np.asarray(self.theta).ravel()))
 
     @xyt.setter
     def xyt(self, value: typing.Union[np.ndarray, list]):
-        """Accept an (N,3) array-like and set x, y, theta accordingly. Assumes no None."""
+        """Set positions/rotations from (N, 3) array.
+
+        Args:
+            value: Array-like of shape (N, 3) with columns [x, y, theta].
+        """
         arr = np.asarray(to_cpu(value))
         if arr.ndim != 2 or arr.shape[1] != 3:
             raise ValueError("xyt must be an array with shape (N, 3)")
@@ -269,30 +419,37 @@ class TreeList(BaseClass):
         self.theta = arr[:, 2].astype(float)
 
     def _check_constraints(self):
-
-        # If x is None, require y and theta to be None as well
+        """See BaseClass._check_constraints."""
         if self.x is None:
             if (self.y is not None) or (self.theta is not None):
-                raise Exception('TreeList: inconsistent lengths (x is None but y/theta not None)')
+                raise Exception(
+                    'TreeList: inconsistent (x is None but y/theta not None)'
+                )
             return
 
-        # x is not None -> enforce lengths match N
         N = self.N
         if not (len(self.y) == N and len(self.theta) == N):
             raise Exception('TreeList: inconsistent lengths')
-    
+
     def get_trees(self):
-        ''' Returns list of shapely Polygons for each tree '''
+        """Convert to list of Shapely Polygon objects.
+
+        Returns:
+            List of N Shapely Polygons, one per tree.
+        """
         trees = []
         for i in range(self.N):
-            tree = create_tree(self.x[i], self.y[i], self.theta[i]*360/(2*np.pi))
+            tree = create_tree(
+                self.x[i], self.y[i], self.theta[i] * 360 / (2 * np.pi)
+            )
             trees.append(tree)
         return trees
 
 
-'''
-Population management
-'''
+# =============================================================================
+# Population management
+# =============================================================================
+
 @dataclass
 class EdgeSpacer(BaseClass):
     def check_valid(self, xyt, h, margin=0.):
@@ -331,7 +488,6 @@ class EdgeSpacerBasic(EdgeSpacer):
         
         return is_valid_x | is_valid_y | is_valid_corner
     
-'''Metric'''
 @dataclass
 class SolutionCollection(BaseClass):
     xyt: cp.ndarray = field(default=None)  # (N,3) array of tree positions and angles
@@ -597,9 +753,6 @@ class SolutionCollectionSquare(SolutionCollection):
        
             move_centers_x = generator.uniform(-size/2, size/2, dtype=dtype_cp) + self.h[inds_to_do, 1]  # (N,)
             move_centers_y = generator.uniform(-size/2, size/2, dtype=dtype_cp) + self.h[inds_to_do, 2]  # (N,)
-            #dill_save(temp_dir + '/debug_move_centers.pkl', (move_centers_x, move_centers_y))
-            #print(move_centers_x, move_centers_y)
-            #raise 'stop'
         else:
             # No edge clearance - use analytical sampling for EdgeSpacerBasic when possible
             size = original_size  # no shrink when edge_clearance is None
@@ -1548,26 +1701,22 @@ class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
             self.angles = cp.full((self.N_solutions,), np.pi / 2, dtype=dtype_cp)
         return self.angles
     
-'''
-Fitness comparison utilities for tuple-based fitness
-'''
+# =============================================================================
+# Fitness comparison utilities for tuple-based fitness
+# =============================================================================
+
 
 def lexicographic_argmin(fitness_array: np.ndarray) -> int:
     """Find index of minimum fitness value using lexicographic ordering.
-    
-    Parameters
-    ----------
-    fitness_array : np.ndarray
-        Shape (N_solutions, N_components) - fitness tuples for each solution
-        
-    Returns
-    -------
-    int
-        Index of the lexicographically smallest fitness tuple
+
+    Args:
+        fitness_array: Shape (N_solutions, N_components) or (N_solutions,).
+
+    Returns:
+        Index of the lexicographically smallest fitness tuple.
     """
     # Use lexsort which sorts by last column first, so reverse the columns
     if fitness_array.ndim == 1:
-        # Handle 1D case (single component)
         return int(np.argmin(fitness_array))
     
     # Sort by all components in order (last column has highest priority in lexsort)
@@ -1579,19 +1728,14 @@ def lexicographic_argmin(fitness_array: np.ndarray) -> int:
 
 def lexicographic_argsort(fitness_array: np.ndarray) -> np.ndarray:
     """Sort fitness values using lexicographic ordering.
-    
-    Parameters
-    ----------
-    fitness_array : np.ndarray
-        Shape (N_solutions, N_components) - fitness tuples for each solution
-        
-    Returns
-    -------
-    np.ndarray
-        Indices that would sort the array lexicographically
+
+    Args:
+        fitness_array: Shape (N_solutions, N_components) or (N_solutions,).
+
+    Returns:
+        Indices that would sort the array lexicographically.
     """
     if fitness_array.ndim == 1:
-        # Handle 1D case (single component)
         return np.argsort(fitness_array)
     
     # Sort by all components in order (last column has highest priority in lexsort)
@@ -1602,16 +1746,13 @@ def lexicographic_argsort(fitness_array: np.ndarray) -> np.ndarray:
 
 def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
     """Compare two fitness tuples lexicographically.
-    
-    Parameters
-    ----------
-    fitness1, fitness2 : np.ndarray
-        Shape (N_components,) - fitness tuples to compare
-        
-    Returns
-    -------
-    bool
-        True if fitness1 < fitness2 lexicographically
+
+    Args:
+        fitness1: Shape (N_components,) - first fitness tuple.
+        fitness2: Shape (N_components,) - second fitness tuple.
+
+    Returns:
+        True if fitness1 < fitness2 lexicographically.
     """
     fitness1 = np.atleast_1d(fitness1)
     fitness2 = np.atleast_1d(fitness2)
@@ -1623,22 +1764,27 @@ def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
             return False
     return False  # Equal
 
-'''
-Genetic diversity calculation utilities
-'''
+
+# =============================================================================
+# Genetic Diversity Calculation Utilities
+# =============================================================================
 
 def compute_genetic_diversity_matrix_shortcut(
     population_xyt: cp.ndarray,
     reference_xyt: cp.ndarray,
     lap_config=None,
 ) -> cp.ndarray:
-    """
-    Memory-lean shortcut diversity metric.
+    """Memory-lean shortcut for diversity computation.
 
-    Same functionality as before, but:
-      - avoids stacking all 8 transformed cost tensors at once
-      - avoids per-transform .copy() of reference arrays
-      - removes unused lap_batch import
+    Optimized version that avoids stacking all 8 transformed cost tensors.
+
+    Args:
+        population_xyt: Shape (N_pop, N_trees, 3). First population.
+        reference_xyt: Shape (N_ref, N_trees, 3). Second population.
+        lap_config: Configuration with algorithm in ('min_cost_row', 'min_cost_col').
+
+    Returns:
+        CuPy array of shape (N_pop, N_ref) with minimum distances.
     """
     assert lap_config.algorithm in ("min_cost_row", "min_cost_col")
 
@@ -1684,47 +1830,42 @@ def compute_genetic_diversity_matrix_shortcut(
 
     return min_distances
 
-def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None, allow_shortcut=True, transform=True) -> cp.ndarray:
-    """
-    Compute the minimum-cost assignment distance between each pair of individuals
-    from two populations, considering all 8 symmetry transformations
-    (4 rotations × 2 mirror states).
-    
-    Uses the Hungarian algorithm to find the optimal tree-to-tree mapping
-    that minimizes total distance. The distance metric includes (x, y, theta) with equal weights.
-    
-    Parameters
-    ----------
-    population_xyt : cp.ndarray
-        Shape (N_pop, N_trees, 3). First population of individuals, where each individual
-        has N_trees trees with (x, y, theta) coordinates.
-    reference_xyt : cp.ndarray
-        Shape (N_ref, N_trees, 3). Second population of individuals to compare against.
-        
-    Returns
-    -------
-    cp.ndarray
-        Shape (N_pop, N_ref). Minimum assignment distance for each pair, taken over
-        all 8 symmetry transformations.
-        
-    Notes
-    -----
-    The 8 transformations applied to each population individual are:
-    - 0°, 90°, 180°, 270° rotations (about origin)
-    - Each rotation with and without x-axis mirroring
-    
-    For each transformation, we compute the cost matrix between transformed trees
-    and reference trees, then solve the linear assignment problem. The minimum
-    cost across all 8 transformations is returned.
-    
-    Distance for each tree pair: sqrt((x1-x2)^2 + (y1-y2)^2 + angular_dist(theta1, theta2)^2)
-    where angular_dist wraps to [-pi, pi].
+
+def compute_genetic_diversity_matrix(
+    population_xyt: cp.ndarray,
+    reference_xyt: cp.ndarray,
+    lap_config=None,
+    allow_shortcut=True,
+    transform=True
+) -> cp.ndarray:
+    """Compute minimum-cost assignment distance between population pairs.
+
+    Computes pairwise distances considering all 8 symmetry transformations
+    (4 rotations × 2 mirror states). Uses Hungarian algorithm for optimal
+    tree-to-tree mapping.
+
+    Args:
+        population_xyt: Shape (N_pop, N_trees, 3). First population.
+        reference_xyt: Shape (N_ref, N_trees, 3). Second population.
+        lap_config: Configuration for linear assignment solver.
+        allow_shortcut: If True, use optimized shortcut method when possible.
+        transform: If True, consider all 8 symmetry transformations.
+
+    Returns:
+        CuPy array of shape (N_pop, N_ref) with minimum assignment distances.
+
+    Notes:
+        Distance metric: sqrt(dx² + dy² + dtheta²) where dtheta wraps to [-π, π].
     """
     import lap_batch
 
-    if (lap_config is not None) and (lap_config.algorithm == 'min_cost_row' or lap_config.algorithm == 'min_cost_col') and allow_shortcut \
-            and transform:
-        return compute_genetic_diversity_matrix_shortcut(population_xyt, reference_xyt, lap_config)
+    # Use shortcut method for supported configurations
+    if (lap_config is not None and
+            lap_config.algorithm in ('min_cost_row', 'min_cost_col') and
+            allow_shortcut and transform):
+        return compute_genetic_diversity_matrix_shortcut(
+            population_xyt, reference_xyt, lap_config
+        )
     
     N_pop, N_trees, _ = population_xyt.shape
     N_ref, N_trees_ref, _ = reference_xyt.shape
@@ -1757,21 +1898,19 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
     pop_x = population_xyt[:, :, 0]      # (N_pop, N_trees)
     pop_y = population_xyt[:, :, 1]      # (N_pop, N_trees)
     pop_theta = population_xyt[:, :, 2]  # (N_pop, N_trees)
-    
-    # Compute cost matrices for all 8 transformations on GPU
+
+    # Compute cost matrices for all transformations on GPU
     all_cost_matrices = []
     for rot_angle, do_mirror in transformations:
-        # ---------------------------------------------------------
-        # Step 1: Apply transformation to reference individuals (GPU)
-        # ---------------------------------------------------------
-        ref_x = reference_xyt[:, :, 0].copy()
-        ref_y = reference_xyt[:, :, 1].copy()
-        ref_theta = reference_xyt[:, :, 2].copy()
-        
+        # Apply transformation to reference individuals
+        ref_x = reference_xyt[:, :, 0].copy()      # (N_ref, N_trees)
+        ref_y = reference_xyt[:, :, 1].copy()      # (N_ref, N_trees)
+        ref_theta = reference_xyt[:, :, 2].copy()  # (N_ref, N_trees)
+
         if do_mirror:
             ref_y = -ref_y
-            ref_theta = cp.pi-ref_theta
-        
+            ref_theta = cp.pi - ref_theta
+
         if rot_angle != 0.0:
             cos_a = np.cos(rot_angle)
             sin_a = np.sin(rot_angle)
@@ -1780,92 +1919,107 @@ def compute_genetic_diversity_matrix(population_xyt: cp.ndarray, reference_xyt: 
             ref_x = new_x
             ref_y = new_y
             ref_theta = ref_theta + rot_angle
-        
-        ref_theta = cp.remainder(ref_theta + np.pi, 2*np.pi) - np.pi
-        
-        # ---------------------------------------------------------
-        # Step 2: Compute pairwise cost matrix (GPU)
-        # ---------------------------------------------------------
-        # Shape calculations:
-        # pop_x[:, :, None, None]: (N_pop, N_trees, 1, 1)
-        # ref_x[None, None, :, :]: (1, 1, N_ref, N_trees)
-        # Result: (N_pop, N_trees, N_ref, N_trees)
+
+        ref_theta = cp.remainder(ref_theta + np.pi, 2 * np.pi) - np.pi
+
+        # Compute pairwise cost matrix
+        # Broadcasting: (N_pop, N_trees, 1, 1) vs (1, 1, N_ref, N_trees)
         dx = pop_x[:, :, cp.newaxis, cp.newaxis] - ref_x[cp.newaxis, cp.newaxis, :, :]
         dy = pop_y[:, :, cp.newaxis, cp.newaxis] - ref_y[cp.newaxis, cp.newaxis, :, :]
-        dtheta = pop_theta[:, :, cp.newaxis, cp.newaxis] - ref_theta[cp.newaxis, cp.newaxis, :, :]
-        dtheta = cp.remainder(dtheta + np.pi, 2*np.pi) - np.pi
-        cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)
-        
+        dtheta = (pop_theta[:, :, cp.newaxis, cp.newaxis] -
+                  ref_theta[cp.newaxis, cp.newaxis, :, :])
+        dtheta = cp.remainder(dtheta + np.pi, 2 * np.pi) - np.pi
+        cost_matrices = cp.sqrt(dx**2 + dy**2 + dtheta**2)  # (N_pop, N_trees, N_ref, N_trees)
+
         all_cost_matrices.append(cost_matrices)
-    
-    # ---------------------------------------------------------
-    # Step 3: Solve assignment problems on GPU using RAFT
-    # ---------------------------------------------------------
-    # Stack all cost matrices on GPU: shape (8, N_pop, N_trees, N_ref, N_trees)
-    # Then reshape to (8*N_pop*N_ref, N_trees, N_trees) for batched solving
-    stacked = cp.stack(all_cost_matrices, axis=0)  # (8, N_pop, N_trees, N_ref, N_trees)
-    batched = stacked.transpose(0, 1, 3, 2, 4).reshape(-1, N_trees, N_trees)  # (8*N_pop*N_ref, N_trees, N_trees)
-    
+
+    # Solve assignment problems on GPU using RAFT
+    # Stack: (8, N_pop, N_trees, N_ref, N_trees) -> (8*N_pop*N_ref, N_trees, N_trees)
+    stacked = cp.stack(all_cost_matrices, axis=0)
+    batched = stacked.transpose(0, 1, 3, 2, 4).reshape(-1, N_trees, N_trees)
+
     # Solve all LAPs on GPU
-    _, all_assignment_costs = lap_batch.solve_lap_batch(batched, config=lap_config)  # (8*N_pop*N_ref,)
-    
+    _, all_assignment_costs = lap_batch.solve_lap_batch(batched, config=lap_config)
+
     # Reshape back and take minimum across transformations
-    all_costs_array = all_assignment_costs.reshape(8 if transform else 1, N_pop, N_ref)  # (8, N_pop, N_ref)
+    n_transforms = 8 if transform else 1
+    all_costs_array = all_assignment_costs.reshape(n_transforms, N_pop, N_ref)
     min_distances = all_costs_array.min(axis=0)  # (N_pop, N_ref)
-    
+
     return min_distances
 
 
-def compute_genetic_diversity(population_xyt: cp.ndarray, reference_xyt: cp.ndarray, lap_config=None, transform=True) -> cp.ndarray:
-    """
-    Compute the minimum-cost assignment distance between each individual in a population
-    and a single reference configuration, considering all 8 symmetry transformations
-    (4 rotations × 2 mirror states).
-    
-    This is a wrapper around compute_genetic_diversity_matrix for backward compatibility.
-    
-    Parameters
-    ----------
-    population_xyt : cp.ndarray
-        Shape (N_pop, N_trees, 3). Population of individuals, where each individual
-        has N_trees trees with (x, y, theta) coordinates.
-    reference_xyt : cp.ndarray
-        Shape (N_trees, 3). Single reference configuration to compare against.
-        
-    Returns
-    -------
-    cp.ndarray
-        Shape (N_pop,). Minimum assignment distance for each individual, taken over
-        all 8 symmetry transformations.
+def compute_genetic_diversity(
+    population_xyt: cp.ndarray,
+    reference_xyt: cp.ndarray,
+    lap_config=None,
+    transform=True
+) -> cp.ndarray:
+    """Compute assignment distance from population to single reference.
+
+    Wrapper around compute_genetic_diversity_matrix for single-reference case.
+
+    Args:
+        population_xyt: Shape (N_pop, N_trees, 3). Population of individuals.
+        reference_xyt: Shape (N_trees, 3). Single reference configuration.
+        lap_config: Configuration for linear assignment solver.
+        transform: If True, consider all 8 symmetry transformations.
+
+    Returns:
+        CuPy array of shape (N_pop,) with minimum assignment distances.
     """
     N_pop, N_trees, _ = population_xyt.shape
-    
-    # Validate shapes
+
     assert reference_xyt.shape == (N_trees, 3), \
         f"Reference shape {reference_xyt.shape} doesn't match expected ({N_trees}, 3)"
-    
-    # Add batch dimension to reference and call the matrix version
+
+    # Add batch dimension and call matrix version
     reference_batch = reference_xyt[cp.newaxis, :, :]  # (1, N_trees, 3)
-    result_matrix = compute_genetic_diversity_matrix(population_xyt, reference_batch, lap_config=lap_config, transform=transform)  # (N_pop, 1)
-    
+    result_matrix = compute_genetic_diversity_matrix(
+        population_xyt, reference_batch, lap_config=lap_config, transform=transform
+    )  # (N_pop, 1)
+
     return result_matrix[:, 0]  # (N_pop,)
 
-'''
-Initialize crystalline solutions. This uses packings_optimized_unique.pickle, which contains the six crystals.
-This file is generate using test_dimer2.ipynb in the 'full' branch of the repository.
-'''
 
+# =============================================================================
+# Crystalline Solution Initialization
+# =============================================================================
+
+# Load precomputed optimal crystal packings (6 crystals)
+# Generated using test_dimer2.ipynb in the 'full' branch
 packings = dill_load(code_dir + '/../res/packings_optimized_unique.pickle')
-def create_tiled_solution(name, n_tilings, make_symmetric=False, axis1_offset = 0., axis2_offset=0.):
-    """Create a tiled solution from a periodic lattice solution."""
+
+
+def create_tiled_solution(
+    name,
+    n_tilings,
+    make_symmetric=False,
+    axis1_offset=0.,
+    axis2_offset=0.
+):
+    """Create a tiled solution from a periodic lattice packing.
+
+    Args:
+        name: Name of the crystal packing to tile (key in packings dict).
+        n_tilings: Number of tiles in each direction (creates n_tilings^2 cells).
+        make_symmetric: If True, return 180° symmetric solution.
+        axis1_offset: Fractional offset along first lattice vector.
+        axis2_offset: Fractional offset along second lattice vector.
+
+    Returns:
+        SolutionCollectionSquare or SolutionCollectionSquareSymmetric180 with
+        tiled tree positions.
+    """
     sol = copy.deepcopy(packings[name])
     crystal_axes = sol.get_crystal_axes_allocate()
-    a_vec, b_vec = crystal_axes[0, 0, :], crystal_axes[0, 1, :]
-    
-    original_xyt = sol.xyt[0]
+    a_vec, b_vec = crystal_axes[0, 0, :], crystal_axes[0, 1, :]  # Lattice vectors
+
+    original_xyt = sol.xyt[0]  # (N_trees_per_cell, 3)
     N_trees_per_cell = original_xyt.shape[0]
     tiled_xyt = cp.zeros((N_trees_per_cell * n_tilings**2, 3), dtype=dtype_cp)
-    
+
+    # Tile the unit cell across the lattice
     half = n_tilings // 2
     tile_idx = 0
     for i in range(-half, n_tilings - half):
@@ -1875,16 +2029,20 @@ def create_tiled_solution(name, n_tilings, make_symmetric=False, axis1_offset = 
             tiled_xyt[idx:idx + N_trees_per_cell, :2] = original_xyt[:, :2] + lattice_offset
             tiled_xyt[idx:idx + N_trees_per_cell, 2] = original_xyt[:, 2]
             tile_idx += 1
-    
+
+    # Create output solution collection
     if make_symmetric:
         sol_output = SolutionCollectionSquareSymmetric180()
         sol_output.xyt = tiled_xyt.reshape(1, -1, 3)
-        sol_output.xyt = sol_output.xyt[:, sol_output.xyt[0,:,0] < 0, :]
+        sol_output.xyt = sol_output.xyt[:, sol_output.xyt[0, :, 0] < 0, :]
     else:
         sol_output = SolutionCollectionSquare()
         sol_output.xyt = tiled_xyt.reshape(1, -1, 3)
-    sol_output.h = cp.array([[1., 0., 0.]], dtype=dtype_cp)  # dummy
+
+    sol_output.h = cp.array([[1., 0., 0.]], dtype=dtype_cp)  # Dummy boundary
     sol_output.check_constraints()
     return sol_output
 
+
+# Initialize precision (must be called after all classes are defined)
 set_float32(True)
