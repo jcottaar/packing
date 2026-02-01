@@ -131,19 +131,7 @@ class InitializerRandom(Initializer):
             xyt = xyt * [[[size_setup_scaled, size_setup_scaled, 2*np.pi]]]
             xyt = cp.array(xyt, dtype=kgs.dtype_np)
             sol.xyt = xyt   
-            if self.fixed_h is None:
-                if isinstance(self.base_solution, kgs.SolutionCollectionSquare):
-                    sol.h = cp.array([[2*size_setup_scaled,0.,0.]]*N_individuals, dtype=kgs.dtype_np)           
-                elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeRectangle):
-                    sol.h = cp.array([[size_setup_scaled,size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)         
-                elif isinstance(self.base_solution, kgs.SolutionCollectionLatticeFixed):
-                    sol.h = cp.array([[size_setup_scaled]]*N_individuals, dtype=kgs.dtype_np)  
-                    sol.aspect_ratios = cp.array([sol.aspect_ratios[0]]*N_individuals, dtype=kgs.dtype_cp)       
-                else:
-                    assert(isinstance(self.base_solution, kgs.SolutionCollectionLattice))
-                    sol.h = cp.array([[size_setup_scaled,size_setup_scaled,np.pi/2]]*N_individuals, dtype=kgs.dtype_np)     
-            else:
-                sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
+            sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))                 
             sol.canonicalize()
             if self.ref_sol_crystal_type is not None:
                 axis1_offset = self.ref_sol_axis1_offset(generator)
@@ -238,13 +226,11 @@ class GA(kgs.BaseClass):
     do_legalize: bool = field(init=True, default=False)
 
     allow_reset: bool = field(init=True, default=True)
-    allow_freeze: bool = field(init=True, default=False)
     stop_check_generations: int = field(init=True, default=0)
     stop_check_generations_scale: int = field(init=True, default=50) # scale with N_trees
     reset_check_generations: int = field(init=True, default=None)
     reset_check_generations_ratio: float = field(init=True, default=0.1)
     reset_check_threshold: float = field(init=True, default=0.1)
-    freeze_duration: int = field(init=True, default=100)
     always_allow_mate_with_better: bool = field(init=True, default=True)
     allow_mate_with_better_controls_all: bool = field(init=True, default=False) # if true, no mating allowed at all if _allow_mate_with_better is false
     target_score: float = field(init=True, default=0.) # stop if reached
@@ -259,7 +245,6 @@ class GA(kgs.BaseClass):
     _cached_offspring: list = field(init=False, default=None)
     _last_reset_generation: int = field(init=False, default=0)
     _skip_next_selection: bool = field(init=False, default=False)
-    _is_frozen2: bool = field(init=False, default=False)
     _allow_mate_with_better: bool = field(init=True, default=True)    
     _stopped: bool = field(init=False, default=False)
 
@@ -272,6 +257,7 @@ class GA(kgs.BaseClass):
         if self.fitness_cost is not None:
             self.fitness_cost.check_constraints()
         if self.champions is not None:
+            assert(len(self.champions)==1) # more than one champion is legacy functionality, not currently used
             for champion in self.champions:
                 assert(champion.phenotype.N_solutions==1)
                 champion.check_constraints()
@@ -295,17 +281,7 @@ class GA(kgs.BaseClass):
         self._reset(generator)
         self._last_reset_generation = len(self.best_costs_per_generation[0])-1
 
-    def score(self, generator, register_best=False):
-        if self._is_frozen2:
-            if register_best:
-                for c in self.best_costs_per_generation:
-                    c.append(c[-1])
-                effective_frozen_generations = self.freeze_duration + \
-                    int(self.reset_check_generations_ratio * (len(self.best_costs_per_generation[0])))
-                if len(self.best_costs_per_generation[0]) - self._last_reset_generation >= effective_frozen_generations:
-                    self._is_frozen2 = False
-                    self._last_reset_generation = len(self.best_costs_per_generation[0])-1
-            return
+    def score(self, generator, register_best=False):        
         self._score(generator, register_best)
         if register_best:
             assert(len(self.champions) == len(self.best_costs_per_generation))     
@@ -342,14 +318,10 @@ class GA(kgs.BaseClass):
                         self.reset(generator)                        
                         self.best_costs_per_generation[0].pop(-1)
                         self._score(generator, register_best)
-                        self._skip_next_selection = True
-                    elif self.allow_freeze:
-                        self._is_frozen2 = True                        
+                        self._skip_next_selection = True                  
 
 
     def generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):        
-        if self._is_frozen2:
-            return []
         filtered_mate_sol = mate_sol
         filtered_mate_weights = mate_weights
         filtered_mate_costs = mate_costs
@@ -383,19 +355,13 @@ class GA(kgs.BaseClass):
         return res
     
     def merge_offspring(self):
-        if self._is_frozen2:
-            return
         self._merge_offspring()
         self._cached_offspring = None
 
     def get_list_for_simulation(self):
-        if self._is_frozen2:
-            return []
         return self._get_list_for_simulation()
            
     def apply_selection(self):
-        if self._is_frozen2:
-            return
         if self._skip_next_selection:
             self._skip_next_selection = False
             return
@@ -452,7 +418,7 @@ class GA(kgs.BaseClass):
             display(self._fig)
     
 
-    def _diagnostic_plots(self, plot_ax):
+    def _diagnostic_plots(self, i_gen, plot_ax):
         pass
 
     def __getstate__(self):
@@ -472,7 +438,6 @@ class GA(kgs.BaseClass):
 class GAMulti(GA):
     # Configuration    
     ga_list: list = field(init=True, default=None)
-    single_champion: bool = field(init=True, default=True)
     plot_diversity_ax = None
     plot_subpopulation_costs_per_generation_ax = None
     allow_reset_ratio: float = field(init=True, default=1.) # allow only the worst X% of subpopulations to reset
@@ -492,23 +457,14 @@ class GAMulti(GA):
             ga.seed = generator.integers(0, 2**30).get().item()
             ga.fitness_cost = self.fitness_cost
             ga.initialize(generator)
-        if self.single_champion:
-            self.best_costs_per_generation = [[]]
-        else:
-            self.best_costs_per_generation = [ [] for _ in self.ga_list ]
+        self.best_costs_per_generation = [[]]
     def _reset(self, generator):
         for ga in self.ga_list:
             ga.reset(generator)
     def _score(self, generator, register_best):
         for ga in self.ga_list:
             ga.score(generator, register_best=register_best)
-        if register_best:
-            if not self.single_champion:
-                self.champions = [a.champions[0] for a in self.ga_list]
-                for c,a in zip(self.best_costs_per_generation,self.ga_list):
-                    assert(len(a.champions)==1)
-                    c.append(a.champions[0].fitness[0])
-                return
+        if register_best:            
             if kgs.debugging_mode>=2:
                 for ga in self.ga_list:
                     assert(len(ga.champions) == 1)
@@ -599,12 +555,9 @@ class GAMulti(GA):
                 if not hasattr(ax, '_colorbar') or ax._colorbar is None:
                     ax._colorbar = plt.colorbar(im, ax=ax, label='Best cost')
                 else:
-                    ax._colorbar.update_normal(im)
-                # Mark frozen subpopulations with red X at the top
+                    ax._colorbar.update_normal(im)                
                 for i, ga in enumerate(self.ga_list):
-                    if ga._is_frozen2:
-                        plt.plot(i, -0.5, 'rx', markersize=10, markeredgewidth=2)
-                    elif ga._allow_mate_with_better:
+                    if ga._allow_mate_with_better:
                         plt.plot(i, -0.5, 'gx', markersize=10, markeredgewidth=2)
                 plt.xlabel('Subpopulation')
                 plt.ylabel('Generation')
@@ -649,8 +602,6 @@ class GAMultiIsland(GAMultiSimilar):
     Subclasses must implement _get_connectivity_matrix() to define which islands
     can mate with each other.
     """
-
-    allow_reset_based_on_local_champion: bool = field(init=True, default=False)
     
     def _get_connectivity_matrix(self) -> np.ndarray:
         """Return boolean connectivity matrix where [i,j]=True means island i can mate with island j.
@@ -659,40 +610,6 @@ class GAMultiIsland(GAMultiSimilar):
             np.ndarray: Boolean matrix of shape (n_islands, n_islands)
         """
         raise NotImplementedError("Subclasses must implement _get_connectivity_matrix")
-    
-    def _score(self, generator, register_best):
-        # Call parent implementation first
-        super()._score(generator, register_best)
-        
-        # Apply local champion logic if enabled and we're registering best
-        if self.allow_reset_based_on_local_champion and register_best:
-            connectivity_matrix = self._get_connectivity_matrix()
-            n_ga = len(self.ga_list)
-            
-            # Get current fitness for all islands
-            costs_per_ga = np.array([ga.best_costs_per_generation[0][-1] for ga in self.ga_list])
-            
-            for i, ga in enumerate(self.ga_list):
-                # Find neighbors for island i (where it gets genetic material from)
-                neighbor_indices = [j for j in range(n_ga) if connectivity_matrix[i, j]]
-                
-                if len(neighbor_indices) > 0:
-                    # Include self in comparison with neighborhood
-                    comparison_indices = neighbor_indices + [i]
-                    neighborhood_costs = costs_per_ga[comparison_indices]
-                    
-                    # Check if current island is the best in its neighborhood
-                    # lexicographic_argmin breaks ties by choosing lowest index in comparison_indices
-                    # This means in case of fitness ties, the island with lower original index wins
-                    best_in_neighborhood_idx = kgs.lexicographic_argmin(neighborhood_costs)
-                    actual_best_idx = comparison_indices[best_in_neighborhood_idx]
-                    
-                    # If this island is the local champion, don't allow reset
-                    # In case of ties, higher-indexed islands will be allowed to reset
-                    ga.allow_reset = (actual_best_idx != i)
-                else:
-                    # If no neighbors, allow reset (shouldn't happen in normal topologies)
-                    ga.allow_reset = True
     
     def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
         assert mate_sol is None
@@ -810,7 +727,6 @@ class GASinglePopulation(GA):
     reduce_h_threshold: float = field(init=True, default=1e-5/40) # scaled by N_trees
     reduce_h_amount: float = field(init=True, default=2e-3/np.sqrt(40)) # scaled by sqrt(N_trees)
     reduce_h_per_individual: bool = field(init=True, default=False)
-    use_new_ref_score: bool = field(init=True, default=True)
     ref_score_scale: float = field(init=True, default=1.1)
 
     plot_diversity_ax = None
@@ -850,16 +766,9 @@ class GASinglePopulation(GA):
     def _reset(self, generator):
         self.initializer.seed = generator.integers(0, 2**30).get().item()
         if self.fixed_h is not None:
-            if self.fixed_h == -1.:
-                if not self.use_new_ref_score:  
-                    global ref_solution
-                    if ref_solution is None:
-                        ref_solution = pack_io.dataframe_to_solution_list(pd.read_csv(kgs.code_dir + '../res/71.01.csv'))                  
-                    ref_score = ref_solution[1][self.N_trees_to_do-1]
-                    ref_h = max(np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(1.055)), np.sqrt(0.37*self.N_trees_to_do))
-                else:
-                    ref_score = 0.317 + 0.206/np.sqrt(self.N_trees_to_do)
-                    ref_h = np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(self.ref_score_scale))         
+            if self.fixed_h == -1.:                
+                ref_score = 0.317 + 0.206/np.sqrt(self.N_trees_to_do)
+                ref_h = np.sqrt(ref_score*self.N_trees_to_do*np.sqrt(self.ref_score_scale))         
                 self.initializer.fixed_h = cp.array([ref_h,0,0],dtype=kgs.dtype_cp)
             else:
                 self.initializer.fixed_h = cp.array([self.fixed_h*np.sqrt(self.N_trees_to_do),0,0],dtype=kgs.dtype_cp)
@@ -931,7 +840,6 @@ class GASinglePopulationOld(GASinglePopulation):
     survival_rate: float = field(init=True, default=0.074)  # Fraction of population that survives (37/500)
     elitism_fraction: float = field(init=True, default=0.25)  # Fraction of survivors that are elite (18/37)
     search_depth: float = field(init=True, default=1.)  # How deep to look for diversity (max_tier/pop_size)
-    alternative_selection: bool = field(init=True, default=True) 
     diversity_criterion: float = field(init=True, default=0.2)  # will scale with N_trees
     diversity_criterion_scaling: float = field(init=True, default=0.) # will scale with N_trees
     diversity_to_elite_only: bool = field(init=True, default=False)
@@ -959,111 +867,70 @@ class GASinglePopulationOld(GASinglePopulation):
         current_pop.select_ids(kgs.lexicographic_argsort(current_pop.fitness))  # Sort by fitness lexicographically
         current_xyt = current_pop.genotype.xyt  # (N_individuals, N_trees, 3)
 
-        if not self.alternative_selection:
-
-            max_sel = np.max(self.selection_size)
-            selected = np.zeros(self.population_size, dtype=bool)
-            diversity = np.inf*np.ones(max_sel)
-
-            # Determine how many initial selection sizes are sequential (1,2,3,...)
-            prefix_count = 0
-            for idx, sel_size in enumerate(self.selection_size):
-                if sel_size == idx + 1:
-                    prefix_count += 1
+        # Alternative selection, based on best individuals that meet diversity criterion
+        
+        # Calculate how many to select
+        total_survivors = max(2, int(self.population_size * self.survival_rate))
+        n_elite = max(1, int(total_survivors * self.elitism_fraction))
+        n_diversity = total_survivors - n_elite
+        
+        # Limit search space to best pop_size*search_depth individuals
+        max_search = max(total_survivors + 1, int(self.population_size * self.search_depth))
+        max_search = min(max_search, self.population_size)  # Don't exceed population
+        
+        # Step 1: Select N best individuals (elite)
+        selected = np.zeros(self.population_size, dtype=bool)
+        selected[:n_elite] = True
+        
+        # Step 2: Select M more individuals based on diversity
+        if n_diversity > 0:
+            # Get xyt for search space
+            search_xyt = current_xyt[:max_search]  # (max_search, N_trees, 3)
+            diversity_threshold = self.diversity_criterion * self.N_trees_to_do
+            
+            # Initialize diversity array by computing to all elite individuals
+            diversity_matrix = kgs.compute_genetic_diversity_matrix(
+                cp.array(search_xyt),
+                cp.array(current_xyt[:n_elite]),
+                lap_config=self.lap_config
+            ).get()
+            diversity = diversity_matrix.min(axis=1)  # (max_search,)
+            diversity[:n_elite] = 0.0  # Elite have zero diversity to themselves
+            
+            # For each diversity pick
+            for i in range(n_diversity):
+                # Find candidates that meet diversity criterion and are not yet selected
+                meets_criterion = (diversity >= diversity_threshold) & (~selected[:max_search])
+                
+                # Pick the best among those that meet criterion, or just the best if none meet
+                if np.any(meets_criterion):
+                    # Pick best (lowest index = best fitness) that meets criterion
+                    selected_id = np.where(meets_criterion)[0][0]
                 else:
-                    break
-
-            prefix_size = prefix_count  # Number of individuals to auto-select
-            if prefix_size > 0:
-                selected[:prefix_size] = True
-                try:
-                    diversity_matrix = kgs.compute_genetic_diversity_matrix(
-                        cp.array(current_xyt[:max_sel]),
-                        cp.array(current_xyt[:prefix_size]),
-                        lap_config=self.lap_config
-                    ).get()
-                except Exception:
-                    diversity_matrix = kgs.compute_genetic_diversity_matrix(
-                        cp.array(current_xyt[:max_sel]),
-                        cp.array(current_xyt[:prefix_size])
-                    ).get()
-                diversity = diversity_matrix.min(axis=1)
-                diversity[:prefix_size] = 0.0
-
-            for sel_size in self.selection_size[prefix_count:]:
-                selected_id = np.argmax(diversity[:sel_size])
-                selected[selected_id] = True
-                try:
-                    diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id]), lap_config=self.lap_config).get(), diversity)
-                except Exception:
-                    diversity = np.minimum(kgs.compute_genetic_diversity(cp.array(current_xyt[:max_sel]), cp.array(current_xyt[selected_id])).get(), diversity)
-                assert(np.all(diversity[selected[:max_sel]]<1e-4))
-            current_pop.select_ids(np.where(selected)[0])
-        else:
-            # Alternative selection, based on best individuals that meet diversity criterion
-            
-            # Calculate how many to select
-            total_survivors = max(2, int(self.population_size * self.survival_rate))
-            n_elite = max(1, int(total_survivors * self.elitism_fraction))
-            n_diversity = total_survivors - n_elite
-            
-            # Limit search space to best pop_size*search_depth individuals
-            max_search = max(total_survivors + 1, int(self.population_size * self.search_depth))
-            max_search = min(max_search, self.population_size)  # Don't exceed population
-            
-            # Step 1: Select N best individuals (elite)
-            selected = np.zeros(self.population_size, dtype=bool)
-            selected[:n_elite] = True
-            
-            # Step 2: Select M more individuals based on diversity
-            if n_diversity > 0:
-                # Get xyt for search space
-                search_xyt = current_xyt[:max_search]  # (max_search, N_trees, 3)
-                diversity_threshold = self.diversity_criterion * self.N_trees_to_do
-                
-                # Initialize diversity array by computing to all elite individuals
-                diversity_matrix = kgs.compute_genetic_diversity_matrix(
-                    cp.array(search_xyt),
-                    cp.array(current_xyt[:n_elite]),
-                    lap_config=self.lap_config
-                ).get()
-                diversity = diversity_matrix.min(axis=1)  # (max_search,)
-                diversity[:n_elite] = 0.0  # Elite have zero diversity to themselves
-                
-                # For each diversity pick
-                for i in range(n_diversity):
-                    # Find candidates that meet diversity criterion and are not yet selected
-                    meets_criterion = (diversity >= diversity_threshold) & (~selected[:max_search])
-                    
-                    # Pick the best among those that meet criterion, or just the best if none meet
-                    if np.any(meets_criterion):
-                        # Pick best (lowest index = best fitness) that meets criterion
-                        selected_id = np.where(meets_criterion)[0][0]
+                    # Pick best that's not yet selected
+                    unselected = np.where(~selected[:max_search])[0]
+                    if len(unselected) > 0:
+                        selected_id = unselected[0]
                     else:
-                        # Pick best that's not yet selected
-                        unselected = np.where(~selected[:max_search])[0]
-                        if len(unselected) > 0:
-                            selected_id = unselected[0]
-                        else:
-                            # All searched individuals are selected, can't add more
-                            break
-                    
-                    selected[selected_id] = True
-                    
-                    # Update diversity by computing to the newly selected individual only
-                    if not self.diversity_to_elite_only:
-                        diversity = np.minimum(
-                            kgs.compute_genetic_diversity(
-                                cp.array(search_xyt),
-                                cp.array(current_xyt[selected_id]),
-                                lap_config=self.lap_config
-                            ).get(),
-                            diversity
-                        )
+                        # All searched individuals are selected, can't add more
+                        break
+                
+                selected[selected_id] = True
+                
+                # Update diversity by computing to the newly selected individual only
+                if not self.diversity_to_elite_only:
+                    diversity = np.minimum(
+                        kgs.compute_genetic_diversity(
+                            cp.array(search_xyt),
+                            cp.array(current_xyt[selected_id]),
+                            lap_config=self.lap_config
+                        ).get(),
+                        diversity
+                    )
 
-                    diversity_threshold += self.diversity_criterion_scaling * self.N_trees_to_do
-            
-            current_pop.select_ids(np.where(selected)[0])
+                diversity_threshold += self.diversity_criterion_scaling * self.N_trees_to_do
+        
+        current_pop.select_ids(np.where(selected)[0])
 
         self.population = current_pop
         self.population.check_constraints()
@@ -1305,7 +1172,6 @@ def baseline():
     ga_base.population_size = 1500 
     ga_base.reset_check_generations = 100
     ga_base.reset_check_threshold = 0.5
-    ga_base.freeze_duration = 100
     ga_base.prob_mate_own = 0.7
     ga_base.reduce_h_threshold = 1e-5/40
     ga_base.always_allow_mate_with_better = False

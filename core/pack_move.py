@@ -555,7 +555,6 @@ class CrossoverStripe(Move):
     min_N_trees: int = field(init=True, default=2)
     max_N_trees_ratio: float = field(init=True, default=0.5)
 
-    jitter: float = field(init=True, default=0.0)
     distance_function: typing.Literal['stripe', 'square', 'square90'] = field(init=True, default='stripe')
     decouple_mate_location: bool = field(init=True, default=False)
     use_edge_clearance_when_decoupled: bool = field(init=True, default=True)
@@ -663,17 +662,8 @@ class CrossoverStripe(Move):
             normal_x_2d = normal_x[:, cp.newaxis]
             normal_y_2d = normal_y[:, cp.newaxis]
 
-            # Apply jitter for distance calculation only
-            if self.jitter > 0:
-                tree_pos_jittered = tree_positions_all.copy()
-                tree_pos_jittered[:, :, 0] += self.jitter * generator.standard_normal(tree_positions_all[:, :, 0].shape, dtype=tree_positions_all.dtype)
-                tree_pos_jittered[:, :, 1] += self.jitter * generator.standard_normal(tree_positions_all[:, :, 1].shape, dtype=tree_positions_all.dtype)
-                mate_pos_jittered = mate_positions_all.copy()
-                mate_pos_jittered[:, :, 0] += self.jitter * generator.standard_normal(mate_positions_all[:, :, 0].shape, dtype=mate_positions_all.dtype)
-                mate_pos_jittered[:, :, 1] += self.jitter * generator.standard_normal(mate_positions_all[:, :, 1].shape, dtype=mate_positions_all.dtype)
-            else:
-                tree_pos_jittered = tree_positions_all
-                mate_pos_jittered = mate_positions_all
+            tree_pos_jittered = tree_positions_all
+            mate_pos_jittered = mate_positions_all
 
             # Compute absolute distances to each line for the target population
             distances_individual_all = cp.abs(
@@ -687,10 +677,6 @@ class CrossoverStripe(Move):
                 (mate_pos_jittered[:, :, 1] - mate_line_point_y_2d) * normal_y_2d
             )
 
-            # Clean up jittered copies immediately
-            if self.jitter > 0:
-                del tree_pos_jittered
-                del mate_pos_jittered
         elif self.distance_function == 'square':
             # Compute the distances using L-infinity metric for both populations.
             line_point_x_2d = line_point_x[:, cp.newaxis]
@@ -698,17 +684,8 @@ class CrossoverStripe(Move):
             mate_line_point_x_2d = mate_line_point_x[:, cp.newaxis]
             mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
 
-            # Apply jitter for distance calculation only
-            if self.jitter > 0:
-                tree_pos_jittered = tree_positions_all.copy()
-                tree_pos_jittered[:, :, 0] += self.jitter * generator.standard_normal(tree_positions_all[:, :, 0].shape, dtype=tree_positions_all.dtype)
-                tree_pos_jittered[:, :, 1] += self.jitter * generator.standard_normal(tree_positions_all[:, :, 1].shape, dtype=tree_positions_all.dtype)
-                mate_pos_jittered = mate_positions_all.copy()
-                mate_pos_jittered[:, :, 0] += self.jitter * generator.standard_normal(mate_positions_all[:, :, 0].shape, dtype=mate_positions_all.dtype)
-                mate_pos_jittered[:, :, 1] += self.jitter * generator.standard_normal(mate_positions_all[:, :, 1].shape, dtype=mate_positions_all.dtype)
-            else:
-                tree_pos_jittered = tree_positions_all
-                mate_pos_jittered = mate_positions_all
+            tree_pos_jittered = tree_positions_all
+            mate_pos_jittered = mate_positions_all
 
             distances_individual_all = cp.maximum(
                 cp.abs(tree_pos_jittered[:, :, 0] - line_point_x_2d),
@@ -719,11 +696,6 @@ class CrossoverStripe(Move):
                 cp.abs(mate_pos_jittered[:, :, 0] - mate_line_point_x_2d),
                 cp.abs(mate_pos_jittered[:, :, 1] - mate_line_point_y_2d)
             )
-
-            # Clean up jittered copies immediately
-            if self.jitter > 0:
-                del tree_pos_jittered
-                del mate_pos_jittered
         elif self.distance_function == 'square90':
             assert isinstance(mate_sol, kgs.SolutionCollectionSquareSymmetric90)
             # Compute L-infinity distance considering all 4 rotational images (0°, 90°, 180°, 270°)
@@ -736,16 +708,8 @@ class CrossoverStripe(Move):
             mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
 
             # Apply jitter for distance calculation only  
-            if self.jitter > 0:
-                tree_pos_jittered = tree_positions_all.copy()
-                tree_pos_jittered[:, :, 0] += self.jitter * generator.standard_normal(tree_positions_all[:, :, 0].shape, dtype=tree_positions_all.dtype)
-                tree_pos_jittered[:, :, 1] += self.jitter * generator.standard_normal(tree_positions_all[:, :, 1].shape, dtype=tree_positions_all.dtype)
-                mate_pos_jittered = mate_positions_all.copy()
-                mate_pos_jittered[:, :, 0] += self.jitter * generator.standard_normal(mate_positions_all[:, :, 0].shape, dtype=mate_positions_all.dtype)
-                mate_pos_jittered[:, :, 1] += self.jitter * generator.standard_normal(mate_positions_all[:, :, 1].shape, dtype=mate_positions_all.dtype)
-            else:
-                tree_pos_jittered = tree_positions_all
-                mate_pos_jittered = mate_positions_all
+            tree_pos_jittered = tree_positions_all
+            mate_pos_jittered = mate_positions_all
 
             # Compute L-infinity distances for all 4 rotational images using positions directly
             # Image 0: (x, y)
@@ -769,10 +733,6 @@ class CrossoverStripe(Move):
 
             # Original minimum distances
             distances_mate_all = cp.minimum(cp.minimum(dist_0_mate, dist_1_mate), cp.minimum(dist_2_mate, dist_3_mate))
-
-            if self.jitter > 0:
-                del tree_pos_jittered
-                del mate_pos_jittered
             
             # Now use original (non-jittered) mate positions for transformation logic
             x_mate = mate_positions_all[:, :, 0]
@@ -846,16 +806,8 @@ class CrossoverStripe(Move):
             mate_line_point_y_2d = mate_line_point_y[:, cp.newaxis]
 
             # Apply jitter for distance calculation only
-            if self.jitter > 0:
-                tree_pos_jittered = tree_positions_all.copy()
-                tree_pos_jittered[:, :, 0] += self.jitter * generator.standard_normal(tree_positions_all[:, :, 0].shape, dtype=tree_positions_all.dtype)
-                tree_pos_jittered[:, :, 1] += self.jitter * generator.standard_normal(tree_positions_all[:, :, 1].shape, dtype=tree_positions_all.dtype)
-                mate_pos_jittered = mate_positions_all.copy()
-                mate_pos_jittered[:, :, 0] += self.jitter * generator.standard_normal(mate_positions_all[:, :, 0].shape, dtype=mate_positions_all.dtype)
-                mate_pos_jittered[:, :, 1] += self.jitter * generator.standard_normal(mate_positions_all[:, :, 1].shape, dtype=mate_positions_all.dtype)
-            else:
-                tree_pos_jittered = tree_positions_all
-                mate_pos_jittered = mate_positions_all
+            tree_pos_jittered = tree_positions_all
+            mate_pos_jittered = mate_positions_all
 
             # Compute L-infinity distances for both rotational images using positions directly
             # Image 0: (x, y)
@@ -874,10 +826,6 @@ class CrossoverStripe(Move):
             # Original minimum distances
             distances_mate_all = cp.minimum(dist_0_mate, dist_1_mate)
                 
-            if self.jitter > 0:
-                # Clean up jittered copies immediately after distance calculation
-                del tree_pos_jittered
-                del mate_pos_jittered
             x_mate = mate_positions_all[:, :, 0]
             y_mate = mate_positions_all[:, :, 1]
             theta_mate = mate_trees_full[:, :, 2]
@@ -949,28 +897,6 @@ class CrossoverStripe(Move):
         individual_ids_flat = inds_to_do[move_indices_flat]
         tree_ids_flat = individual_tree_ids_all[move_indices_flat, tree_indices_flat]
         trees_to_write = mate_trees_all[move_indices_flat, tree_indices_flat, :]
-
-        # Debug visualization of selected mating trees for solution 0
-        # if move_indices_flat.shape[0] > 0 and move_indices_flat[0] == 0:
-        #     import pack_vis_sol
-        #     import matplotlib.pyplot as plt
-            
-        #     # Get all trees for solution 0 from mate_trees_all
-        #     mask_sol0 = move_indices_flat == 0
-        #     trees_sol0 = trees_to_write[mask_sol0]
-            
-        #     # Create a temporary solution collection with just these selected trees
-        #     temp_sol = type(mate_sol)()
-        #     temp_sol.xyt = trees_sol0[cp.newaxis, :, :]  # Shape: (1, N_selected_trees, 3)
-        #     temp_sol.h = mate_sol.h[inds_mate[0:1]]  # Get h for solution 0
-        #     temp_sol.check_constraints()
-            
-        #     # Visualize using pack_vis_sol
-        #     fig, ax = plt.subplots(figsize=(8, 8))
-        #     pack_vis_sol.pack_vis_sol(temp_sol, solution_idx=0, ax=ax)
-        #     ax.set_title(f'Selected Mating Trees (Solution 0, N={trees_sol0.shape[0]})')
-        #     plt.tight_layout()
-        #     plt.show()
         
         # Transform mate trees to proper coordinates (compensate for offset between mate and original points)
         if self.decouple_mate_location:
@@ -983,15 +909,9 @@ class CrossoverStripe(Move):
             # Need to map from move_indices_flat to the corresponding offset
             trees_to_write[:, 0] += offset_x[move_indices_flat]
             trees_to_write[:, 1] += offset_y[move_indices_flat]
-        
-        #new_xyt[individual_ids_flat, tree_ids_flat, :] = 0*trees_to_write
-
-        #import pack_vis_sol
-        #pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
 
         new_xyt[individual_ids_flat, tree_ids_flat, :] = trees_to_write
 
-        #pack_vis_sol.pack_vis_sol(population.genotype.convert_to_phenotype(), solution_idx=inds_to_do[0])
         
 
     def _apply_orientation_preselection(self, mate_trees_full: cp.ndarray,
