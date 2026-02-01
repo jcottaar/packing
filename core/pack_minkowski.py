@@ -1,6 +1,10 @@
 """
 Minkowski difference computation for tree packing.
 
+This code is released under CC BY-SA 4.0, meaning you can freely use and adapt it 
+(including commercially), but must give credit to the original author (Jeroen 
+Cottaar) and keep it under this license.
+
 The Minkowski difference A ⊖ B = A ⊕ (-B) gives the "configuration space obstacle" -
 the set of all translations t such that if tree2's center is at t, then tree1 and 
 tree2 overlap (when tree1 is centered at the origin).
