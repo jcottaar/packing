@@ -1,18 +1,12 @@
 """
-gpu_overlap.py
+pack_cuda.py
 
-Compute overlap area between TWO IDENTICAL non-convex polygons using CUDA via CuPy.
+This code is released under CC BY-SA 4.0, meaning you can freely use and adapt it (including
+commercially), but must give credit to the original author (Jeroen Cottaar) and keep it under
+this license.
 
-You provide a convex decomposition of your polygon as 4 convex Shapely Polygons.
-The module uploads those convex pieces to the GPU and exposes
-
-    compute_overlap_area_gpu(x1, y1, theta1, x2, y2, theta2)
-
-which returns the overlap area between pose-1 and pose-2, computed on the GPU.
-
-All inputs (x1, y1, theta1, x2, y2, theta2) are expected to be **scalars**
-(Python floats or NumPy scalars). The function returns a single CuPy scalar
-(kgs.dtype_cp).
+This module may be hard to follow; it provides a CUDA-accelerated alternative to the cost function 
+calculation in pack_cost.py.
 """
 
 from __future__ import annotations
@@ -266,7 +260,7 @@ __device__ double overlap_ref_with_list_piece(
     const int use_separation, // if non-zero, compute separation-based cost (sum of sep^2)
     const int skip_index,  // index to skip (self-collision), use -1 to skip none
     const int compute_grads, // if non-zero, compute gradients
-    const int use_crystal, // if non-zero, loop over 3x3 cell for each tree
+    const int use_crystal, // if non-zero, loop over periodic cells for each tree
     const CrystalAxes crystal_axes, // crystal axes (only used if use_crystal is non-zero)
     const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
     const int N_periodic) // number of periodic images in each direction
@@ -415,7 +409,7 @@ __device__ void overlap_list_total(
     double* __restrict__ out_total,
     double* __restrict__ out_grads, // if non-NULL, write gradients to out_grads[n1*3]
     const int use_separation, // non-zero -> use separation sum-of-squares path
-    const int use_crystal, // if non-zero, loop over 3x3 cell for each tree
+    const int use_crystal, // if non-zero, loop over periodic cells for each tree
     const CrystalAxes crystal_axes, // crystal axes (only used if use_crystal is non-zero)
     const int only_self_interactions, // if non-zero, only compute interactions when i == skip_index
     const int N_periodic) // number of periodic images in each direction
@@ -483,7 +477,7 @@ __device__ void overlap_list_total(
 //   out_grads_base: base pointer to gradient output [num_ensembles, n_trees, 3] (can be NULL)
 //   num_ensembles: number of ensembles to process
 //   use_separation: if non-zero, use separation-based cost
-//   use_crystal: if non-zero, loop over 3x3 cell for each tree
+//   use_crystal: if non-zero, loop over periodic cells for each tree
 //   crystal_axes_base: base pointer to crystal axes [num_ensembles, 4] (NULL if use_crystal is 0)
 __global__ void multi_overlap_list_total(
     const double* __restrict__ xyt1_base,      // base pointer to [num_ensembles, n_trees, 3]
@@ -648,7 +642,7 @@ __device__ double boundary_distance_tree(
 }
 
 // Compute total boundary distance cost for a list of trees
-// Uses 1 thread per tree
+// Thread organization: 1 thread per tree
 __device__ void boundary_distance_list_total(
     const double* __restrict__ xyt_Nx3,  // flattened: [n, 3] in C-contiguous layout
     const int n,
@@ -1062,7 +1056,7 @@ def overlap_multi_ensemble(xyt1: cp.ndarray, xyt2: cp.ndarray, use_separation: b
     crystal_axes : cp.ndarray, shape (n_ensembles, 4), optional
         Crystal axes for periodic boundary conditions. Each row contains [ax, ay, bx, by]
         where (ax, ay) is axis A and (bx, by) is axis B. If provided, each tree will be
-        compared against a 3x3 grid of periodic images. If None, no periodic boundaries.
+        compared against a grid of periodic images determined by N_periodic. If None, no periodic boundaries.
     only_self_interactions : bool, optional
         If True, only compute cost/gradients for self-interactions (tree with its own
         periodic copies). Returns 0 if crystal_axes is None. Default is False.

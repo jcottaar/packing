@@ -1,8 +1,16 @@
 """
 pack_cuda_primitives.py
 
+This code is released under CC BY-SA 4.0, meaning you can freely use and adapt it (including
+commercially), but must give credit to the original author (Jeroen Cottaar) and keep it under
+this license.
+
+This module may be hard to follow; it is used in pack_cuda to provide a CUDA-accelerated alternative
+to the cost function calculation in pack_cost.py.
+
 Primitive CUDA device functions for polygon operations.
 These are low-level geometric operations used by higher-level functions.
+
 """
 
 PRIMITIVE_SRC = r"""

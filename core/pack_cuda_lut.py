@@ -1,12 +1,16 @@
 """
 LUT-based overlap computation for tree packing.
 
+This code is released under CC BY-SA 4.0, meaning you can freely use and adapt it (including
+commercially), but must give credit to the original author (Jeroen Cottaar) and keep it under
+this license.
+
 Uses a precomputed 3D lookup table indexed by relative pose (dx, dy, dtheta)
 to compute overlap between tree pairs, replacing expensive polygon intersection.
 
-Uses manual trilinear interpolation from global memory with full float32/float64
-precision for interpolation weights. Gradients computed analytically from
-trilinear interpolation formula.
+Uses manual trilinear interpolation from global memory with double precision
+by default (or float32 if kgs.USE_FLOAT32 is enabled). Gradients computed
+analytically from trilinear interpolation formula.
 """
 from __future__ import annotations
 
