@@ -7,7 +7,7 @@ import pack_dynamics
 import copy
 import pack_metric
 
-def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True, line_search=False, verbose=True, scaling=1.):
+def legalize(sol, move_factor=10., tolerance_rel_change=1e-7, stop_on_cost_increase = False, n_iter=20, target=1e-10, validate=True, line_search=False, verbose=True, scaling=1.):
     assert sol.is_phenotype()
     solx = copy.deepcopy(sol)
     solx.use_fixed_h = False
@@ -27,8 +27,6 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
     optimizer.max_step*=np.sqrt(scaling)    
     optimizer.history_size = 10
     optimizer.tolerance_rel_change = tolerance_rel_change
-    optimizer.track_cost = do_plot
-    optimizer.plot_cost = do_plot
     optimizer.use_line_search = line_search
     optimizer.stop_on_cost_increase = stop_on_cost_increase
     if verbose:
@@ -52,7 +50,7 @@ def legalize(sol, do_plot=False, move_factor=10., tolerance_rel_change=1e-7, sto
         if tolerance_rel_change==0.:
             raise Exception('Could not legalize solution')
         else:
-            return legalize(solx, do_plot=do_plot, move_factor=move_factor, tolerance_rel_change=0., stop_on_cost_increase=stop_on_cost_increase, n_iter=n_iter, target=target, validate=validate)
+            return legalize(solx, move_factor=move_factor, tolerance_rel_change=0., stop_on_cost_increase=stop_on_cost_increase, n_iter=n_iter, target=target, validate=validate)
 
 
 def solution_list_to_dataframe(sol_list, compact=True, compact_hi=1., return_scores=False, print_score=True):

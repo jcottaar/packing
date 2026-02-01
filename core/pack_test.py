@@ -15,23 +15,20 @@ pack_cuda._ensure_initialized()
 
 def run_all_tests(regenerate_reference=False):
     kgs.debugging_mode = 2   
-    test_ga(regenerate_reference, 0, False)
-    test_ga(regenerate_reference, 1, False)
-    test_ga(False, 0, True)      
+    test_ga(regenerate_reference, 0)
+    test_ga(regenerate_reference, 1)  
     test_costs()               
     pack_cuda_primitives_test.run_all_tests()    
     print("All tests passed.")
     kgs.set_float32(True)
 
-def test_ga(regenerate_reference, test_case, do_resume):
+def test_ga(regenerate_reference, test_case):
     match test_case:
         case 0:
             ga = pack_ga3.baseline()
         case 1:
             ga = pack_ga3.baseline_symmetry_180_tesselated()
             ga.ga.ga_base.initializer.ref_sol_axis2_offset = lambda r:0.5            
-    ga.save_every = 1
-    ga.filename = 'ga_test'
     ga.n_generations = 5       
     ga.ga.ga_base.N_trees_to_do = 20
     ga.rough_relaxers[0].cost.costs[2].lut_N_theta = 50
@@ -39,17 +36,9 @@ def test_ga(regenerate_reference, test_case, do_resume):
     ga.ga.ga_base.search_depth = 0.8
     ga.ga.ga_base.elitism_fraction = 0.5
     ga.ga.ga_base.survival_rate = 0.7     
-    ga.use_atomic_save = False
     ga.ga.do_legalize = False
     ga.ga.ga_base.remove_population_after_abbreviate = False
-    if not do_resume:
-        ga.run()        
-    else:
-        ga.n_generations = 3
-        ga.run()
-        ga = kgs.dill_load(kgs.temp_dir + 'ga_test.pickle')
-        ga.n_generations = 5
-        ga.run()
+    ga.run()        
     res = ga.ga.ga_list[0].population.fitness
     for g in ga.ga.ga_list[1:]:
         res = np.concatenate((res, g.population.fitness))

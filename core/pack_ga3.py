@@ -14,69 +14,6 @@ import pack_move
 import os
 from IPython.display import clear_output, display
 
-
-def _sparse_encode_int8_array(arr: np.ndarray):
-    arr_np = np.asarray(arr)
-    if arr_np.dtype != np.int8:
-        raise TypeError(f"Expected int8 array, got {arr_np.dtype}")
-    flat = arr_np.ravel()
-    idx = np.flatnonzero(flat)
-    return {
-        'format': 'sparse_int8_v1',
-        'shape': arr_np.shape,
-        'indices': idx.astype(np.int32, copy=False),
-        'values': flat[idx].astype(np.int8, copy=False),
-    }
-
-
-def _sparse_decode_int8_array(payload: dict):
-    if payload.get('format') != 'sparse_int8_v1':
-        raise ValueError(f"Unsupported sparse payload format: {payload.get('format')}")
-    shape = tuple(payload['shape'])
-    idx = np.asarray(payload['indices'], dtype=np.int64)
-    values = np.asarray(payload['values'], dtype=np.int8)
-    out = np.zeros(int(np.prod(shape, dtype=np.int64)), dtype=np.int8)
-    out[idx] = values
-    return out.reshape(shape)
-
-
-def _encode_int8_array(arr: np.ndarray):
-    arr_np = np.asarray(arr)
-    if arr_np.dtype != np.int8:
-        raise TypeError(f"Expected int8 array, got {arr_np.dtype}")
-
-    sparse = _sparse_encode_int8_array(arr_np)
-    # Rough byte estimate for sparse payload: indices(int32) + values(int8)
-    sparse_bytes = int(sparse['indices'].nbytes + sparse['values'].nbytes)
-
-    import zlib
-    dense_bytes = arr_np.tobytes(order='C')
-    compressed = zlib.compress(dense_bytes, level=6)
-    dense_payload = {
-        'format': 'zlib_int8_v1',
-        'shape': arr_np.shape,
-        'data': compressed,
-    }
-
-    # Choose smaller representation (favor dense on ties).
-    if len(compressed) <= sparse_bytes:
-        return dense_payload
-    return sparse
-
-
-def _decode_int8_array(payload: dict):
-    fmt = payload.get('format')
-    if fmt == 'sparse_int8_v1':
-        return _sparse_decode_int8_array(payload)
-    if fmt == 'zlib_int8_v1':
-        import zlib
-        shape = tuple(payload['shape'])
-        raw = zlib.decompress(payload['data'])
-        arr = np.frombuffer(raw, dtype=np.int8)
-        return arr.reshape(shape)
-    raise ValueError(f"Unsupported int8 payload format: {fmt}")
-
-
 # ============================================================
 # Definition of population
 # ============================================================
@@ -165,27 +102,9 @@ class Initializer(kgs.BaseClass):
         assert population.phenotype.N_trees == N_trees        
         population.check_constraints()
         return population        
-    
-@dataclass
-class InitializerFixed(Initializer):
-    is_done: bool = field(default=False)
-    fixed_sol: kgs.SolutionCollection = field(default=None)
-    def _initialize_population(self, N_individuals, N_trees):
-        assert not self.is_done
-        self.is_done = True
-        assert N_trees == self.fixed_sol.N_trees
-        sol = copy.deepcopy(self.fixed_sol)
-        sol.select_ids([1]*N_individuals)
-
-        pop = Population()
-        pop.genotype = sol
-        return pop
-
 
 @dataclass
-class InitializerRandomJiggled(Initializer):
-    jiggler: pack_dynamics.DynamicsInitialize = field(init=True, default_factory=pack_dynamics.DynamicsInitialize)
-    do_jiggle: bool = field(init=True, default=False)
+class InitializerRandom(Initializer):
     size_setup: float = field(init=True, default=0.65) # Will be scaled by sqrt(N_trees)    
     base_solution: kgs.SolutionCollection = field(init=True, default_factory=kgs.SolutionCollectionSquare)
     fixed_h: cp.ndarray = field(init=True, default=None) # if not None, should be (3,) array    
@@ -297,8 +216,6 @@ class InitializerRandomJiggled(Initializer):
                             valid_tree_indices = tree_indices[valid_mask]
                             sol.xyt[i_individual, N1 + valid_tree_indices, :] = candidates_cp[0, valid_mask, :]
                             needs_placement[i_individual, valid_tree_indices] = False
-        if self.do_jiggle:
-            sol = self.jiggler.run_simulation(sol)
         sol.canonicalize()
         population = Population(genotype=sol)
         return population
@@ -879,183 +796,6 @@ class GAMultiRing(GAMultiIsland):
                             connectivity_matrix[i, k] = True
                             connectivity_matrix[k, i] = True
         return connectivity_matrix
-        
-
-@dataclass
-class GAMultiHypercube(GAMultiIsland):
-    """Hypercube topology where islands connect to neighbors differing by one bit.
-    
-    Number of islands must be a power of 2.
-    """
-    
-    def _initialize(self, generator):
-        super()._initialize(generator)
-        # Validate that number of islands is a power of 2
-        n_ga = len(self.ga_list)
-        if n_ga <= 0 or (n_ga & (n_ga - 1)) != 0:
-            raise ValueError(f"GAMultiHypercube requires number of islands to be a power of 2, got {n_ga}")
-    
-    def _get_connectivity_matrix(self) -> np.ndarray:
-        """Return connectivity matrix for hypercube topology.
-        
-        Each island connects to neighbors that differ by exactly one bit
-        in their binary representation.
-        """
-        n_ga = len(self.ga_list)
-        connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
-        
-        for i in range(n_ga):
-            for bit_pos in range(int(np.log2(n_ga))):
-                # Flip the bit_pos-th bit to get neighbor
-                neighbor = i ^ (1 << bit_pos)
-                connectivity_matrix[i, neighbor] = True
-        
-        return connectivity_matrix
-
-
-@dataclass
-class GAMultiTree(GAMultiIsland):
-    """Binary tree topology with sibling connections.
-    
-    Number of islands must be 2^k - 1 (complete binary tree).
-    Islands connect to parent, children, and siblings.
-    """
-    
-    connect_siblings: bool = field(init=True, default=True)  # Whether siblings are connected
-    parent_child_depth: int = field(init=True, default=1)  # How many levels of parent/child connections
-    parent_child_one_way: bool = field(init=True, default=False)  # If True, material only flows upward (child→parent)
-    scale_reset_by_level: bool = field(init=True, default=False)  # If True, scale reset_check_generations by 2^(depth-level)
-    
-    def _initialize(self, generator):
-        super()._initialize(generator)
-        # Validate that number of islands is 2^k - 1
-        n_ga = len(self.ga_list)
-        if n_ga <= 0 or not self._is_complete_binary_tree_size(n_ga):
-            powers = [2**k - 1 for k in range(1, 10)]
-            raise ValueError(f"GAMultiTree requires number of islands to be 2^k - 1 (complete binary tree), got {n_ga}. Valid sizes: {powers[:6]}...")
-        
-        # Scale reset_check_generations based on tree level if enabled
-        if self.scale_reset_by_level:
-            depth = int(np.log2(n_ga + 1)) - 1  # Max level (0-indexed)
-            for i, ga in enumerate(self.ga_list):
-                if ga.reset_check_generations is not None:
-                    node_level = int(np.floor(np.log2(i + 1)))  # Level of node i
-                    distance_from_leaf = depth - node_level
-                    multiplier = 2 ** distance_from_leaf
-                    ga.reset_check_generations = int(ga.reset_check_generations * multiplier)
-        print([g.reset_check_generations for g in self.ga_list])
-        
-        self.display_structure()
-    
-    def _is_complete_binary_tree_size(self, n: int) -> bool:
-        """Check if n is of the form 2^k - 1."""
-        return n > 0 and (n + 1) & n == 0
-    
-    def display_structure(self):
-        """Display the binary tree structure as ASCII art."""
-        n_ga = len(self.ga_list)
-        if n_ga == 0:
-            return
-        
-        # Calculate tree depth
-        depth = int(np.log2(n_ga + 1))
-        
-        print(f"\nGAMultiTree structure ({n_ga} islands, depth {depth}):")
-        
-        if n_ga <= 1000:  # Only show ASCII art for reasonably sized trees
-            # Use a simpler, cleaner ASCII representation
-            def print_subtree(node_idx, prefix="", is_last=True):
-                if node_idx >= n_ga:
-                    return
-                
-                # Print current node
-                connector = "└── " if is_last else "├── "
-                print(f"{prefix}{connector}{node_idx}")
-                
-                # Update prefix for children
-                child_prefix = prefix + ("    " if is_last else "│   ")
-                
-                # Print children
-                left_child = 2 * node_idx + 1
-                right_child = 2 * node_idx + 2
-                
-                children = []
-                if left_child < n_ga:
-                    children.append(left_child)
-                if right_child < n_ga:
-                    children.append(right_child)
-                
-                for i, child in enumerate(children):
-                    is_last_child = (i == len(children) - 1)
-                    print_subtree(child, child_prefix, is_last_child)
-            
-            # Start with root
-            print_subtree(0)
-            
-            # Show connectivity info
-            print("\nConnectivity (each island connects to parent, children, and sibling):")
-            connectivity_matrix = self._get_connectivity_matrix()
-            for i in range(min(n_ga, 1000)):  # Show first 15 islands to avoid clutter
-                connections = [j for j in range(n_ga) if connectivity_matrix[j, i]]
-                print(f"  Island {i}: → {connections}")
-            if n_ga > 1000:
-                print(f"  ... (showing first 15 of {n_ga} islands)")
-                
-        else:
-            # For large trees, just show level-by-level listing
-            for level in range(depth):
-                start_idx = 2**level - 1
-                end_idx = min(2**(level+1) - 1, n_ga)
-                nodes = list(range(start_idx, end_idx))
-                print(f"  Level {level}: {nodes}")
-        
-        print()  # Add blank line after structure
-        
-        try:
-            import matplotlib.pyplot as plt
-            plt.pause(0.001)
-        except ImportError:
-            pass
-    
-    def _get_connectivity_matrix(self) -> np.ndarray:
-        """Return connectivity matrix for binary tree with sibling connections.
-        
-        Tree layout: root=0, left_child=2*i+1, right_child=2*i+2, parent=(i-1)//2
-        Each node connects to parent, children, and sibling (configurable).
-        """
-        n_ga = len(self.ga_list)
-        connectivity_matrix = np.zeros((n_ga, n_ga), dtype=bool)
-        
-        for i in range(n_ga):
-            # Connect to ancestors up to parent_child_depth levels
-            # (This establishes all parent-child connections as we iterate through all nodes)
-            ancestor = i
-            for depth in range(self.parent_child_depth):
-                if ancestor == 0:  # Reached root
-                    break
-                ancestor = (ancestor - 1) // 2
-                
-                # Connect i to this ancestor
-                if self.parent_child_one_way:
-                    # Only child → parent (upward flow)
-                    connectivity_matrix[ancestor, i] = True
-                else:
-                    # Bidirectional
-                    connectivity_matrix[i, ancestor] = True
-                    connectivity_matrix[ancestor, i] = True
-            
-            # Connect to sibling
-            if self.connect_siblings and i > 0:  # Skip root
-                if i % 2 == 1:  # i is left child
-                    sibling = i + 1  # right sibling
-                else:  # i is right child
-                    sibling = i - 1  # left sibling
-                if sibling < n_ga:
-                    connectivity_matrix[i, sibling] = True
-                    connectivity_matrix[sibling, i] = True
-        
-        return connectivity_matrix
-
 
 ref_solution = None
 
@@ -1064,7 +804,7 @@ class GASinglePopulation(GA):
     # Configuration
     N_trees_to_do: int = field(init=True, default=None)
     population_size:int = field(init=True, default=4000) 
-    initializer: Initializer = field(init=True, default_factory=InitializerRandomJiggled)
+    initializer: Initializer = field(init=True, default_factory=InitializerRandom)
     move: pack_move.Move = field(init=True, default=None)
     fixed_h: float = field(init=True, default=-1.)
     reduce_h_threshold: float = field(init=True, default=1e-5/40) # scaled by N_trees
@@ -1082,8 +822,6 @@ class GASinglePopulation(GA):
     population: Population = field(init=True, default=None)
 
     def __post_init__(self):        
-        self.initializer.jiggler.n_rounds=0        
-
         self.move = pack_move.MoveSelector()
         self.move.moves = []
         self.move.moves.append( [pack_move.MoveRandomTree(), 'MoveRandomTree', 1.0] )
@@ -1178,187 +916,7 @@ class GASinglePopulation(GA):
     def _abbreviate(self):
         if self.remove_population_after_abbreviate:
             self.population = None
-
-    def _diagnostic_plots(self, i_gen,plot_ax):
-        if self.plot_diversity_ax is not None:
-            ax = plot_ax[self.plot_diversity_ax]
-            ax.clear()
-            plt.sca(ax)
-            pop = self.population.genotype
-            # Compute diversity matrix
-            diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt)).get()
-            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
-            if not hasattr(ax, '_colorbar') or ax._colorbar is None:
-                ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
-            else:
-                ax._colorbar.update_normal(im)
-            plt.title('Diversity Matrix Across single population')
-            plt.xlabel('Individual')
-            plt.ylabel('Individual')
-        if self.plot_diversity_alt_ax is not None:
-            ax = plot_ax[self.plot_diversity_alt_ax]
-            ax.clear()
-            plt.sca(ax)
-            pop = self.population.genotype
-            # Compute diversity matrix
-            import lap_batch
-            diversity_matrix = kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt), lap_config = lap_batch.LAPConfig(algorithm='auction')).get() - \
-                kgs.compute_genetic_diversity_matrix(cp.array(pop.xyt), cp.array(pop.xyt), lap_config = lap_batch.LAPConfig(algorithm='hungarian')).get()
-            im = plt.imshow(diversity_matrix, cmap='viridis', vmin=0., vmax=np.max(diversity_matrix), interpolation='none')
-            if not hasattr(ax, '_colorbar') or ax._colorbar is None:
-                ax._colorbar = plt.colorbar(im, ax=ax, label='Diversity distance')
-            else:
-                ax._colorbar.update_normal(im)
-            plt.title('Diversity Matrix Across single population')
-            plt.xlabel('Individual')
-            plt.ylabel('Individual')
-        if self.plot_population_fitness_ax is not None:
-            for a in self.plot_population_fitness_ax:
-                ax = plot_ax[a[2]]
-                ax.clear()
-                plt.sca(ax)
-                fitness_values = self.population.fitness[:,a[0]]
-                if a[1]:
-                    fitness_values = np.log(fitness_values)/np.log(10)
-                plt.plot(fitness_values)
-                plt.grid(True)
-                plt.title('Population Fitness Distribution')
-                plt.legend()
     
-    
-    
-@dataclass
-class GASinglePopulationTournament(GASinglePopulation):
-    """Tournament-based selection GA with explicit champion exploitation.
-    
-    Selection strategy:
-    - Keep top `selection_fraction` (default 50%) of population as parents
-    - Generate `champion_fraction` (default 10%) offspring from champion
-    - Generate remaining offspring via tournament selection (N=tournament_size)
-    
-    Designed for use with GAMultiRing (32 islands, ring topology).
-    """
-    
-    population_size: int = field(init=True, default=500)
-    champion_fraction: float = field(init=True, default=0.1)  # 10% from champion
-    tournament_size: int = field(init=True, default=4)  # Tournament N=4
-    selection_fraction: float = field(init=True, default=0.5)  # Keep top 50%
-    prob_mate_own: float = field(init=True, default=0.5)  # For ring migration
-    
-    # Internal state
-    _cached_champion_pop: Population = field(init=False, default=None)
-    
-    # Computed from selection_fraction * population_size (used by _reset)
-    @property
-    def selection_size(self):
-        return list(range(int(self.population_size * self.selection_fraction)))
-
-    def _apply_selection(self):
-        """Keep top selection_fraction of population as parents."""
-        current_pop = self.population
-        sorted_ids = kgs.lexicographic_argsort(current_pop.fitness)
-        n_keep = int(self.population_size * self.selection_fraction)
-        current_pop.select_ids(sorted_ids[:n_keep])
-        self.population = current_pop
-        self.population.check_constraints()
-
-    def _tournament_select(self, parent_size: int, n_offspring: int, generator) -> cp.ndarray:
-        """Perform tournament selection to choose parents.
-        
-        For each offspring, draw tournament_size candidates and select the best.
-        Returns array of parent indices (shape: n_offspring).
-        """
-        # Draw tournament candidates: (n_offspring, tournament_size)
-        candidates = generator.integers(0, parent_size, (n_offspring, self.tournament_size))
-        
-        # Get fitness for all candidates - need to find best in each tournament
-        # fitness shape: (parent_size, n_components)
-        fitness = self.population.fitness
-        
-        # For each tournament, find the winner (lexicographically smallest fitness)
-        winners = cp.zeros(n_offspring, dtype=cp.int64)
-        candidates_cpu = candidates.get()
-        for i in range(n_offspring):
-            tournament_fitness = fitness[candidates_cpu[i]]  # (tournament_size, n_components)
-            best_in_tournament = kgs.lexicographic_argmin(tournament_fitness)
-            winners[i] = candidates_cpu[i, best_in_tournament]
-        
-        return winners
-
-    def _generate_offspring(self, mate_sol, mate_weights, mate_costs, generator):
-        old_pop = self.population
-        old_pop.check_constraints()
-        old_pop.parent_fitness = old_pop.fitness.copy()
-        parent_size = old_pop.genotype.N_solutions  # This is the surviving 50%
-        
-        # Save the champion for elitism (will be inserted in _merge_offspring)
-        best_idx = kgs.lexicographic_argmin(old_pop.fitness)
-        self._cached_champion_pop = copy.deepcopy(old_pop)
-        self._cached_champion_pop.select_ids([best_idx])
-        
-        # Create new population with full size
-        new_pop = old_pop.create_empty(self.population_size, self.N_trees_to_do)
-        
-        # Layout:
-        # - indices 0 to n_champion-1: champion offspring (mutated clones of champion)
-        # - indices n_champion to end: tournament offspring
-        # Note: position 0 will be overwritten with unmutated champion in _merge_offspring
-        
-        n_champion = int(self.population_size * self.champion_fraction)
-        n_tournament = self.population_size - n_champion
-        
-        # === Determine parent for each offspring ===
-        # Champion offspring: parent is always the champion
-        # Tournament offspring: parent selected via tournament
-        all_parent_ids = cp.zeros(self.population_size, dtype=cp.int64)
-        
-        if n_champion > 0:
-            all_parent_ids[:n_champion] = best_idx
-        
-        if n_tournament > 0:
-            all_parent_ids[n_champion:] = self._tournament_select(parent_size, n_tournament, generator)
-        
-        # Clone all parents at once
-        all_inds = cp.arange(self.population_size)
-        new_pop.create_clone_batch(all_inds, old_pop, all_parent_ids)
-        
-        # === Determine mates for all offspring (same logic for champion and tournament) ===
-        if mate_sol is None or mate_sol.N_solutions == 0:
-            use_own = cp.ones(self.population_size, dtype=bool)
-        else:
-            use_own = generator.random(self.population_size) < self.prob_mate_own
-        
-        # Own-population mates (always mate with champion)
-        inds_use_own = cp.where(use_own)[0]
-        if len(inds_use_own) > 0:
-            mate_ids_own = cp.full(len(inds_use_own), best_idx, dtype=cp.int64)
-            self.move.do_move_vec(new_pop, inds_use_own, old_pop.genotype,
-                                  mate_ids_own, generator)
-        
-        # External-population mates
-        inds_use_external = cp.where(~use_own)[0]
-        if len(inds_use_external) > 0:
-            mate_prob = cp.asarray(mate_weights) / cp.sum(mate_weights)
-            cum_prob = cp.cumsum(mate_prob)
-            random_vals = generator.random(len(inds_use_external))
-            mate_ids_external = cp.searchsorted(cum_prob, random_vals)
-            self.move.do_move_vec(new_pop, inds_use_external, mate_sol.genotype,
-                                  mate_ids_external, generator)
-        
-        new_pop.genotype.canonicalize()
-        
-        return [new_pop]
-
-    def _merge_offspring(self):
-        """Replace population with offspring, preserving the champion (elitism)."""
-        new_pop = self._cached_offspring[0]
-        
-        # Insert unmutated champion at position 0 (overwrite the first champion offspring)
-        new_pop.create_clone_batch(cp.array([0]), self._cached_champion_pop, cp.array([0]))
-        
-        self.population = new_pop
-        self.population.check_constraints()
-
 
 @dataclass
 class GASinglePopulationOld(GASinglePopulation):
@@ -1621,13 +1179,9 @@ class Orchestrator(kgs.BaseClass):
     genotype_at: int = field(init=True, default=1)  # 0:before relax, 1:after rough relax, 2:after fine relax(=phenotype)
     seed: int = field(init=True, default=42)
     
-
     # Diagnostics
     diagnostic_plot: bool = field(init=True, default=False)
     plot_every: int = field(init=True, default=1)
-    filename: str = field(init=True, default='')
-    save_every: int = field(init=True, default=50)
-    use_atomic_save: bool = field(init=True, default=True)
 
     # Intermediate
     _current_generation: int = field(init=False, default=0)
@@ -1692,57 +1246,8 @@ class Orchestrator(kgs.BaseClass):
         self.ga.check_constraints()
         return super()._check_constraints()
     
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        gen = state.get('_generator', None)
-        if gen is None:
-            return state
-        bitgen = getattr(gen, 'bit_generator', None)
-        assert not( bitgen is None or type(bitgen).__name__ != 'XORWOW')
-        bit_state = bitgen.__getstate__()
-        raw_state = bit_state.get('_state', None)
-        assert isinstance(raw_state, cp.ndarray)
-        raw_state_np = raw_state.get()
-        assert raw_state_np.dtype == np.int8
-        state['_generator'] = {
-            '__format__': 'cupy_xorwow_state_only_v1',
-            '_state': _encode_int8_array(raw_state_np),
-        }
-        return state
-
-    def __setstate__(self, state):
-        gen_payload = state.get('_generator', None)
-
-        # New compact format: only restores XORWOW._state
-        if isinstance(gen_payload, dict) and gen_payload.get('__format__') == 'cupy_xorwow_state_only_v1':
-            sparse_state = gen_payload.get('_state', None)
-            if isinstance(sparse_state, dict) and sparse_state.get('format') in ('sparse_int8_v1', 'zlib_int8_v1'):
-                decoded = _decode_int8_array(sparse_state)
-
-                gen = cp.random.default_rng()
-                bitgen = getattr(gen, 'bit_generator', None)
-                if bitgen is not None and type(bitgen).__name__ == 'XORWOW':
-                    # Only mutate `_state` as requested.
-                    bitgen._state = cp.asarray(decoded)
-                    state = dict(state)
-                    state['_generator'] = gen
-
-        self.__dict__.update(state)
-    
-    def _save_checkpoint(self, filename):
-        """Save checkpoint with optional atomic write."""
-        if self.filename == '':
-            return
-        if self.use_atomic_save:
-            temp_filename = filename + '.tmp'
-            kgs.dill_save(temp_filename, self)
-            os.replace(temp_filename, filename)
-        else:
-            kgs.dill_save(filename, self)
-    
     def run(self):
         self.check_constraints(debugging_mode_offset=2)
-        save_filename = kgs.temp_dir + self.filename + '.pickle'
 
         while self._current_generation<self.n_generations and not self.ga._stopped:
             if self._current_generation==0:
@@ -1780,29 +1285,15 @@ class Orchestrator(kgs.BaseClass):
 
             self._current_generation += 1
 
-            if self._current_generation % self.save_every == 0:
-                self._save_checkpoint(save_filename)
-
             if kgs.debugging_mode>=2:
                 self.check_constraints()
         
         if not self._is_finalized:
-            self._save_checkpoint(save_filename)
             self._generator = None
             self.ga.finalize()
             self.ga.abbreviate()
             self._generator = None
             self._is_finalized = True
-
-        if not self.filename == '':
-            base_dir = os.path.dirname(save_filename)
-            done_dir = os.path.join(base_dir, 'done')
-            os.makedirs(done_dir, exist_ok=True)
-            # If self.filename contains subdirectories (e.g. a/b/c/xxx) we want
-            # kgs.temp_dir + a/b/c/done/xxx_done.pickle — use basename for the file.
-            basename = os.path.basename(self.filename)
-            done_path_done = os.path.join(done_dir, f"{basename}_done.pickle")
-            self._save_checkpoint(done_path_done)
 
 def baseline():
     runner = Orchestrator(n_generations=60000)
@@ -1819,7 +1310,6 @@ def baseline():
     ga_base.reduce_h_threshold = 1e-5/40
     ga_base.always_allow_mate_with_better = False
     ga_base.fixed_h = -1.
-    #ga_base.do_legalize = True
 
     runner.ga.ga_base = ga_base
     runner.ga.do_legalize = True
