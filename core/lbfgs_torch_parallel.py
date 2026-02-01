@@ -1,93 +1,158 @@
+"""L-BFGS Parallel Optimizer with Strong Wolfe Line Search.
+
+This module provides a batched (parallel) implementation of the Limited-memory
+Broyden-Fletcher-Goldfarb-Shanno (L-BFGS) optimization algorithm. It can optimize
+multiple independent systems simultaneously on GPU, with optional strong Wolfe line search.
+
+It is based on the PyTorch L-BFGS implementation, modified to support batches.
+
+Key features:
+- Batched processing: optimizes M independent systems in parallel
+- Pre-allocated buffers to minimize memory allocations
+- Strong Wolfe line search with cubic interpolation
+- Two-loop recursion for approximate Hessian computation
+- GPU-accelerated using PyTorch
+
+This code is released under CC BY-SA 4.0, meaning you can freely use and adapt it
+(including commercially), but must give credit to the original author (Jeroen Cottaar)
+and keep it under this license.
+"""
+
 # mypy: allow-untyped-defs
 from typing import Optional
-
 import torch
 from torch import Tensor
-
 
 
 __all__ = ["lbfgs"]
 
 
 def _cubic_interpolate(x1, f1, g1, x2, f2, g2, bounds=None):
-    # ported from https://github.com/torch/optim/blob/master/polyinterp.lua
-    # Compute bounds of interpolation area
+    """Scalar cubic interpolation between two points.
+    
+    Finds the minimum of a cubic polynomial interpolating two points with
+    function values and derivatives. Used in line search.
+    
+    Args:
+        x1: First point position (scalar)
+        f1: Function value at x1 (scalar)
+        g1: Derivative at x1 (scalar)
+        x2: Second point position (scalar)
+        f2: Function value at x2 (scalar)
+        g2: Derivative at x2 (scalar)
+        bounds: Optional tuple (xmin, xmax) to constrain result
+    
+    Returns:
+        Interpolated minimum position (scalar), clamped to bounds if provided
+    """
+    # Determine bounds for interpolation
     if bounds is not None:
         xmin_bound, xmax_bound = bounds
     else:
         xmin_bound, xmax_bound = (x1, x2) if x1 <= x2 else (x2, x1)
 
-    # Code for most common case: cubic interpolation of 2 points
-    #   w/ function and derivative values for both
-    # Solution in this case (where x2 is the farthest point):
-    #   d1 = g1 + g2 - 3*(f1-f2)/(x1-x2);
-    #   d2 = sqrt(d1^2 - g1*g2);
-    #   min_pos = x2 - (x2 - x1)*((g2 + d2 - d1)/(g2 - g1 + 2*d2));
-    #   t_new = min(max(min_pos,xmin_bound),xmax_bound);
+    # Compute cubic interpolation coefficients
     import math
     d1 = g1 + g2 - 3 * (f1 - f2) / (x1 - x2)
     d2_square = d1**2 - g1 * g2
+    
+    # Check if interpolation is valid
     if d2_square >= 0:
         d2 = math.sqrt(d2_square)
+        
+        # Compute minimum position based on point ordering
         if x1 <= x2:
             min_pos = x2 - (x2 - x1) * ((g2 + d2 - d1) / (g2 - g1 + 2 * d2))
         else:
             min_pos = x1 - (x1 - x2) * ((g1 + d2 - d1) / (g1 - g2 + 2 * d2))
+        
         return min(max(min_pos, xmin_bound), xmax_bound)
     else:
+        # Fallback to midpoint if interpolation fails
         return (xmin_bound + xmax_bound) / 2.0
 
 
+
 def _cubic_interpolate_batch(x1, f1, g1, x2, f2, g2, xmin_bound, xmax_bound):
-    """Batched cubic interpolation.
-
+    """Vectorized cubic interpolation for batched line search.
+    
+    Performs cubic interpolation independently for M systems in parallel.
+    
     Args:
-        x1, f1, g1, x2, f2, g2: Tensors of shape (M,)
-        xmin_bound, xmax_bound: Tensors of shape (M,)
-
+        x1: First point positions, shape (M,)
+        f1: Function values at x1, shape (M,)
+        g1: Derivatives at x1, shape (M,)
+        x2: Second point positions, shape (M,)
+        f2: Function values at x2, shape (M,)
+        g2: Derivatives at x2, shape (M,)
+        xmin_bound: Lower bounds for interpolation, shape (M,)
+        xmax_bound: Upper bounds for interpolation, shape (M,)
+    
     Returns:
-        Tensor of shape (M,) with interpolated values
+        Interpolated minimum positions, shape (M,), clamped to bounds
     """
+    # Compute cubic interpolation coefficients
     d1 = g1 + g2 - 3 * (f1 - f2) / (x1 - x2)
     d2_square = d1**2 - g1 * g2
 
-    # Where d2_square >= 0, use cubic interpolation
+    # Check which systems have valid interpolation
     valid = d2_square >= 0
     d2 = torch.sqrt(torch.clamp(d2_square, min=0))
 
-    # Compute min_pos based on x1 <= x2
+    # Compute minimum position based on point ordering
     x1_le_x2 = x1 <= x2
     min_pos_1 = x2 - (x2 - x1) * ((g2 + d2 - d1) / (g2 - g1 + 2 * d2))
     min_pos_2 = x1 - (x1 - x2) * ((g1 + d2 - d1) / (g1 - g2 + 2 * d2))
     min_pos = torch.where(x1_le_x2, min_pos_1, min_pos_2)
 
-    # Clamp to bounds
+    # Clamp valid results to bounds, use midpoint for invalid
     result_valid = torch.clamp(min_pos, min=xmin_bound, max=xmax_bound)
     result_invalid = (xmin_bound + xmax_bound) / 2.0
 
     return torch.where(valid, result_valid, result_invalid)
 
+
+
 def _strong_wolfe_batched(
-    obj_func, x, t, d, f, g, gtd, c1=1e-4, c2=0.9, tolerance_change=1e-9, max_ls=25
+    obj_func,
+    x,
+    t,
+    d,
+    f,
+    g,
+    gtd,
+    c1=1e-4,
+    c2=0.9,
+    tolerance_change=1e-9,
+    max_ls=25
 ):
-    """Batched strong Wolfe line search.
-
+    """Batched strong Wolfe line search for multiple systems.
+    
+    Performs strong Wolfe conditions line search independently for M systems,
+    using cubic interpolation to find acceptable step sizes. This is the 
+    bracketing + zoom approach.
+    
     Args:
-        obj_func: Function that takes x (M, N) and returns (f, g) with shapes (M,) and (M, N)
-        x: (M, N) current parameters
-        t: (M,) initial step sizes
-        d: (M, N) search directions
-        f: (M,) current function values
-        g: (M, N) current gradients
-        gtd: (M,) directional derivatives
-
+        obj_func: Objective function that takes x (M, N) and returns (f, g)
+                  where f has shape (M,) and g has shape (M, N)
+        x: Current parameter values, shape (M, N)
+        t: Initial step sizes, shape (M,)
+        d: Search directions, shape (M, N)
+        f: Current function values, shape (M,)
+        g: Current gradients, shape (M, N)
+        gtd: Current directional derivatives (g·d), shape (M,)
+        c1: Armijo condition constant (default: 1e-4)
+        c2: Curvature condition constant (default: 0.9)
+        tolerance_change: Minimum bracket width (default: 1e-9)
+        max_ls: Maximum line search iterations (default: 25)
+    
     Returns:
-        f_new: (M,) new function values
-        g_new: (M, N) new gradients
-        t: (M,) final step sizes
-        ls_func_evals: (M,) number of function evaluations per system
+        f_new: New function values, shape (M,)
+        g_new: New gradients, shape (M, N)
+        t: Final step sizes, shape (M,)
+        ls_func_evals: Number of function evaluations per system, shape (M,)
     """
-    M = x.shape[0]
+    M = x.shape[0]  # Number of systems
     device = x.device
     dtype = x.dtype
 
@@ -104,29 +169,34 @@ def _strong_wolfe_batched(
     # Track active systems (still searching)
     active = torch.ones(M, dtype=torch.bool, device=device)
 
+    # Track active systems (still searching)
+    active = torch.ones(M, dtype=torch.bool, device=device)
+
     # Bracketing phase state (per system)
     t_prev = torch.zeros(M, dtype=dtype, device=device)
     f_prev = f.clone()
     g_prev = g.clone()
     gtd_prev = gtd.clone()
 
-    # Bracket state: use tensors for values that all systems have
-    bracket_t = torch.zeros((M, 2), dtype=dtype, device=device)
-    bracket_f = torch.zeros((M, 2), dtype=dtype, device=device)
-    bracket_g = torch.zeros((M, 2, x.shape[1]), dtype=dtype, device=device)
-    bracket_gtd = torch.zeros((M, 2), dtype=dtype, device=device)
+    # Bracket state: stores interval [t_low, t_high] for each system
+    bracket_t = torch.zeros((M, 2), dtype=dtype, device=device)  # Step sizes
+    bracket_f = torch.zeros((M, 2), dtype=dtype, device=device)  # Function values
+    bracket_g = torch.zeros((M, 2, x.shape[1]), dtype=dtype, device=device)  # Gradients
+    bracket_gtd = torch.zeros((M, 2), dtype=dtype, device=device)  # Directional derivatives
     bracket_size = torch.zeros(M, dtype=torch.long, device=device)  # 0, 1, or 2
 
     done = torch.zeros(M, dtype=torch.bool, device=device)
     ls_iter = 0
 
-    # Bracketing phase
+    # ========== Bracketing phase ==========
+    # Find an interval [t_low, t_high] containing acceptable step
     while active.any() and ls_iter < max_ls:
-        # Check Armijo condition
+        # Check Armijo condition (sufficient decrease)
         armijo_fail = f_new > (f + c1 * t * gtd)
         not_decreasing = (ls_iter > 1) & (f_new >= f_prev)
         bracket_condition = armijo_fail | not_decreasing
 
+        # Systems that just found a bracket
         newly_bracketed = active & bracket_condition & (bracket_size == 0)
         if newly_bracketed.any():
             idx = newly_bracketed
@@ -141,7 +211,7 @@ def _strong_wolfe_batched(
             bracket_gtd[idx, 1] = gtd_new[idx]
             active[idx] = False
 
-        # Check Wolfe conditions
+        # Check strong Wolfe conditions (curvature condition)
         wolfe_satisfied = (gtd_new.abs() <= -c2 * gtd) & active
         if wolfe_satisfied.any():
             idx = wolfe_satisfied
@@ -152,7 +222,7 @@ def _strong_wolfe_batched(
             done[idx] = True
             active[idx] = False
 
-        # Check positive curvature
+        # Check for positive curvature (need to bracket)
         pos_curv = (gtd_new >= 0) & active
         if pos_curv.any():
             idx = pos_curv
@@ -170,11 +240,10 @@ def _strong_wolfe_batched(
         if not active.any():
             break
 
-        # Interpolate for active systems
+        # Interpolate new step size for active systems
         min_step = t + 0.01 * (t - t_prev)
         max_step = t * 10
 
-        # Cubic interpolation (vectorized over active systems)
         if active.any():
             t[active] = _cubic_interpolate_batch(
                 t_prev[active], f_prev[active], gtd_prev[active],
@@ -198,7 +267,7 @@ def _strong_wolfe_batched(
 
         ls_iter += 1
 
-    # Systems that hit max_ls without bracketing
+    # Systems that hit max iterations without bracketing
     no_bracket = (bracket_size == 0) & (ls_iter == max_ls)
     if no_bracket.any():
         idx = no_bracket
@@ -210,16 +279,17 @@ def _strong_wolfe_batched(
         bracket_g[idx, 0] = g[idx]
         bracket_g[idx, 1] = g_new[idx]
 
-    # Zoom phase
+    # ========== Zoom phase ==========
+    # Refine the bracket to find acceptable step satisfying Wolfe conditions
     active = (bracket_size == 2) & ~done  # Only zoom for bracketed, not done systems
     insuf_progress = torch.zeros(M, dtype=torch.bool, device=device)
 
-    # Find low/high positions in bracket
+    # Find low/high positions in bracket (low = better function value)
     low_pos = (bracket_f[:, 0] <= bracket_f[:, 1]).long()
     high_pos = 1 - low_pos
 
     while active.any() and ls_iter < max_ls:
-        # Check bracket size
+        # Check if bracket is too small to continue
         bracket_width = (bracket_t[:, 1] - bracket_t[:, 0]).abs()
         too_small = (bracket_width * d_norm < tolerance_change) & active
         active[too_small] = False
@@ -238,7 +308,7 @@ def _strong_wolfe_batched(
                 xmin[active], xmax[active]
             )
 
-        # Check progress
+        # Check if we're making sufficient progress
         eps = 0.1 * bracket_width
         dist_to_bounds = torch.stack([
             bracket_t.max(dim=1).values - t_new,
@@ -247,29 +317,33 @@ def _strong_wolfe_batched(
 
         close_to_boundary = (dist_to_bounds < eps) & active
 
-        # Vectorized insufficient progress adjustment
+        # Adjust if insufficient progress or out of bounds
         bracket_min = bracket_t.min(dim=1).values
         bracket_max = bracket_t.max(dim=1).values
 
-        # Check if we need to adjust (insufficient progress or out of bounds)
-        need_adjust = close_to_boundary & (insuf_progress | (t_new >= bracket_max) | (t_new <= bracket_min))
+        need_adjust = close_to_boundary & (
+            insuf_progress | 
+            (t_new >= bracket_max) | 
+            (t_new <= bracket_min)
+        )
 
         if need_adjust.any():
-            # Determine which boundary is closer
+            # Move 0.1*eps away from nearest boundary
             dist_to_max = (t_new - bracket_max).abs()
             dist_to_min = (t_new - bracket_min).abs()
             closer_to_max = dist_to_max < dist_to_min
 
-            # Adjust t_new: move 0.1*eps away from nearest boundary
-            t_new_adjusted = torch.where(closer_to_max, bracket_max - eps, bracket_min + eps)
+            t_new_adjusted = torch.where(
+                closer_to_max, 
+                bracket_max - eps, 
+                bracket_min + eps
+            )
             t_new[need_adjust] = t_new_adjusted[need_adjust]
             insuf_progress[need_adjust] = False
 
-        # Mark insufficient progress for close systems that didn't need adjustment
+        # Mark insufficient progress for systems close but not adjusted
         mark_insuf = close_to_boundary & ~need_adjust
         insuf_progress[mark_insuf] = True
-
-        # Clear insufficient progress for systems not close to boundary
         insuf_progress[~close_to_boundary] = False
 
         # Evaluate new points for active systems
@@ -282,65 +356,61 @@ def _strong_wolfe_batched(
 
         ls_iter += 1
 
-        # Update brackets based on conditions
-        todo1 = active & (   (f_new > (f + c1 * t_new * gtd)) | (f_new >= bracket_f[torch.arange(M, device=device), low_pos])   )
+        # Update brackets based on Wolfe conditions
+        low_f = bracket_f[torch.arange(M, device=device), low_pos]
+        todo1 = active & (
+            (f_new > (f + c1 * t_new * gtd)) | 
+            (f_new >= low_f)
+        )
 
-        # Vectorized: Update high bracket for todo1 systems
+        # Update high bracket for systems that fail Armijo
         if todo1.any():
             hp_idx = high_pos[todo1].unsqueeze(1)  # (num_todo1, 1)
             idx_expanded = torch.where(todo1)[0].unsqueeze(1)  # (num_todo1, 1)
-
-            # Create full indices for scatter
             scatter_idx = torch.cat([idx_expanded, hp_idx], dim=1)  # (num_todo1, 2)
 
-            # Update bracket_t, bracket_f, bracket_gtd using advanced indexing
             bracket_t[scatter_idx[:, 0], scatter_idx[:, 1]] = t_new[todo1]
             bracket_f[scatter_idx[:, 0], scatter_idx[:, 1]] = f_new[todo1]
             bracket_g[scatter_idx[:, 0], scatter_idx[:, 1]] = g_new[todo1]
             bracket_gtd[scatter_idx[:, 0], scatter_idx[:, 1]] = gtd_new[todo1]
-            # Vectorized: Update low/high positions for non-todo1 systems
 
-            # mask where we actually update
+            # Update low/high positions
             idx = todo1
-
-            # among those, True means (0 <= 1) so low=0/high=1 else low=1/high=0
             m01 = bracket_f[:, 0] <= bracket_f[:, 1]
-
-            low_pos[idx]  = torch.where(m01[idx], 0, 1)
+            low_pos[idx] = torch.where(m01[idx], 0, 1)
             high_pos[idx] = 1 - low_pos[idx]
 
         todo2 = active & ~todo1
 
-        # Vectorized: Check Wolfe conditions for todo2 systems
+        # Check if Wolfe conditions are satisfied
         wolfe_satisfied = todo2 & (gtd_new.abs() <= -c2 * gtd)
         if wolfe_satisfied.any():
             done[wolfe_satisfied] = True
             active[wolfe_satisfied] = False
 
-        # Systems that need to potentially swap and update low bracket
+        # Update low bracket for remaining systems
         update_low = todo2 & ~wolfe_satisfied
 
         if update_low.any():
-            # Vectorized: Check if old high should become new low
             lp_update = low_pos[update_low]
             hp_update = high_pos[update_low]
 
-            # Compute bracket_t differences
-            bracket_t_diff = bracket_t[update_low].gather(1, hp_update.unsqueeze(1)).squeeze(1) - \
-                             bracket_t[update_low].gather(1, lp_update.unsqueeze(1)).squeeze(1)
+            # Check if old high should become new low (swap needed)
+            bracket_t_diff = (
+                bracket_t[update_low].gather(1, hp_update.unsqueeze(1)).squeeze(1) -
+                bracket_t[update_low].gather(1, lp_update.unsqueeze(1)).squeeze(1)
+            )
 
-            # Determine which systems need swap
             swap_needed = gtd_new[update_low] * bracket_t_diff >= 0
 
             if swap_needed.any():
-                # Create mask for all M systems
                 swap_mask = torch.zeros(M, dtype=torch.bool, device=device)
                 swap_mask[update_low] = swap_needed
 
-                # Copy low to high for swap_mask systems
                 lp_swap = low_pos[swap_mask]
                 hp_swap = high_pos[swap_mask]
 
+                # Copy low to high for swapped systems
                 for m_idx, m in enumerate(torch.where(swap_mask)[0]):
                     lp = lp_swap[m_idx].item()
                     hp = hp_swap[m_idx].item()
@@ -349,33 +419,39 @@ def _strong_wolfe_batched(
                     bracket_g[m, hp] = bracket_g[m, lp]
                     bracket_gtd[m, hp] = bracket_gtd[m, lp]
 
-        # Vectorized: Update low bracket with new point for all todo2 systems
+        # Update low bracket with new point for all todo2 systems
         idx = todo2
         if idx.any():
             lp = low_pos[idx]
-            bracket_t[idx, lp]   = t_new[idx]
-            bracket_f[idx, lp]   = f_new[idx]
-            bracket_g[idx, lp]   = g_new[idx]
+            bracket_t[idx, lp] = t_new[idx]
+            bracket_f[idx, lp] = f_new[idx]
+            bracket_g[idx, lp] = g_new[idx]
             bracket_gtd[idx, lp] = gtd_new[idx]
 
-    # Extract final results from brackets (vectorized)
+    # ========== Extract final results ==========
     size_1_mask = bracket_size == 1
     size_2_mask = ~size_1_mask
 
-    # For size == 1, use position 0
+    # For size == 1 (already satisfied Wolfe), use position 0
     if size_1_mask.any():
         t[size_1_mask] = bracket_t[size_1_mask, 0]
         f_new[size_1_mask] = bracket_f[size_1_mask, 0]
         g_new[size_1_mask] = bracket_g[size_1_mask, 0]
 
-    # For size == 2, use low_pos position
+    # For size == 2 (bracketed), use low_pos position
     if size_2_mask.any():
-        # Use gather to select from bracket_t, bracket_f based on low_pos
-        t[size_2_mask] = bracket_t[size_2_mask].gather(1, low_pos[size_2_mask].unsqueeze(1)).squeeze(1)
-        f_new[size_2_mask] = bracket_f[size_2_mask].gather(1, low_pos[size_2_mask].unsqueeze(1)).squeeze(1)
-        g_new[size_2_mask] = bracket_g[size_2_mask].gather(1, low_pos[size_2_mask].unsqueeze(1).unsqueeze(2).expand(-1, -1, g_new.shape[1])).squeeze(1)
+        low_idx = low_pos[size_2_mask].unsqueeze(1)
+        t[size_2_mask] = bracket_t[size_2_mask].gather(1, low_idx).squeeze(1)
+        f_new[size_2_mask] = bracket_f[size_2_mask].gather(1, low_idx).squeeze(1)
+        
+        low_idx_expanded = low_idx.unsqueeze(2).expand(-1, -1, g_new.shape[1])
+        g_new[size_2_mask] = bracket_g[size_2_mask].gather(
+            1, 
+            low_idx_expanded
+        ).squeeze(1)
 
     return f_new, g_new, t, ls_func_evals
+
 
 
 def lbfgs(
@@ -387,59 +463,68 @@ def lbfgs(
     tolerance_grad: float = 1e-7,
     tolerance_change: float = 1e-9,
     tolerance_rel_change: float = 0.,
-    stop_on_cost_increase: bool = False, 
+    stop_on_cost_increase: bool = False,
     history_size: int = 100,
     line_search_fn: Optional[str] = None,
     max_step: Optional[float] = 0.5,
 ):
-    """Minimize a function using L-BFGS algorithm (batched version).
+    """Minimize multiple objective functions using batched L-BFGS algorithm.
 
-    A batched functional interface to L-BFGS optimization.
+    This function implements the Limited-memory BFGS optimization algorithm
+    for M independent optimization problems in parallel. It supports optional
+    strong Wolfe line search and step size clamping for constrained problems.
+
+    The algorithm maintains a limited history of gradient differences to
+    approximate the inverse Hessian, using the two-loop recursion formula.
+    All operations are vectorized across the M systems.
 
     Args:
-        func: Callable that takes x (Tensor MxN) and returns (cost, gradient) tuple.
-              cost should be (M,) and gradient should be (M, N).
-        x0: Initial parameter tensor (M, N) where M is batch size, N is parameters per system.
-            Will be modified in-place.
-        lr: Learning rate (default: 1.0)
-        max_iter: Maximum number of iterations per optimization (default: 20)
-        max_eval: Maximum number of function evaluations (default: max_iter * 1.25)
-        tolerance_grad: Termination tolerance on gradient norm (default: 1e-7)
-        tolerance_change: Termination tolerance on function/parameter changes (default: 1e-9)
-        history_size: Number of previous gradients to store (default: 100)
-        line_search_fn: Line search method, either 'strong_wolfe' or None (default: None)
-        max_step: Maximum change allowed in any parameter per step (default: 0.5).
-                  Set to None to disable step clamping. Useful for constrained problems.
+        func: Objective function taking x (M, N) and returning (cost, gradient).
+              cost must have shape (M,), gradient must have shape (M, N).
+        x0: Initial parameters, shape (M, N) where M is batch size, N is 
+            parameters per system. Modified in-place with final result.
+        lr: Learning rate / initial step size (default: 1.0)
+        max_iter: Maximum optimization iterations (default: 20)
+        max_eval: Maximum function evaluations per system (default: max_iter * 1.25)
+        tolerance_grad: Terminate if max gradient element < this (default: 1e-7)
+        tolerance_change: Terminate if parameter/loss change < this (default: 1e-9)
+        tolerance_rel_change: Terminate if relative loss change < this (default: 0.)
+        stop_on_cost_increase: Terminate if cost increases (default: False)
+        history_size: Number of gradient pairs to store (default: 100)
+        line_search_fn: Line search method: 'strong_wolfe' or None (default: None)
+        max_step: Maximum parameter change per step, None to disable (default: 0.5)
 
     Returns:
         Optimized parameters (same tensor as x0, modified in-place)
 
     Example:
-        >>> x = torch.tensor([[1.5, 2.0], [3.0, 4.0]])  # 2 systems, 2 params each
-        >>> def f(x):
-        ...     cost = (x ** 2).sum(dim=1)  # shape (M,)
-        ...     grad = 2 * x  # shape (M, N)
+        >>> # Optimize 2 systems with 3 parameters each
+        >>> x = torch.tensor([[1.5, 2.0, 1.0], [3.0, 4.0, 2.0]])
+        >>> def rosenbrock(x):
+        ...     cost = (100 * (x[:, 1] - x[:, 0]**2)**2 + 
+        ...             (1 - x[:, 0])**2).sum(dim=1)
+        ...     # ... compute gradient ...
         ...     return cost, grad
-        >>> result = lbfgs(f, x)
+        >>> result = lbfgs(rosenbrock, x, max_iter=100)
     """
     if max_eval is None:
         max_eval = max_iter * 5 // 4
 
-    M, N = x0.shape
+    M, N = x0.shape  # M systems, N parameters per system
     device = x0.device
     dtype = x0.dtype
 
-    # Working copy of parameters (M, N)
+    # Working copy of parameters
     x = x0.detach().clone()
 
     # Evaluate initial function and gradient
     loss, flat_grad = func(x, True)  # loss: (M,), flat_grad: (M, N)
     func_evals = torch.ones(M, dtype=torch.long, device=device)
 
-    # Track which systems are still active
+    # Track which systems are still optimizing
     active = torch.ones(M, dtype=torch.bool, device=device)
 
-    # Check if any already optimal
+    # Check if any already converged
     grad_norm = flat_grad.abs().max(dim=1).values  # (M,)
     converged = grad_norm <= tolerance_grad
     active &= ~converged
@@ -448,19 +533,17 @@ def lbfgs(
         x0.copy_(x)
         return x0
 
-    # Initialize history for each system using preallocated tensors
-    # old_dirs: (M, history_size, N) - stores y vectors
-    # old_stps: (M, history_size, N) - stores s vectors
-    # ro: (M, history_size) - stores 1/ys values
-    # hist_len: (M,) - tracks actual history length for each system (0 to history_size)
-    old_dirs = torch.zeros(M, history_size, N, dtype=dtype, device=device)
-    old_stps = torch.zeros(M, history_size, N, dtype=dtype, device=device)
-    ro = torch.zeros(M, history_size, dtype=dtype, device=device)
-    hist_len = torch.zeros(M, dtype=torch.long, device=device)
-    H_diag = torch.ones(M, dtype=dtype, device=device)
+    # ========== Initialize history buffers ==========
+    # These store gradient/step differences for L-BFGS approximation
+    old_dirs = torch.zeros(M, history_size, N, dtype=dtype, device=device)  # y vectors
+    old_stps = torch.zeros(M, history_size, N, dtype=dtype, device=device)  # s vectors
+    ro = torch.zeros(M, history_size, dtype=dtype, device=device)  # 1/(y·s) values
+    hist_len = torch.zeros(M, dtype=torch.long, device=device)  # Actual history length
+    H_diag = torch.ones(M, dtype=dtype, device=device)  # Diagonal Hessian approximation
 
-    # Pre-allocate reusable buffers to reduce allocation overhead
-    hist_arange = torch.arange(history_size, device=device)  # Reused for hist_mask
+    # ========== Pre-allocate reusable buffers ==========
+    # These eliminate allocations in the hot loop for better performance
+    hist_arange = torch.arange(history_size, device=device)
     hist_mask = torch.zeros(M, history_size, dtype=torch.bool, device=device)
     q_buffer = torch.zeros(M, N, dtype=dtype, device=device)
     r_buffer = torch.zeros(M, N, dtype=dtype, device=device)
@@ -482,66 +565,65 @@ def lbfgs(
     n_iter = 0
     prev_loss = loss.clone()
 
+    # ========== Main optimization loop ==========
     while n_iter < max_iter and active.any():
         n_iter += 1
 
-        # Compute search direction for all systems (vectorized two-loop recursion)
+        # Compute search direction using L-BFGS two-loop recursion
         if n_iter == 1:
-            # Steepest descent direction for all systems
+            # First iteration: use steepest descent
             d = -flat_grad.clone()
             H_diag.fill_(1.0)
         else:
-            # L-BFGS two-loop recursion (vectorized)
-            # Create mask for valid history entries: (M, history_size) - reuse buffer
+            # L-BFGS two-loop recursion for search direction
+            
+            # Create mask for valid history entries
             torch.less(hist_arange.unsqueeze(0), hist_len.unsqueeze(1), out=hist_mask)
 
-            # Initialize q for all systems: (M, N) - reuse buffer
+            # Initialize q = -gradient
             torch.neg(flat_grad, out=q_buffer)
             q = q_buffer
 
-            # Storage for alpha values: (M, history_size) - reuse buffer
+            # Storage for alpha values
             al_buffer.zero_()
             al = al_buffer
 
-            # First loop (backward through history)
+            # First loop: backward through history (compute alphas)
             for i in range(history_size - 1, -1, -1):
-                # Mask for systems that have history at position i
-                mask_i = hist_mask[:, i]  # (M,)
+                mask_i = hist_mask[:, i]  # Systems with history at position i
 
                 if mask_i.any():
-                    # Compute alpha[i] = s[i]^T * q * ro[i] for all systems
-                    # old_stps[:, i]: (M, N), q: (M, N)
-                    al[:, i] = (old_stps[:, i] * q).sum(dim=1) * ro[:, i]  # (M,)
+                    # alpha[i] = rho[i] * s[i]^T * q
+                    al[:, i] = (old_stps[:, i] * q).sum(dim=1) * ro[:, i]
 
-                    # Update q = q - alpha[i] * y[i], but only for systems with history at i
-                    # old_dirs[:, i]: (M, N), al[:, i]: (M,)
+                    # q = q - alpha[i] * y[i]
                     q = q - old_dirs[:, i] * al[:, i].unsqueeze(1) * mask_i.unsqueeze(1)
 
-            # Multiply by initial Hessian approximation: r = H_diag * q
+            # Multiply by initial Hessian approximation
             torch.mul(q, H_diag.unsqueeze(1), out=r_buffer)
             r = r_buffer
 
-            # Second loop (forward through history)
+            # Second loop: forward through history (compute direction)
             for i in range(history_size):
-                # Mask for systems that have history at position i
-                mask_i = hist_mask[:, i]  # (M,)
+                mask_i = hist_mask[:, i]
 
                 if mask_i.any():
-                    # Compute beta[i] = y[i]^T * r * ro[i] for all systems
-                    be_i = (old_dirs[:, i] * r).sum(dim=1) * ro[:, i]  # (M,)
+                    # beta[i] = rho[i] * y[i]^T * r
+                    be_i = (old_dirs[:, i] * r).sum(dim=1) * ro[:, i]
 
-                    # Update r = r + (alpha[i] - beta[i]) * s[i], but only for systems with history at i
-                    r = r + old_stps[:, i] * (al[:, i] - be_i).unsqueeze(1) * mask_i.unsqueeze(1)
+                    # r = r + (alpha[i] - beta[i]) * s[i]
+                    update = old_stps[:, i] * (al[:, i] - be_i).unsqueeze(1)
+                    r = r + update * mask_i.unsqueeze(1)
 
             d = r
 
-        # Store previous gradient and loss - reuse buffers
+        # Store previous gradient and loss for history update
         prev_flat_grad.copy_(flat_grad)
         prev_loss_iter.copy_(loss)
 
-        # Compute step length
+        # Compute initial step size
         if n_iter == 1:
-            # Vectorized: t = min(1.0, 1.0 / ||g||_1) * lr for each system
+            # First iteration: adaptive step based on gradient magnitude
             grad_sum_buffer[:] = flat_grad.abs().sum(dim=1)
             t_buffer.copy_(ones_M_buffer)
             torch.div(t_buffer, grad_sum_buffer, out=t_buffer)
@@ -553,15 +635,16 @@ def lbfgs(
             t_buffer.fill_(lr)
             t = t_buffer
 
-        # Clamp step size to prevent wild updates (trust region)
+        # Apply trust region constraint (clamp maximum step size)
         if max_step is not None:
             param_change_buffer[:] = (d * t.unsqueeze(1)).abs().max(dim=1).values
             needs_scaling = param_change_buffer > max_step
+            
             if needs_scaling.any():
                 scale_factor = max_step / param_change_buffer[needs_scaling]
                 t[needs_scaling] *= scale_factor
 
-        # Check directional derivative and mark converged
+        # Check directional derivative for convergence
         gtd = (flat_grad * d).sum(dim=1)  # (M,)
         early_stop = gtd > -tolerance_change
         active &= ~early_stop
@@ -569,13 +652,15 @@ def lbfgs(
         if not active.any():
             break
 
-        # Line search (batched for all active systems)
+        # ========== Perform line search ==========
         if line_search_fn == 'strong_wolfe':
-            # Batched strong Wolfe line search
-            loss_active, flat_grad_active, t_active, ls_evals_active = _strong_wolfe_batched(
-                func, x[active], t[active], d[active],
-                loss[active], flat_grad[active], gtd[active]
-            )
+            # Strong Wolfe line search for active systems
+            loss_active, flat_grad_active, t_active, ls_evals_active = \
+                _strong_wolfe_batched(
+                    func, x[active], t[active], d[active],
+                    loss[active], flat_grad[active], gtd[active]
+                )
+            
             loss[active] = loss_active
             flat_grad[active] = flat_grad_active
             t[active] = t_active
@@ -583,62 +668,62 @@ def lbfgs(
             ls_evals_buffer[active] = ls_evals_active
             x[active] = x[active] + t[active].unsqueeze(1) * d[active]
         else:
-            # Simple step
+            # Simple gradient descent step
             x = x + t.unsqueeze(1) * d
+            
             if n_iter != max_iter:
                 loss, flat_grad = func(x, True)
+            
             ls_evals_buffer.fill_(1)
 
         func_evals += ls_evals_buffer
 
-        # Update history for active systems (vectorized)
+        # ========== Update L-BFGS history ==========
         if n_iter > 1:
-            # Compute y and s for all systems: (M, N) - reuse buffers
-            torch.sub(flat_grad, prev_flat_grad, out=y_buffer)
-            torch.mul(d, t.unsqueeze(1), out=s_buffer)
+            # Compute gradient and step differences
+            torch.sub(flat_grad, prev_flat_grad, out=y_buffer)  # y = grad_new - grad_old
+            torch.mul(d, t.unsqueeze(1), out=s_buffer)  # s = t * d
             y = y_buffer
             s = s_buffer
 
-            # Compute ys for all systems: (M,) - reuse buffer
+            # Compute y^T s for curvature condition
             ys_buffer[:] = (y * s).sum(dim=1)
             ys = ys_buffer
 
-            # Mask for systems that should update history (active and ys > threshold)
-            update_mask = active & (ys > 1e-10)  # (M,)
+            # Only update history if curvature condition is satisfied
+            update_mask = active & (ys > 1e-10)
 
             if update_mask.any():
-                # Update H_diag for systems that pass the threshold
-                H_diag[update_mask] = ys[update_mask] / (y[update_mask] * y[update_mask]).sum(dim=1)
+                # Update diagonal Hessian approximation: H0 = (y^T s) / (y^T y)
+                H_diag[update_mask] = (
+                    ys[update_mask] / 
+                    (y[update_mask] * y[update_mask]).sum(dim=1)
+                )
 
-                # For systems needing update, determine if we need to shift or append
-                curr_len = hist_len[update_mask]  # lengths of systems being updated
+                curr_len = hist_len[update_mask]
 
-                # Systems with room to append (curr_len < history_size) - reuse buffer
+                # Systems with room to append (not at history limit)
                 append_mask_buffer.copy_(update_mask)
                 append_mask_buffer[update_mask] = curr_len < history_size
                 append_mask = append_mask_buffer
 
-                # Systems that need to shift (curr_len == history_size) - reuse buffer
+                # Systems that need to shift (at history limit)
                 torch.logical_and(update_mask, ~append_mask, out=shift_mask_buffer)
                 shift_mask = shift_mask_buffer
 
-                # Handle append case (vectorized)
+                # Append new history entry for systems with room
                 if append_mask.any():
-                    # Get positions to write for each system: (num_append,)
-                    append_positions = hist_len[append_mask]  # positions to write at
-                    append_indices = torch.where(append_mask)[0]  # system indices
-
-                    # Create scatter indices: (num_append, 2) with [system_idx, position]
+                    append_positions = hist_len[append_mask]
+                    append_indices = torch.where(append_mask)[0]
                     scatter_idx = torch.stack([append_indices, append_positions], dim=1)
 
-                    # Write to position hist_len[m] for each system using advanced indexing
                     old_dirs[scatter_idx[:, 0], scatter_idx[:, 1]] = y[append_mask]
                     old_stps[scatter_idx[:, 0], scatter_idx[:, 1]] = s[append_mask]
                     ro[scatter_idx[:, 0], scatter_idx[:, 1]] = 1.0 / ys[append_mask]
 
                     hist_len[append_mask] += 1
 
-                # Handle shift case - need to shift left and add at end
+                # Shift history and append for systems at limit
                 if shift_mask.any():
                     # Shift all entries left by 1
                     old_dirs[shift_mask, :-1] = old_dirs[shift_mask, 1:].clone()
@@ -650,35 +735,41 @@ def lbfgs(
                     old_stps[shift_mask, history_size - 1] = s[shift_mask]
                     ro[shift_mask, history_size - 1] = 1.0 / ys[shift_mask]
 
-        # Check convergence for each system
+        # ========== Check convergence conditions ==========
+        
+        # Gradient convergence
         grad_norm = flat_grad.abs().max(dim=1).values  # (M,)
         converged_grad = grad_norm <= tolerance_grad
         active &= ~converged_grad
 
+        # Function evaluation limit
         converged_eval = func_evals >= max_eval
         active &= ~converged_eval
 
-        # Vectorized convergence checks - reuse buffers
-        torch.mul(d, t.unsqueeze(1), out=s_buffer)  # Recompute s for convergence check
+        # Parameter change convergence
+        torch.mul(d, t.unsqueeze(1), out=s_buffer)
         param_change_buffer[:] = s_buffer.abs().max(dim=1).values
         converged_param = (param_change_buffer <= tolerance_change) & active
         active &= ~converged_param
 
+        # Loss change convergence
         torch.sub(loss, prev_loss_iter, out=loss_change_buffer)
         loss_change_buffer.abs_()
         converged_loss = (loss_change_buffer < tolerance_change) & active
         active &= ~converged_loss
 
-        if tolerance_rel_change > 0 and n_iter>history_size:
-            rel_change = (loss_change_buffer / (prev_loss_iter.abs() + 1e-12))
+        # Relative loss change convergence
+        if tolerance_rel_change > 0 and n_iter > history_size:
+            rel_change = loss_change_buffer / (prev_loss_iter.abs() + 1e-12)
             converged_rel = (rel_change < tolerance_rel_change) & active
             active &= ~converged_rel
-        
-        if stop_on_cost_increase:            
+
+        # Stop on cost increase
+        if stop_on_cost_increase:
             cost_increase = (loss > prev_loss) & active
             active &= ~cost_increase
 
-    # Update x0 with final result
+    # Copy final result to input tensor
     x0.copy_(x)
 
     return x0
