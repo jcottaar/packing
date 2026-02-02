@@ -217,10 +217,10 @@ class InitializerRandom(Initializer):
     - Crystal-based seeding with rejection sampling
     """
 
-    base_solution: kgs.SolutionCollection = field(  # template for solution structure
+    base_solution: kgs.SolutionCollection = field( 
         init=True, default_factory=kgs.SolutionCollectionSquare
-    )
-    fixed_h: cp.ndarray = field(init=True, default=None)  # boundary params, (3,) if set
+    )  # template for solution structure
+    fixed_h: cp.ndarray = field(init=True, default=None)  # initial boundary params, (3,)
     ref_sol_crystal_type: str = field(init=True, default=None)  # e.g. 'Perfect dimer'
     ref_sol_axis1_offset: object = field(init=True, default=None)  # func(rng) -> offset
     ref_sol_axis2_offset: object = field(init=True, default=None)  # func(rng) -> offset
@@ -245,7 +245,7 @@ class InitializerRandom(Initializer):
             sol.canonicalize()
             assert self.ref_sol_crystal_type is None and self.ref_sol is None            
         else:
-            # Crystal core with rejection samplnig for edge
+            # Crystal core with rejection sampling for edge
             assert self.fixed_h is not None
             sol.h = cp.tile(self.fixed_h[cp.newaxis, :], (N_individuals, 1))      
             if self.ref_sol_crystal_type is not None:
@@ -350,27 +350,29 @@ class GA(kgs.BaseClass):
     do_legalize: bool = field(init=True, default=False)  # legalize in finalize()
 
     allow_reset: bool = field(init=True, default=True)  # allow reset on stagnation
-    stop_check_generations: int = field(init=True, default=0)  # base stop check (0=off)
-    stop_check_generations_scale: int = field(init=True, default=50)  # scale with N_trees
-    reset_check_generations: int = field(init=True, default=None)  # gens before reset
-    reset_check_generations_ratio: float = field(init=True, default=0.1)  # extra ratio
-    reset_check_threshold: float = field(init=True, default=0.1)  # cost threshold
-    always_allow_mate_with_better: bool = field(init=True, default=False)
-    # If False, we can only mate with better-scoring solutions if we've been stuck for a while
 
+    stop_check_generations: int = field(init=True, default=0)  # base stop check (0=off)
+    # GA stops if no improvement for this many generations
+    stop_check_generations_scale: int = field(init=True, default=50)  # scale above with N_trees    
+
+    reset_check_generations: int = field(init=True, default=None)  # gens before reset
+    # GA resets if no improvement for this many generations
+    reset_check_generations_ratio: float = field(init=True, default=0.1)  # gradual increase of above with time
+    reset_check_threshold: float = field(init=True, default=0.1)  # cost threshold to determine stagnation
+
+    # Diagnostic plotting configuration
     make_own_fig = None  # args for plt.subplots()
     make_own_fig_size = None  # figure size tuple
-
     best_costs_per_generation_ax = None  # axis spec for cost plot
     champion_genotype_ax = None  # axis spec for genotype plot
     champion_phenotype_ax = None  # axis spec for phenotype plot
 
+    # Internal state
     _cached_offspring: list = field(init=False, default=None)
     _last_reset_generation: int = field(init=False, default=0)
     _skip_next_selection: bool = field(init=False, default=False)
     _allow_mate_with_better: bool = field(init=True, default=True)
     _stopped: bool = field(init=False, default=False)
-
     _fig = None
     _ax = None
     _always_plot_trees = True
@@ -505,31 +507,47 @@ class GA(kgs.BaseClass):
         list
             List of Population objects containing offspring.
         """        
+        # Initialize filtered mate population - will be modified based on fitness constraints
         filtered_mate_sol = mate_sol
         filtered_mate_weights = mate_weights
         filtered_mate_costs = mate_costs
+        
         if mate_sol is not None:
+            # Validate that weights array matches the number of mate solutions
             assert(mate_sol.N_solutions == len(mate_weights))
+            
+            # Multi-champion mode doesn't support external mates (ambiguous which champion to compare against)
             if self.champions is not None and len(self.champions) > 1:
                 raise ValueError("Cannot supply mate population when GA has multiple champions.")
+            
+            # Filter out mate solutions that are better than the champion (to preserve diversity)
             if not self._allow_mate_with_better:
                 champion_cost = self.champions[0].fitness[0]
                 mate_costs_np = np.asarray(mate_costs)
+                
+                # Create boolean mask: True if mate is NOT better than champion
                 allowed_mask = np.array([
                     not kgs.lexicographic_less_than(cost, champion_cost)
                     for cost in mate_costs_np
                 ], dtype=bool)
+                
+                # If no mates meet the criteria, don't use any external solutions
                 if not np.any(allowed_mask):
                     filtered_mate_sol = None
                     filtered_mate_weights = None
                     filtered_mate_costs = None
                 else:
+                    # Keep only the allowed mates
                     allowed_idx = np.where(allowed_mask)[0]
                     filtered_mate_sol = copy.deepcopy(mate_sol)
                     filtered_mate_sol.select_ids(allowed_idx)
                     filtered_mate_costs = mate_costs_np[allowed_idx]
-                    filtered_mate_weights = np.asarray(mate_weights)[allowed_idx]                    
-        res = self._generate_offspring(filtered_mate_sol, filtered_mate_weights, filtered_mate_costs, generator)        
+                    filtered_mate_weights = np.asarray(mate_weights)[allowed_idx]
+        
+        # Generate offspring using mutation operators (subclass implementation)
+        res = self._generate_offspring(filtered_mate_sol, filtered_mate_weights, filtered_mate_costs, generator)
+        
+        # Cache offspring for later merging into main population
         self._cached_offspring = res
         return res
 
@@ -680,7 +698,9 @@ class GAMulti(GA):
     """
 
     ga_list: list = field(init=True, default=None)  # list of child GA instances
-    allow_reset_ratio: float = field(init=True, default=0.95)  # worst X% can reset
+    allow_reset_ratio: float = field(init=True, default=0.95)  # worst X% can reset (protect champion)
+
+    # Properties for diversity-based resets; solutions that are too similar trigger reset
     diversity_reset_threshold: float = field(init=True, default=0.01 / 40)  # scaled by N_trees
     diversity_reset_check_frequency: int = field(init=True, default=5)  # generations
 
@@ -1039,24 +1059,27 @@ class GASinglePopulation(GA):
     """
 
     N_trees_to_do: int = field(init=True, default=None)  # number of trees to pack
-    population_size: int = field(init=True, default=1500)  # target population size
-    initializer: Initializer = field(init=True, default_factory=InitializerRandom)
+    population_size: int = field(init=True, default=1500)  # target population size after offspring generation
+    initializer: Initializer = field(init=True, default_factory=InitializerRandom) # starting population initializer
     move: pack_move.Move = field(init=True, default=None)  # mutation operator
     fixed_h: float = field(init=True, default=-1.)  # -1 = auto-compute from N_trees
     ref_score_scale: float = field(init=True, default=1.1)  # initial h scaling factor
+
+    # Settings that determine when and by how much to reduce fixed boundary h
     reduce_h_threshold: float = field(init=True, default=1e-5 / 40)  # scaled by N_trees
     reduce_h_amount: float = field(init=True, default=2e-3 / np.sqrt(40))  # scaled by sqrt(N)
     reduce_h_per_individual: bool = field(init=True, default=False)  # reduce h individually
 
+    # Diagnostic plotting configuration
     plot_diversity_ax = None  # axis spec for diversity plot
     plot_diversity_alt_ax = None  # axis spec for alt diversity plot
     plot_population_fitness_ax = None  # axis spec for fitness distribution
 
     remove_population_after_abbreviate: bool = field(init=True, default=True)
 
-    _initial_population_size: int = field(init=False, default=None)  # set in initialize()
-
     population: Population = field(init=True, default=None)  # current population
+
+    _initial_population_size: int = field(init=False, default=None)  # set in initialize()    
 
     def __post_init__(self):
         """Set up default mutation operators."""
@@ -1433,7 +1456,7 @@ class Orchestrator(kgs.BaseClass):
     """
 
     ga: GA = field(init=True, default=None)  # GA instance to run
-    fitness_cost: pack_cost.Cost = field(init=True, default=None)  # cost function
+    fitness_cost: pack_cost.Cost = field(init=True, default=None)  # cost function to optimize
     filter_before_rough: float = field(init=True, default=0.4)  # keep fraction before relax
     rough_relaxers: list = field(init=True, default=None)  # coarse BFGS stages
     fine_relaxers: list = field(init=True, default=None)  # fine BFGS stages
@@ -1452,7 +1475,9 @@ class Orchestrator(kgs.BaseClass):
         self.fitness_cost = pack_cost.CostCompound(costs = [pack_cost.AreaCost(scaling=1e-2), 
                             pack_cost.BoundaryDistanceCost(scaling=1.), 
                             pack_cost.CollisionCostExactSeparation(scaling=1., use_lookup_table=True)])
+        # Note that AreaCost ends up inactive if fixed h is used (as we do)
         
+        # Define relaxer sequences
         self.rough_relaxers = []
         relaxer = pack_dynamics.OptimizerBFGS()
         relaxer.cost = self.fitness_cost

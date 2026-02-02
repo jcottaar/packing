@@ -27,52 +27,6 @@ from torch import Tensor
 __all__ = ["lbfgs"]
 
 
-def _cubic_interpolate(x1, f1, g1, x2, f2, g2, bounds=None):
-    """Scalar cubic interpolation between two points.
-    
-    Finds the minimum of a cubic polynomial interpolating two points with
-    function values and derivatives. Used in line search.
-    
-    Args:
-        x1: First point position (scalar)
-        f1: Function value at x1 (scalar)
-        g1: Derivative at x1 (scalar)
-        x2: Second point position (scalar)
-        f2: Function value at x2 (scalar)
-        g2: Derivative at x2 (scalar)
-        bounds: Optional tuple (xmin, xmax) to constrain result
-    
-    Returns:
-        Interpolated minimum position (scalar), clamped to bounds if provided
-    """
-    # Determine bounds for interpolation
-    if bounds is not None:
-        xmin_bound, xmax_bound = bounds
-    else:
-        xmin_bound, xmax_bound = (x1, x2) if x1 <= x2 else (x2, x1)
-
-    # Compute cubic interpolation coefficients
-    import math
-    d1 = g1 + g2 - 3 * (f1 - f2) / (x1 - x2)
-    d2_square = d1**2 - g1 * g2
-    
-    # Check if interpolation is valid
-    if d2_square >= 0:
-        d2 = math.sqrt(d2_square)
-        
-        # Compute minimum position based on point ordering
-        if x1 <= x2:
-            min_pos = x2 - (x2 - x1) * ((g2 + d2 - d1) / (g2 - g1 + 2 * d2))
-        else:
-            min_pos = x1 - (x1 - x2) * ((g1 + d2 - d1) / (g1 - g2 + 2 * d2))
-        
-        return min(max(min_pos, xmin_bound), xmax_bound)
-    else:
-        # Fallback to midpoint if interpolation fails
-        return (xmin_bound + xmax_bound) / 2.0
-
-
-
 def _cubic_interpolate_batch(x1, f1, g1, x2, f2, g2, xmin_bound, xmax_bound):
     """Vectorized cubic interpolation for batched line search.
     

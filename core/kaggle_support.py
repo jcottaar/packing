@@ -7,7 +7,6 @@ it (including commercially), but must give credit to the original author
 This module provides:
 - Base classes with type checking and frozen attribute enforcement
 - Tree geometry creation and manipulation (Christmas tree polygons)
-- TreeList for managing collections of tree positions/rotations
 - SolutionCollection classes for batched optimization solutions
 - Environment detection and path configuration
 - Precision control (float32/float64) for GPU computations
@@ -235,7 +234,7 @@ def clear_gpu():
 # Tree Geometry Definition
 # =============================================================================
 
-scale_factor = 1.0
+scale_factor = 1.0 # Scaling for trees
 TREE_EXPANSION = 0.0  # Outward expansion distance for collision tolerance
 
 
@@ -314,7 +313,7 @@ def create_center_tree():
             affinity.translate(p, xoff=-cx, yoff=-cy) for p in convex_breakdown
         ]
 
-    # Compute bounding radius from origin
+    # Compute bounding radius from origin (to shortcut overlap checks)
     max_radius = 0.0
     origin = Point(0, 0)
     for x, y in initial_polygon.exterior.coords[:-1]:
@@ -450,110 +449,176 @@ class TreeList(BaseClass):
 # Population management
 # =============================================================================
 
+
 @dataclass
 class EdgeSpacer(BaseClass):
+    """Base class for validating tree positions near boundary edges.
+    
+    EdgeSpacers determine which positions are valid for tree placement,
+    typically used to enforce spacing constraints near boundaries.
+    """
+
     def check_valid(self, xyt, h, margin=0.):
-        # Checks if xyt is valid, also given bounds h
-        assert xyt.shape[0] ==  h.shape[0]
+        """Check if tree positions are valid given boundary parameters.
+        
+        Args:
+            xyt: (N_solutions, N_trees, 3) array of tree positions/angles
+            h: (N_solutions, N_h_DOF) array of boundary parameters
+            margin: Additional clearance margin (float)
+            
+        Returns:
+            Boolean array of shape (N_solutions, N_trees) indicating validity
+        """
+        assert xyt.shape[0] == h.shape[0]
         assert xyt.shape[2] == 3
-        is_valid = self._check_valid(xyt, h, margin)
+        is_valid = self._check_valid(xyt, h, margin) # implemented by subclass
         assert is_valid.shape == xyt.shape[:2]
         return is_valid
 
+
 @dataclass
 class EdgeSpacerDummy(EdgeSpacer):
-    def _check_valid(self,xyt,h,margin):
+    """Edge spacer that accepts all positions (no constraints)."""
+
+    def _check_valid(self, xyt, h, margin):
+        """See EdgeSpacer.check_valid."""
         return cp.ones(xyt.shape[:2], dtype=bool)
+
 
 @dataclass
 class EdgeSpacerBasic(EdgeSpacer):
-    dist_x: float = field(default=0.5)
-    dist_y: float = field(default=0.5)
-    dist_corner: float = field(default=0.0)
+    """Edge spacer enforcing minimum distance from boundary edges and corners.
+    
+    A position is valid if it's either:
+    - Far enough from edges (dist_x/dist_y)
+    - Within dist_corner of any corner
+    """
+    dist_x: float = field(default=0.5)  # Min distance from left/right edges
+    dist_y: float = field(default=0.5)  # Min distance from top/bottom edges
+    dist_corner: float = field(default=0.0)  # Max distance to corners (0=disabled)
 
-    def _check_valid(self,xyt,h,margin):
-        is_valid_x = cp.abs(xyt[:,:,0])>= (h[:,:1]/2-self.dist_x-margin) 
-        is_valid_y = cp.abs(xyt[:,:,1])>= (h[:,:1]/2-self.dist_y-margin) 
+    def _check_valid(self, xyt, h, margin):
+        """See EdgeSpacer.check_valid."""
+        # Check edge distance constraints
+        is_valid_x = cp.abs(xyt[:, :, 0]) >= (h[:, :1] / 2 - self.dist_x - margin)
+        is_valid_y = cp.abs(xyt[:, :, 1]) >= (h[:, :1] / 2 - self.dist_y - margin)
         
-        # add a valid check: valid if within distance "dist_corner" of a corner of the square
-        half_side = h[:,:1]/2 - margin
-        # Calculate distance to each corner: (±half_side, ±half_side)
+        # Check corner proximity constraint
+        half_side = h[:, :1] / 2 - margin
         corner_distances = cp.stack([
-            (cp.abs(xyt[:,:,0] - half_side) + cp.abs(xyt[:,:,1] - half_side)),  # top-right
-            (cp.abs(xyt[:,:,0] + half_side) + cp.abs(xyt[:,:,1] - half_side)),  # top-left  
-            (cp.abs(xyt[:,:,0] - half_side) + cp.abs(xyt[:,:,1] + half_side)),  # bottom-right
-            (cp.abs(xyt[:,:,0] + half_side) + cp.abs(xyt[:,:,1] + half_side))   # bottom-left
-        ], axis=-1)
+            (cp.abs(xyt[:, :, 0] - half_side) + cp.abs(xyt[:, :, 1] - half_side)),
+            (cp.abs(xyt[:, :, 0] + half_side) + cp.abs(xyt[:, :, 1] - half_side)),
+            (cp.abs(xyt[:, :, 0] - half_side) + cp.abs(xyt[:, :, 1] + half_side)),
+            (cp.abs(xyt[:, :, 0] + half_side) + cp.abs(xyt[:, :, 1] + half_side))
+        ], axis=-1)  # (N_solutions, N_trees, 4)
         is_valid_corner = cp.any(corner_distances <= self.dist_corner, axis=-1)
         
         return is_valid_x | is_valid_y | is_valid_corner
-    
+
+
 @dataclass
 class SolutionCollection(BaseClass):
-    xyt: cp.ndarray = field(default=None)  # (N,3) array of tree positions and angles
-    h: cp.ndarray = field(default=None)      # (N,_N_h_DOF) array
-    use_fixed_h: bool = field(default=False)
-    periodic: bool = field(default=False)  # whether to use periodic boundaries
-    N_periodic: int = field(default=2)  # number of periodic images in each direction
-    override_phenotype: bool = field(default=False, init=True) # for testing
-    edge_spacer: EdgeSpacer = field(default_factory=EdgeSpacerDummy)
-    filter_move_locations_with_edge_spacer: bool = field(default=False)
-    filter_move_locations_margin: float = field(default=0.25)
+    """Base class for batched tree packing solutions with boundary parameters.
+    
+    Manages arrays of tree positions/rotations and boundary parameters for
+    multiple solutions simultaneously. Supports genotype-phenotype separation
+    (e.g., for symmetric solutions) and periodic boundary conditions.
+    """
+    xyt: cp.ndarray = field(default=None)  # (N_solutions, N_trees, 3): [x, y, theta]
+    h: cp.ndarray = field(default=None)  # (N_solutions, _N_h_DOF): boundary params
+    use_fixed_h: bool = field(default=False)  # If False, the boundary is movable during optimization
+    periodic: bool = field(default=False)  # Use periodic boundary conditions, used for crystal analysis
+    N_periodic: int = field(default=2)  # Number of periodic images per direction
+    override_phenotype: bool = field(default=False, init=True)  # For testing only
+    edge_spacer: EdgeSpacer = field(default_factory=EdgeSpacerDummy)  # Edge validator, used during move selection
+    filter_move_locations_with_edge_spacer: bool = field(default=False)  # Wether the edge spacer is used
+    filter_move_locations_margin: float = field(default=0.25)  # Margin for filtering
 
-    _N_h_DOF: int = field(default=None, init=False, repr=False)  # number of h degrees of freedom
+    _N_h_DOF: int = field(default=None, init=False, repr=False)  # Number of h elements per solution
     _prepped_for_phenotype: bool = field(default=False, init=False, repr=False)
-    _prepped_phenotype = None
+    _prepped_phenotype = None  # Cached phenotype collection
 
     def _check_constraints(self):
+        """See BaseClass._check_constraints."""
         if self.xyt.ndim != 3 or self.xyt.shape[2] != 3:
-            raise ValueError("Solution: xyt must be an array with shape (N_solutions, N_trees, 3)")
-        assert self.h.shape == (self.xyt.shape[0],self._N_h_DOF)
+            raise ValueError(
+                "Solution: xyt must be (N_solutions, N_trees, 3)"
+            )
+        assert self.h.shape == (self.xyt.shape[0], self._N_h_DOF)
 
-    # add N_solutions and N_trees properties
     @property
     def N_solutions(self) -> int:
-        """Number of solution rows in xyt (N_solutions)."""
+        """Number of solutions in batch."""
         if self.xyt is None:
             return 0
         return self.xyt.shape[0]
 
     @property
     def N_trees(self) -> int:
-        """Number of trees per solution (N_trees)."""
+        """Number of trees per solution."""
         if self.xyt is None:
             return 0
         return self.xyt.shape[1]
-    
+
     def canonicalize(self):
+        """Make a canonical form out of the solution, in case multiple genotypes
+        lead to the same phenotype."""
         self.canonicalize_xyt(self.xyt)
 
-    def canonicalize_xyt(self, xyt:cp.ndarray):
-        """Canonicalize genotype xyt. Default implementation does nothing."""
+    def canonicalize_xyt(self, xyt: cp.ndarray):
+        """Canonicalize genotype xyt array (in-place).
+        
+        Default implementation does nothing. Subclasses may enforce canonical
+        forms (e.g., for symmetric solutions).
+        
+        Args:
+            xyt: (N_solutions, N_trees, 3) array to canonicalize
+        """
         pass
-    
+
     def is_phenotype(self):
+        """Check if this collection is in phenotype space.
+        
+        Returns:
+            True if phenotype, False if genotype
+        """
         return not self.override_phenotype
-    
+
     def prep_for_phenotype(self):
+        """Prepare for phenotype conversion (allocate buffers)."""
         self._prep_for_phenotype()
         self._prepped_for_phenotype = True
 
     def _prep_for_phenotype(self):
+        """See prep_for_phenotype."""
         if self.override_phenotype:
             self._prepped_phenotype = copy.deepcopy(self)
             self._prepped_phenotype.override_phenotype = False
-    
+
     def unprep_for_phenotype(self):
+        """Release phenotype conversion buffers."""
         self._unprep_for_phenotype()
         self._prepped_for_phenotype = False
 
     def _unprep_for_phenotype(self):
-        if self.override_phenotype:            
+        """See unprep_for_phenotype."""
+        if self.override_phenotype:
             self._prepped_phenotype = None
 
     def convert_to_phenotype(self):
+        """Convert genotype to phenotype representation.
+        
+        For non-symmetric solutions, phenotype = genotype (returns copy).
+        For symmetric solutions, expands to all symmetry images.
+        
+        Returns:
+            SolutionCollection in phenotype space
+        """
         if self.is_phenotype():
             return copy.deepcopy(self)
+        
+        # Prep in place if not done already
+        # If you will convert to phenotype several times, call prep_for_phenotype() first
         was_prepped = self._prepped_for_phenotype
         if not self._prepped_for_phenotype:
             self.prep_for_phenotype()
@@ -563,40 +628,50 @@ class SolutionCollection(BaseClass):
         return phenotype
 
     def _convert_to_phenotype(self):
+        """See convert_to_phenotype."""
         assert self.override_phenotype
-        self._prepped_phenotype.xyt[:] = self.xyt 
-        self._prepped_phenotype.h[:] = self.h 
+        self._prepped_phenotype.xyt[:] = self.xyt
+        self._prepped_phenotype.h[:] = self.h
         return self._prepped_phenotype
-    
-    def backprop_phenotype(self, grad_xyt_phenotype, grad_h_phenotype, grad_xyt_genotype, grad_h_genotype):
-        """Backpropagate gradients from phenotype space to genotype space.
+
+    def backprop_phenotype(
+        self, grad_xyt_phenotype, grad_h_phenotype,
+        grad_xyt_genotype, grad_h_genotype
+    ):
+        """Backpropagate gradients from phenotype to genotype space.
         
         Args:
-            grad_xyt_phenotype: Gradients w.r.t. phenotype xyt
-            grad_h_phenotype: Gradients w.r.t. phenotype h
-            grad_xyt_genotype: Output array for genotype xyt gradients
-            grad_h_genotype: Output array for genotype h gradients
+            grad_xyt_phenotype: (N_solutions, N_trees_pheno, 3) gradients
+            grad_h_phenotype: (N_solutions, N_h_DOF) gradients
+            grad_xyt_genotype: (N_solutions, N_trees_geno, 3) output array
+            grad_h_genotype: (N_solutions, N_h_DOF) output array
         """
         assert self.override_phenotype
         grad_xyt_genotype[:] = grad_xyt_phenotype
         grad_h_genotype[:] = grad_h_phenotype
-    
-    def rotate(self, angle:cp.ndarray):
-        # rotate xyt by given angle (radians)
-        xyt_cp = self.xyt  # assume already cupy array and non-empty        
 
+    def rotate(self, angle: cp.ndarray):
+        """Rotate all trees in all solutions around origin.
+        
+        Args:
+            angle: (N_solutions,) array of rotation angles in radians
+        """
+        xyt_cp = self.xyt
+
+        # Compute rotation matrices
         c = cp.cos(angle)[:, None]
         s = cp.sin(angle)[:, None]
 
         x = xyt_cp[:, :, 0]
         y = xyt_cp[:, :, 1]
-        cx = 0#cp.mean(x, axis=1)[:, None]
-        cy = 0#cp.mean(y, axis=1)[:, None]
+        cx = 0
+        cy = 0
 
         x0 = x - cx
         y0 = y - cy
 
-        x_rot =  c * x0 + s * y0
+        # Apply rotation
+        x_rot = c * x0 + s * y0
         y_rot = -s * x0 + c * y0
 
         xyt_cp[:, :, 0] = x_rot + cx
@@ -604,159 +679,227 @@ class SolutionCollection(BaseClass):
         xyt_cp[:, :, 2] = (xyt_cp[:, :, 2] - angle[:, None]) % (2 * np.pi)
 
         self.canonicalize()
-    
+
     def get_crystal_axes_allocate(self):
-        """Get crystal axes for each solution. Returns (N_solutions, 2, 2) array."""        
+        """Get crystal axes for periodic boundaries.
+        
+        Returns:
+            (N_solutions, 2, 2) array: crystal_axes[i, j, :] = j-th lattice vector
+        """
         assert self.periodic
-        crystal_axes = cp.array(cp.zeros((self.N_solutions, 2, 2), dtype=dtype_cp))
-        self._get_crystal_axes(crystal_axes)
+        crystal_axes = cp.array(
+            cp.zeros((self.N_solutions, 2, 2), dtype=dtype_cp)
+        )
+        self._get_crystal_axes(crystal_axes) # Implemented by subclass
         return crystal_axes
-    
+
     def get_crystal_axes(self, crystal_axes):
+        """Fill crystal axes array for periodic boundaries.
+        
+        Args:
+            crystal_axes: (N_solutions, 2, 2) output array
+        """
         assert self.periodic
-        self._get_crystal_axes(crystal_axes)
+        self._get_crystal_axes(crystal_axes) # Implemented by subclass
 
     def select_ids(self, inds):
+        """Select subset of solutions (in-place).
+        
+        Args:
+            inds: Array of solution indices to keep
+        """
         self.xyt = self.xyt[inds]
         self.h = self.h[inds]
 
-    def merge(self, other:'SolutionCollection'):
+    def merge(self, other: 'SolutionCollection'):
+        """Merge another collection into this one (in-place).
+        
+        Args:
+            other: SolutionCollection to concatenate
+        """
         self.xyt = cp.concatenate([self.xyt, other.xyt], axis=0)
         self.h = cp.concatenate([self.h, other.h], axis=0)
-    
+
     def create_clone(self, idx: int, other: 'SolutionCollection', parent_id: int):
+        """Clone a single solution from another collection.
+        
+        Args:
+            idx: Target index in this collection
+            other: Source collection
+            parent_id: Source index in other collection
+        """
         self.xyt[idx] = other.xyt[parent_id]
         self.h[idx] = other.h[parent_id]
 
-    def create_clone_batch(self, inds: np.ndarray, other: 'SolutionCollection', parent_ids: np.ndarray):
-        """Vectorized batch clone operation."""
+    def create_clone_batch(
+        self, inds: np.ndarray, other: 'SolutionCollection',
+        parent_ids: np.ndarray
+    ):
+        """Clone multiple solutions from another collection (vectorized).
+        
+        Args:
+            inds: (N,) target indices in this collection
+            other: Source collection
+            parent_ids: (N,) source indices in other collection
+        """
         self.xyt[inds] = other.xyt[parent_ids]
         self.h[inds] = other.h[parent_ids]
 
     def create_empty(self, N_solutions: int, N_trees: int):
-        res = copy.deepcopy(self)
-        res.xyt = cp.zeros((N_solutions, N_trees, 3), dtype=dtype_cp)
-        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
-        return res
-    # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
-
-    def generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):
-        """Generate move centers for all solutions.
+        """Create empty collection with same configuration.
         
         Args:
-            edge_clearance: Minimum distance from edge of crystal to move center
-            generator: Cupy random number generator"""
+            N_solutions: Number of solutions to allocate
+            N_trees: Number of trees per solution
+            
+        Returns:
+            New SolutionCollection with zeroed arrays
+        """
+        res = copy.deepcopy(self)
+        res.xyt = cp.zeros((N_solutions, N_trees, 3), dtype=dtype_cp)
+        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)
+        return res
+
+    def generate_move_centers(
+        self, edge_clearance: float, inds_to_do, generator: cp.random.Generator
+    ):
+        """Generate random move centers for genetic algorithm mutations.
+        
+        Args:
+            edge_clearance: Minimum distance from boundary edge (or None)
+            inds_to_do: Indices of solutions to process
+            generator: CuPy random number generator
+            
+        Returns:
+            Tuple of (move_centers_x, move_centers_y) arrays
+        """
         return self._generate_move_centers(edge_clearance, inds_to_do, generator)
-    
+
 
 @dataclass
 class SolutionCollectionSquare(SolutionCollection):
+    """Square boundary solution collection (h = [size, x_offset, y_offset]).
+    This is the main class used during the GA solver."""
 
     def __post_init__(self):
         self._N_h_DOF = 3  # h = [size, x_offset, y_offset]
         return super().__post_init__()
-    
+
     def compute_cost_single_ref(self):
-        """Compute area cost and grad_bound for a single reference"""
+        """Compute area cost and gradient for single solution.
+        
+        Returns:
+            cost: Scalar area (size^2)
+            grad_bound: (3,) gradient array [d/dsize, d/dx_offset, d/dy_offset]
+        """
         h = self.h[0]
         cost = h[0]**2
-        # Build grad_bound on the GPU without implicitly converting via NumPy
         grad_bound = cp.empty(3, dtype=h.dtype)
         grad_bound[0] = 2.0 * h[0]
         grad_bound[1] = 0
         grad_bound[2] = 0
         return cost, grad_bound
-    
-    def compute_cost(self, sol:SolutionCollection, cost:cp.ndarray, grad_bound:cp.ndarray):
-        """Compute area cost and grad_bound for multiple solutions"""
-        cost[:] = sol.h[:,0]**2
-        grad_bound[:,0] = 2.0*sol.h[:,0]
-        grad_bound[:,1] = 0
-        grad_bound[:,2] = 0
+
+    def compute_cost(self, sol: SolutionCollection, cost: cp.ndarray,
+                     grad_bound: cp.ndarray):
+        """Compute area cost and gradients for multiple solutions.
+        
+        Args:
+            sol: This SolutionCollection instance
+            cost: (N_solutions,) output array
+            grad_bound: (N_solutions, 3) output array
+        """
+        cost[:] = sol.h[:, 0]**2
+        grad_bound[:, 0] = 2.0 * sol.h[:, 0]
+        grad_bound[:, 1] = 0
+        grad_bound[:, 2] = 0
 
     def _get_crystal_axes(self, crystal_axes):
-        crystal_axes[:,0,0] = self.h[:,0]
-        crystal_axes[:,0,1] = 0
-        crystal_axes[:,1,0] = 0
-        crystal_axes[:,1,1] = self.h[:,0]    
+        """See SolutionCollection.get_crystal_axes."""
+        crystal_axes[:, 0, 0] = self.h[:, 0]
+        crystal_axes[:, 0, 1] = 0
+        crystal_axes[:, 1, 0] = 0
+        crystal_axes[:, 1, 1] = self.h[:, 0]
 
     def snap(self):
-        """Set h such that for each solution it's the smallest possible square containing all trees.
-        Vectorized implementation using tree_vertices.
-        Assumes xyt is kgs.dtype_cp.
-        """
-
+        """Set h to smallest square containing all trees (vectorized)."""
         if self.use_fixed_h:
             return
 
-        # xyt shape: (n_solutions, n_trees, 3)
-        # tree_vertices shape: (n_vertices, 2)
-        
         n_solutions = self.xyt.shape[0]
-        
+
         # Extract pose components
         x = self.xyt[:, :, 0:1]  # (n_solutions, n_trees, 1)
-        y = self.xyt[:, :, 1:2]  # (n_solutions, n_trees, 1)
-        theta = self.xyt[:, :, 2:3]  # (n_solutions, n_trees, 1)
-        
+        y = self.xyt[:, :, 1:2]
+        theta = self.xyt[:, :, 2:3]
+
         # Precompute rotation matrices
         cos_t = cp.cos(theta)  # (n_solutions, n_trees, 1)
-        sin_t = cp.sin(theta)  # (n_solutions, n_trees, 1)
-        
+        sin_t = cp.sin(theta)
+
         # Get local vertices (n_vertices, 2)
-        vx_local = tree_vertices[:, 0]  # (n_vertices,)
-        vy_local = tree_vertices[:, 1]  # (n_vertices,)
-        
+        vx_local = tree_vertices[:, 0]
+        vy_local = tree_vertices[:, 1]
+
         # Apply rotation and translation for all trees
-        # Broadcast: (n_solutions, n_trees, 1) * (n_vertices,) -> (n_solutions, n_trees, n_vertices)
-        vx_rot = cos_t * vx_local - sin_t * vy_local  # (n_solutions, n_trees, n_vertices)
-        vy_rot = sin_t * vx_local + cos_t * vy_local  # (n_solutions, n_trees, n_vertices)
-        
+        vx_rot = cos_t * vx_local - sin_t * vy_local
+        vy_rot = sin_t * vx_local + cos_t * vy_local
+
         # Translate by tree position
         vx_global = vx_rot + x  # (n_solutions, n_trees, n_vertices)
-        vy_global = vy_rot + y  # (n_solutions, n_trees, n_vertices)
-        
-        # Find min/max across all trees and vertices for each solution
-        # Reshape to (n_solutions, n_trees * n_vertices) for min/max along all trees+vertices
-        vx_flat = vx_global.reshape(n_solutions, -1)  # (n_solutions, n_trees * n_vertices)
-        vy_flat = vy_global.reshape(n_solutions, -1)  # (n_solutions, n_trees * n_vertices)
-        
-        x_min = cp.min(vx_flat, axis=1)  # (n_solutions,)
-        x_max = cp.max(vx_flat, axis=1)  # (n_solutions,)
-        y_min = cp.min(vy_flat, axis=1)  # (n_solutions,)
-        y_max = cp.max(vy_flat, axis=1)  # (n_solutions,)
-        
-        # Compute center and size of bounding square
-        x_center = (x_min + x_max) / 2.0  # (n_solutions,)
-        y_center = (y_min + y_max) / 2.0  # (n_solutions,)
-        
-        # Size is max of width and height
-        width = x_max - x_min  # (n_solutions,)
-        height = y_max - y_min  # (n_solutions,)
-        size = cp.maximum(width, height)  # (n_solutions,)
-        
-        # Update h: [size, x_offset, y_offset]
-        self.xyt[:,:,0] -= x_center[:, cp.newaxis]
-        self.xyt[:,:,1] -= y_center[:, cp.newaxis]
-        if self.h is None:
-            self.h = cp.stack([size, 0*size, 0*size], axis=1)  # (n_solutions, 3)
-        else:
-            self.h = cp.stack([cp.minimum(size, self.h[:,0]), 0*size, 0*size], axis=1)  # (n_solutions, 3)
+        vy_global = vy_rot + y
 
-    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):     
-        original_size = self.h[inds_to_do,0].copy()  # (N,)
+        # Find min/max across all trees and vertices
+        vx_flat = vx_global.reshape(n_solutions, -1)
+        vy_flat = vy_global.reshape(n_solutions, -1)
+
+        x_min = cp.min(vx_flat, axis=1)  # (n_solutions,)
+        x_max = cp.max(vx_flat, axis=1)
+        y_min = cp.min(vy_flat, axis=1)
+        y_max = cp.max(vy_flat, axis=1)
+
+        # Compute center and size of bounding square
+        x_center = (x_min + x_max) / 2.0
+        y_center = (y_min + y_max) / 2.0
+
+        # Size is max of width and height
+        width = x_max - x_min
+        height = y_max - y_min
+        size = cp.maximum(width, height)
+
+        # Update h and center trees
+        self.xyt[:, :, 0] -= x_center[:, cp.newaxis]
+        self.xyt[:, :, 1] -= y_center[:, cp.newaxis]
+        if self.h is None:
+            self.h = cp.stack([size, 0 * size, 0 * size], axis=1)
+        else:
+            self.h = cp.stack(
+                [cp.minimum(size, self.h[:, 0]), 0 * size, 0 * size],
+                axis=1
+            )
+
+    def _generate_move_centers(
+        self, edge_clearance: float, inds_to_do, generator: cp.random.Generator
+    ):
+        """See SolutionCollection.generate_move_centers."""
+        original_size = self.h[inds_to_do, 0].copy()  # (N,)
         size = original_size.copy()
+        
         if edge_clearance is not None:
             if edge_clearance is None:
                 edge_clearance = 0.0
-            size -= edge_clearance*2
-       
-            move_centers_x = generator.uniform(-size/2, size/2, dtype=dtype_cp) + self.h[inds_to_do, 1]  # (N,)
-            move_centers_y = generator.uniform(-size/2, size/2, dtype=dtype_cp) + self.h[inds_to_do, 2]  # (N,)
-        else:
-            # No edge clearance - use analytical sampling for EdgeSpacerBasic when possible
-            size = original_size  # no shrink when edge_clearance is None
+            size -= edge_clearance * 2
 
+            # Simple uniform sampling with edge clearance
+            move_centers_x = generator.uniform(
+                -size / 2, size / 2, dtype=dtype_cp
+            ) + self.h[inds_to_do, 1]
+            move_centers_y = generator.uniform(
+                -size / 2, size / 2, dtype=dtype_cp
+            ) + self.h[inds_to_do, 2]
+        else:
+            # No edge clearance - we now use use the edge spacer to filter locations
+            size = original_size
             N = len(inds_to_do)
             move_centers_x = cp.zeros(N, dtype=dtype_cp)
             move_centers_y = cp.zeros(N, dtype=dtype_cp)
@@ -764,106 +907,123 @@ class SolutionCollectionSquare(SolutionCollection):
             offset_x = h_subset[:, 1]
             offset_y = h_subset[:, 2]
 
-            # Check if we can use analytical sampling for EdgeSpacerBasic with dist_corner=0
-            can_use_analytical = (isinstance(self.edge_spacer, EdgeSpacerBasic) and 
-                                self.edge_spacer.dist_corner == 0.0 and 
-                                self.filter_move_locations_with_edge_spacer)
-            
+            # Check if analytical sampling is possible
+            can_use_analytical = (
+                isinstance(self.edge_spacer, EdgeSpacerBasic) and
+                self.edge_spacer.dist_corner == 0.0 and
+                self.filter_move_locations_with_edge_spacer
+            )
+
             if can_use_analytical:
-                # Analytical sampling for EdgeSpacerBasic with dist_corner=0
-                # Valid region: |x| > (h/2 - dist_x - margin) OR |y| > (h/2 - dist_y - margin)
-                # This forms an "O-ring" or frame around the edges
-                
-                half_size = size / 2  # (N,)
+                # Analytical sampling for O-ring frame
+                half_size = size / 2
                 margin = self.filter_move_locations_margin
-                x_threshold = half_size - self.edge_spacer.dist_x - margin  # |x| > this
-                y_threshold = half_size - self.edge_spacer.dist_y - margin  # |y| > this
-                
-                # Decompose into 4 rectangles (O-ring frame):
-                # Region A: x ∈ [-size/2, -x_threshold], y ∈ [-size/2, size/2]  (left strip)
-                # Region B: x ∈ [x_threshold, size/2], y ∈ [-size/2, size/2]  (right strip)
-                # Region C: x ∈ [-x_threshold, x_threshold], y ∈ [y_threshold, size/2]  (top strip, no corners)
-                # Region D: x ∈ [-x_threshold, x_threshold], y ∈ [-size/2, -y_threshold]  (bottom strip, no corners)
-                
-                # Compute widths and heights for each region
-                width_AB = half_size - x_threshold  # x extent of regions A and B
-                height_AB = size                    # y extent of regions A and B
-                width_CD = 2 * x_threshold          # x extent of regions C and D
-                height_CD = half_size - y_threshold # y extent of regions C and D
-                
-                # Compute areas of each region
-                area_A = width_AB * height_AB
-                area_B = width_AB * height_AB
-                area_C = width_CD * height_CD
-                area_D = width_CD * height_CD
+                x_threshold = half_size - self.edge_spacer.dist_x - margin
+                y_threshold = half_size - self.edge_spacer.dist_y - margin
+
+                # Compute region areas (4 rectangles forming O-ring frame)
+                width_AB = half_size - x_threshold
+                height_AB = size
+                width_CD = 2 * x_threshold
+                height_CD = half_size - y_threshold
+
+                area_A = width_AB * height_AB  # Left strip
+                area_B = width_AB * height_AB  # Right strip
+                area_C = width_CD * height_CD  # Top strip (minus corners)
+                area_D = width_CD * height_CD  # Bottom strip (minus corners)
                 total_area = area_A + area_B + area_C + area_D
-                
-                # Handle edge case where total_area is very small or zero
+
+                # Handle edge case
                 total_area_safe = cp.maximum(total_area, 1e-10)
-                
-                # Cumulative probabilities for region selection
+
+                # Cumulative probabilities
                 prob_A = area_A / total_area_safe
                 prob_AB = (area_A + area_B) / total_area_safe
                 prob_ABC = (area_A + area_B + area_C) / total_area_safe
-                # prob_ABCD = 1.0 (implicit)
-                
-                # Generate uniform random values for region selection
+
+                # Select region for each sample
                 region_selector = generator.uniform(0., 1., size=N)
-                
-                # Determine which region each sample falls into
                 in_A = region_selector < prob_A
                 in_B = (region_selector >= prob_A) & (region_selector < prob_AB)
                 in_C = (region_selector >= prob_AB) & (region_selector < prob_ABC)
                 in_D = region_selector >= prob_ABC
-                
-                # Region A: x ∈ [-size/2, -x_threshold], y ∈ [-size/2, size/2]
-                if cp.any(in_A):
-                    move_centers_x[in_A] = generator.uniform(-half_size[in_A], -x_threshold[in_A])
-                    move_centers_y[in_A] = generator.uniform(-half_size[in_A], half_size[in_A])
-                
-                # Region B: x ∈ [x_threshold, size/2], y ∈ [-size/2, size/2]
-                if cp.any(in_B):
-                    move_centers_x[in_B] = generator.uniform(x_threshold[in_B], half_size[in_B])
-                    move_centers_y[in_B] = generator.uniform(-half_size[in_B], half_size[in_B])
-                
-                # Region C: x ∈ [-x_threshold, x_threshold], y ∈ [y_threshold, size/2]
-                if cp.any(in_C):
-                    move_centers_x[in_C] = generator.uniform(-x_threshold[in_C], x_threshold[in_C])
-                    move_centers_y[in_C] = generator.uniform(y_threshold[in_C], half_size[in_C])
-                
-                # Region D: x ∈ [-x_threshold, x_threshold], y ∈ [-size/2, -y_threshold]
-                if cp.any(in_D):
-                    move_centers_x[in_D] = generator.uniform(-x_threshold[in_D], x_threshold[in_D])
-                    move_centers_y[in_D] = generator.uniform(-half_size[in_D], -y_threshold[in_D])
-                
+
+                # Sample within selected regions
+                if cp.any(in_A):  # Left strip
+                    move_centers_x[in_A] = generator.uniform(
+                        -half_size[in_A], -x_threshold[in_A]
+                    )
+                    move_centers_y[in_A] = generator.uniform(
+                        -half_size[in_A], half_size[in_A]
+                    )
+
+                if cp.any(in_B):  # Right strip
+                    move_centers_x[in_B] = generator.uniform(
+                        x_threshold[in_B], half_size[in_B]
+                    )
+                    move_centers_y[in_B] = generator.uniform(
+                        -half_size[in_B], half_size[in_B]
+                    )
+
+                if cp.any(in_C):  # Top strip
+                    move_centers_x[in_C] = generator.uniform(
+                        -x_threshold[in_C], x_threshold[in_C]
+                    )
+                    move_centers_y[in_C] = generator.uniform(
+                        y_threshold[in_C], half_size[in_C]
+                    )
+
+                if cp.any(in_D):  # Bottom strip
+                    move_centers_x[in_D] = generator.uniform(
+                        -x_threshold[in_D], x_threshold[in_D]
+                    )
+                    move_centers_y[in_D] = generator.uniform(
+                        -half_size[in_D], -y_threshold[in_D]
+                    )
+
                 # Add offsets
                 move_centers_x += offset_x
                 move_centers_y += offset_y
 
-                # Validate that all sampled points are indeed valid+
-                if debugging_mode>=2:
+                # Validation in debug mode
+                if debugging_mode >= 2:
                     candidate_xyt = cp.zeros((N, 1, 3), dtype=dtype_cp)
                     candidate_xyt[:, 0, 0] = move_centers_x
                     candidate_xyt[:, 0, 1] = move_centers_y
-                    valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset, margin=self.filter_move_locations_margin)[:, 0]
-                    assert cp.all(valid_mask), "Analytical sampling produced invalid points"
+                    valid_mask = self.edge_spacer.check_valid(
+                        candidate_xyt, h_subset,
+                        margin=self.filter_move_locations_margin
+                    )[:, 0]
+                    assert cp.all(valid_mask), \
+                        "Analytical sampling produced invalid points"
             else:
                 # Fall back to rejection sampling
                 remaining_mask = cp.ones(N, dtype=bool)
-                
+
                 while cp.any(remaining_mask):
                     n_remaining = int(cp.sum(remaining_mask))
 
                     # Sample within full square
-                    cand_x = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, dtype=dtype_cp) + offset_x[remaining_mask]
-                    cand_y = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, dtype=dtype_cp) + offset_y[remaining_mask]
+                    cand_x = generator.uniform(
+                        -size[remaining_mask] / 2,
+                        size[remaining_mask] / 2,
+                        dtype=dtype_cp
+                    ) + offset_x[remaining_mask]
+                    cand_y = generator.uniform(
+                        -size[remaining_mask] / 2,
+                        size[remaining_mask] / 2,
+                        dtype=dtype_cp
+                    ) + offset_y[remaining_mask]
 
-                    # Validate against the configured edge spacer
+                    # Validate against edge spacer
                     candidate_xyt = cp.zeros((n_remaining, 1, 3), dtype=dtype_cp)
                     candidate_xyt[:, 0, 0] = cand_x
                     candidate_xyt[:, 0, 1] = cand_y
-                    if self.filter_move_locations_with_edge_spacer:                    
-                        valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset[remaining_mask], margin=self.filter_move_locations_margin)[:, 0]
+                    if self.filter_move_locations_with_edge_spacer:
+                        valid_mask = self.edge_spacer.check_valid(
+                            candidate_xyt, h_subset[remaining_mask],
+                            margin=self.filter_move_locations_margin
+                        )[:, 0]
                     else:
                         valid_mask = cp.ones(n_remaining, dtype=bool)
 
@@ -875,7 +1035,9 @@ class SolutionCollectionSquare(SolutionCollection):
 
         return move_centers_x, move_centers_y
 
+
 class SolutionCollectionSquareSymmetric90(SolutionCollection):
+    """Square boundary with 90° rotational symmetry (4 images per genotype tree)."""
 
     def __post_init__(self):
         self._N_h_DOF = 3  # h = [size, x_offset, y_offset]
@@ -883,193 +1045,225 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
 
     @property
     def N_trees(self) -> int:
-        """Number of trees per solution (N_trees)."""
+        """Number of trees per solution (4x genotype trees)."""
         if self.xyt is None:
             return 0
-        return 4*self.xyt.shape[1]
-    
-    def canonicalize_xyt(self, xyt:cp.ndarray):
+        return 4 * self.xyt.shape[1]
+
+    def canonicalize_xyt(self, xyt: cp.ndarray):
         """Canonicalize genotype to x<=0, y<=0 quadrant.
         
-        Rotate each tree based on its current quadrant to move it to the canonical quadrant:
+        Rotates each tree to canonical quadrant based on current position:
         - Q1 (x>0, y>0): rotate 180°
         - Q2 (x≤0, y>0): rotate 90° CCW
-        - Q3 (x≤0, y≤0): no rotation (already canonical)
+        - Q3 (x≤0, y≤0): no rotation (canonical)
         - Q4 (x>0, y≤0): rotate 270° CCW
         
-        This doesn't change the phenotype because the phenotype contains all 4 rotational
-        images of each genotype tree.
+        Args:
+            xyt: (N_solutions, N_trees, 3) array to canonicalize
         """
-        # Get views of original values (before any modifications)
+        # Get original values
         x = xyt[:, :, 0]
         y = xyt[:, :, 1]
         theta = xyt[:, :, 2]
-        
-        # Determine which quadrant each tree is in
-        q1 = (x > 0) & (y > 0)   # Quadrant 1: rotate 180°
-        q2 = (x <= 0) & (y > 0)  # Quadrant 2: rotate 90° CCW
-        q4 = (x > 0) & (y <= 0)  # Quadrant 4: rotate 270° CCW
-        # q3 = (x <= 0) & (y <= 0) - already canonical, no action needed
-        
-        # Compute new values for all trees simultaneously from original values
-        # Q1: (x,y,θ) → (-x, -y, θ+π)
-        # Q2: (x,y,θ) → (-y, x, θ+π/2)
-        # Q4: (x,y,θ) → (y, -x, θ+3π/2)
-        # Q3: (x,y,θ) → (x, y, θ)
-        
+
+        # Determine quadrant
+        q1 = (x > 0) & (y > 0)
+        q2 = (x <= 0) & (y > 0)
+        q4 = (x > 0) & (y <= 0)
+
+        # Compute new values for all quadrants simultaneously
         new_x = cp.where(q1, -x, x)
         new_x = cp.where(q2, -y, new_x)
         new_x = cp.where(q4, y, new_x)
-        
+
         new_y = cp.where(q1, -y, y)
         new_y = cp.where(q2, x, new_y)
         new_y = cp.where(q4, -x, new_y)
-        
+
         new_theta = cp.where(q1, theta + cp.pi, theta)
-        new_theta = cp.where(q2, theta + cp.pi/2, new_theta)
-        new_theta = cp.where(q4, theta + 3*cp.pi/2, new_theta)
-        
+        new_theta = cp.where(q2, theta + cp.pi / 2, new_theta)
+        new_theta = cp.where(q4, theta + 3 * cp.pi / 2, new_theta)
+
         # Assign all at once
         xyt[:, :, 0] = new_x
         xyt[:, :, 1] = new_y
-        xyt[:, :, 2] = cp.remainder(new_theta, 2*cp.pi)
-    
+        xyt[:, :, 2] = cp.remainder(new_theta, 2 * cp.pi)
+
     def is_phenotype(self):
+        """See SolutionCollection.is_phenotype."""
         return False
 
-    def _prep_for_phenotype(self):        
+    def _prep_for_phenotype(self):
+        """See SolutionCollection._prep_for_phenotype."""
         self._prepped_phenotype = SolutionCollectionSquare()
         self._prepped_phenotype.h = cp.zeros_like(self.h)
         self._prepped_phenotype.use_fixed_h = self.use_fixed_h
-        self._prepped_phenotype.xyt = cp.zeros((self.N_solutions, self.N_trees, 3), dtype=dtype_cp)
+        self._prepped_phenotype.xyt = cp.zeros(
+            (self.N_solutions, self.N_trees, 3), dtype=dtype_cp
+        )
 
     def _unprep_for_phenotype(self):
+        """See SolutionCollection._unprep_for_phenotype."""
         self._prepped_phenotype = None
 
     def _convert_to_phenotype(self):
         """Convert genotype to phenotype by generating 4 rotational images.
         
-        For each tree at (x, y, θ), create 4 images:
+        For each tree at (x, y, θ), creates images at:
         - 0°:   (x, y, θ)
         - 90°:  (-y, x, θ + π/2)
         - 180°: (-x, -y, θ + π)
         - 270°: (y, -x, θ + 3π/2)
+        
+        Returns:
+            SolutionCollectionSquare with 4x trees
         """
         N_trees_gen = self.xyt.shape[1]
-        
+
         # Extract genotype components
         x = self.xyt[:, :, 0]  # (N_solutions, N_trees_gen)
         y = self.xyt[:, :, 1]
         theta = self.xyt[:, :, 2]
-        
+
         # Image 0: identity (0° rotation)
-        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 0] = x
-        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 1] = y
-        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 2] = theta
-        
+        self._prepped_phenotype.xyt[:, 0 * N_trees_gen:1 * N_trees_gen, 0] = x
+        self._prepped_phenotype.xyt[:, 0 * N_trees_gen:1 * N_trees_gen, 1] = y
+        self._prepped_phenotype.xyt[:, 0 * N_trees_gen:1 * N_trees_gen, 2] = theta
+
         # Image 1: 90° rotation
-        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 0] = -y
-        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 1] = x
-        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 2] = theta + cp.pi/2
-        
+        self._prepped_phenotype.xyt[:, 1 * N_trees_gen:2 * N_trees_gen, 0] = -y
+        self._prepped_phenotype.xyt[:, 1 * N_trees_gen:2 * N_trees_gen, 1] = x
+        self._prepped_phenotype.xyt[:, 1 * N_trees_gen:2 * N_trees_gen, 2] = \
+            theta + cp.pi / 2
+
         # Image 2: 180° rotation
-        self._prepped_phenotype.xyt[:, 2*N_trees_gen:3*N_trees_gen, 0] = -x
-        self._prepped_phenotype.xyt[:, 2*N_trees_gen:3*N_trees_gen, 1] = -y
-        self._prepped_phenotype.xyt[:, 2*N_trees_gen:3*N_trees_gen, 2] = theta + cp.pi
-        
+        self._prepped_phenotype.xyt[:, 2 * N_trees_gen:3 * N_trees_gen, 0] = -x
+        self._prepped_phenotype.xyt[:, 2 * N_trees_gen:3 * N_trees_gen, 1] = -y
+        self._prepped_phenotype.xyt[:, 2 * N_trees_gen:3 * N_trees_gen, 2] = \
+            theta + cp.pi
+
         # Image 3: 270° rotation
-        self._prepped_phenotype.xyt[:, 3*N_trees_gen:4*N_trees_gen, 0] = y
-        self._prepped_phenotype.xyt[:, 3*N_trees_gen:4*N_trees_gen, 1] = -x
-        self._prepped_phenotype.xyt[:, 3*N_trees_gen:4*N_trees_gen, 2] = theta + 3*cp.pi/2
-        
+        self._prepped_phenotype.xyt[:, 3 * N_trees_gen:4 * N_trees_gen, 0] = y
+        self._prepped_phenotype.xyt[:, 3 * N_trees_gen:4 * N_trees_gen, 1] = -x
+        self._prepped_phenotype.xyt[:, 3 * N_trees_gen:4 * N_trees_gen, 2] = \
+            theta + 3 * cp.pi / 2
+
         self._prepped_phenotype.h[:] = self.h
         return self._prepped_phenotype
-    
-    def backprop_phenotype(self, grad_xyt_phenotype, grad_h_phenotype, grad_xyt_genotype, grad_h_genotype):
+
+    def backprop_phenotype(
+        self, grad_xyt_phenotype, grad_h_phenotype,
+        grad_xyt_genotype, grad_h_genotype
+    ):
         """Backpropagate gradients from 4 phenotype images to genotype.
         
-        Each genotype tree affects 4 phenotype trees through the rotation transformations.
-        We sum the contributions using the chain rule.
+        Each genotype tree affects 4 phenotype trees. Sum contributions
+        using chain rule.
+        
+        Args:
+            grad_xyt_phenotype: (N_solutions, 4*N_trees_gen, 3) gradients
+            grad_h_phenotype: (N_solutions, N_h_DOF) gradients
+            grad_xyt_genotype: (N_solutions, N_trees_gen, 3) output array
+            grad_h_genotype: (N_solutions, N_h_DOF) output array
         """
         N_trees_gen = self.xyt.shape[1]
-        
+
         # Extract phenotype gradients for each image
-        gx0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 0]  # Image 0
-        gy0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 1]
-        gtheta0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 2]
-        
-        gx1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 0]  # Image 1 (90°)
-        gy1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 1]
-        gtheta1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 2]
-        
-        gx2 = grad_xyt_phenotype[:, 2*N_trees_gen:3*N_trees_gen, 0]  # Image 2 (180°)
-        gy2 = grad_xyt_phenotype[:, 2*N_trees_gen:3*N_trees_gen, 1]
-        gtheta2 = grad_xyt_phenotype[:, 2*N_trees_gen:3*N_trees_gen, 2]
-        
-        gx3 = grad_xyt_phenotype[:, 3*N_trees_gen:4*N_trees_gen, 0]  # Image 3 (270°)
-        gy3 = grad_xyt_phenotype[:, 3*N_trees_gen:4*N_trees_gen, 1]
-        gtheta3 = grad_xyt_phenotype[:, 3*N_trees_gen:4*N_trees_gen, 2]
-        
-        # Apply chain rule for each transformation:
-        # Image 0 (x, y, θ):        ∂x/∂x=1, ∂y/∂y=1, ∂θ/∂θ=1
-        # Image 1 (-y, x, θ+π/2):   ∂x/∂y=-1, ∂y/∂x=1, ∂θ/∂θ=1
-        # Image 2 (-x, -y, θ+π):    ∂x/∂x=-1, ∂y/∂y=-1, ∂θ/∂θ=1
-        # Image 3 (y, -x, θ+3π/2):  ∂x/∂y=1, ∂y/∂x=-1, ∂θ/∂θ=1
-        
+        gx0 = grad_xyt_phenotype[:, 0 * N_trees_gen:1 * N_trees_gen, 0]
+        gy0 = grad_xyt_phenotype[:, 0 * N_trees_gen:1 * N_trees_gen, 1]
+        gtheta0 = grad_xyt_phenotype[:, 0 * N_trees_gen:1 * N_trees_gen, 2]
+
+        gx1 = grad_xyt_phenotype[:, 1 * N_trees_gen:2 * N_trees_gen, 0]
+        gy1 = grad_xyt_phenotype[:, 1 * N_trees_gen:2 * N_trees_gen, 1]
+        gtheta1 = grad_xyt_phenotype[:, 1 * N_trees_gen:2 * N_trees_gen, 2]
+
+        gx2 = grad_xyt_phenotype[:, 2 * N_trees_gen:3 * N_trees_gen, 0]
+        gy2 = grad_xyt_phenotype[:, 2 * N_trees_gen:3 * N_trees_gen, 1]
+        gtheta2 = grad_xyt_phenotype[:, 2 * N_trees_gen:3 * N_trees_gen, 2]
+
+        gx3 = grad_xyt_phenotype[:, 3 * N_trees_gen:4 * N_trees_gen, 0]
+        gy3 = grad_xyt_phenotype[:, 3 * N_trees_gen:4 * N_trees_gen, 1]
+        gtheta3 = grad_xyt_phenotype[:, 3 * N_trees_gen:4 * N_trees_gen, 2]
+
+        # Apply chain rule (Jacobian of rotation transformations)
         grad_xyt_genotype[:, :, 0] = gx0 + gy1 - gx2 - gy3
         grad_xyt_genotype[:, :, 1] = gy0 - gx1 - gy2 + gx3
         grad_xyt_genotype[:, :, 2] = gtheta0 + gtheta1 + gtheta2 + gtheta3
-        
+
         # Boundary parameter gradients pass through unchanged
         grad_h_genotype[:] = grad_h_phenotype
-    
- 
+
     def create_empty(self, N_solutions: int, N_trees: int):
-        assert(N_trees % 4 == 0)
-        res=copy.deepcopy(self)
-        res.xyt = cp.zeros((N_solutions, N_trees//4, 3), dtype=dtype_cp)
-        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
+        """See SolutionCollection.create_empty."""
+        assert N_trees % 4 == 0
+        res = copy.deepcopy(self)
+        res.xyt = cp.zeros((N_solutions, N_trees // 4, 3), dtype=dtype_cp)
+        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)
         return res
-    # subclasses must implement: snap, compute_cost, compute_cost_single_ref, get_crystal_axes
 
     def snap(self):
+        """See SolutionCollection.snap."""
         phenotype = self.convert_to_phenotype()
         phenotype.snap()
         self.h[:] = phenotype.h[:]
 
-    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):  
-        assert not self.filter_move_locations_with_edge_spacer        
-        original_size = self.h[inds_to_do,0].copy()  # (N,)
+    def _generate_move_centers(
+        self, edge_clearance: float, inds_to_do, generator: cp.random.Generator
+    ):
+        """Generate move centers in canonical x<=0, y<=0 quadrant.
+        
+        Uses rejection sampling to avoid forbidden region near origin.
+        
+        Args:
+            edge_clearance: Minimum distance from boundary edge (or None)
+            inds_to_do: Indices of solutions to process
+            generator: CuPy random number generator
+            
+        Returns:
+            Tuple of (move_centers_x, move_centers_y) arrays
+        """
+        assert not self.filter_move_locations_with_edge_spacer
+        original_size = self.h[inds_to_do, 0].copy()  # (N,)
         size = original_size.copy()
+        
         if edge_clearance is not None:
-            size -= edge_clearance*2
+            size -= edge_clearance * 2
         else:
-            edge_clearance = 0*size
-       
-        # Assert no infinite loop: need original_size >= 4*edge_clearance for acceptance to be possible
-        # This ensures that min candidate value (-size/2 = -original_size/2 + edge_clearance) <= -edge_clearance
-        assert cp.all(original_size >= 4*edge_clearance), \
+            edge_clearance = 0 * size
+
+        # Assert no infinite loop risk
+        assert cp.all(original_size >= 4 * edge_clearance), \
             f"Infinite loop risk: original_size must be >= 4*edge_clearance. " \
             f"Min ratio: {float(cp.min(original_size / (edge_clearance + 1e-10)))}"
-       
-        # Rejection sampling: not allowed to have both x>-edge_clearance and y>-edge_clearance
+
+        # Rejection sampling: not both x>-edge_clearance AND y>-edge_clearance
         N = len(inds_to_do)
         move_centers_x = cp.zeros(N, dtype=dtype_cp)
         move_centers_y = cp.zeros(N, dtype=dtype_cp)
         remaining_mask = cp.ones(N, dtype=bool)
-        
+
         while cp.any(remaining_mask):
             n_remaining = int(cp.sum(remaining_mask))
-            candidate_x = generator.uniform(-size[remaining_mask] / 2, 0., size=n_remaining)
-            candidate_y = generator.uniform(-size[remaining_mask] / 2, 0., size=n_remaining)
-            # Accept if NOT in forbidden region (i.e., at least one coord <= -edge_clearance)
-            # edge_clearance is an array with same size as the remaining samples
-            accept_mask = (candidate_x+candidate_y <= -2*edge_clearance[remaining_mask])
-            # Update only the accepted samples
+            candidate_x = generator.uniform(
+                -size[remaining_mask] / 2, 0., size=n_remaining
+            )
+            candidate_y = generator.uniform(
+                -size[remaining_mask] / 2, 0., size=n_remaining
+            )
+            
+            # Accept if NOT in forbidden region
+            accept_mask = (
+                candidate_x + candidate_y <= -2 * edge_clearance[remaining_mask]
+            )
+            
+            # Update accepted samples
             indices_remaining = cp.where(remaining_mask)[0]
             indices_accepted = indices_remaining[accept_mask]
-            move_centers_x[indices_accepted] = candidate_x[accept_mask] + self.h[inds_to_do[indices_accepted], 1]
-            move_centers_y[indices_accepted] = candidate_y[accept_mask] + self.h[inds_to_do[indices_accepted], 2]
+            move_centers_x[indices_accepted] = \
+                candidate_x[accept_mask] + self.h[inds_to_do[indices_accepted], 1]
+            move_centers_y[indices_accepted] = \
+                candidate_y[accept_mask] + self.h[inds_to_do[indices_accepted], 2]
             remaining_mask[indices_accepted] = False
 
         return move_centers_x, move_centers_y
@@ -1077,7 +1271,7 @@ class SolutionCollectionSquareSymmetric90(SolutionCollection):
 
 @dataclass
 class SolutionCollectionSquareSymmetric180(SolutionCollection):
-    """Square boundary with 180° rotational symmetry (2 images instead of 4)."""
+    """Square boundary with 180° rotational symmetry (2 images per genotype tree)."""
 
     def __post_init__(self):
         self._N_h_DOF = 3  # h = [size, x_offset, y_offset]
@@ -1085,194 +1279,223 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
 
     @property
     def N_trees(self) -> int:
-        """Number of trees per solution (N_trees)."""
+        """Number of trees per solution (2x genotype trees)."""
         if self.xyt is None:
             return 0
-        return 2*self.xyt.shape[1]
-    
-    def canonicalize_xyt(self, xyt:cp.ndarray):
-        """Canonicalize genotype to one half-plane.
+        return 2 * self.xyt.shape[1]
+
+    def canonicalize_xyt(self, xyt: cp.ndarray):
+        """Canonicalize genotype to x<=0 half-plane.
         
-        Rotate trees in the "wrong" half by 180° to move them to the canonical half:
-        - If x > 0: rotate 180° to move to x ≤ 0
-        - If x ≤ 0: no rotation (already canonical)
+        Rotates trees in x>0 region by 180° to move them to x<=0.
         
-        This doesn't change the phenotype because the phenotype contains both
-        rotational images of each genotype tree.
+        Args:
+            xyt: (N_solutions, N_trees, 3) array to canonicalize
         """
-        # Get views of original values
+        # Get original values
         x = xyt[:, :, 0]
         y = xyt[:, :, 1]
         theta = xyt[:, :, 2]
-        
+
         # Determine which trees need rotation (x > 0)
         needs_rotation = x > 0
-        
+
         # Rotate by 180°: (x,y,θ) → (-x, -y, θ+π)
         new_x = cp.where(needs_rotation, -x, x)
         new_y = cp.where(needs_rotation, -y, y)
         new_theta = cp.where(needs_rotation, theta + cp.pi, theta)
-        
+
         # Assign all at once
         xyt[:, :, 0] = new_x
         xyt[:, :, 1] = new_y
-        xyt[:, :, 2] = cp.remainder(new_theta, 2*cp.pi)
-    
+        xyt[:, :, 2] = cp.remainder(new_theta, 2 * cp.pi)
+
     def is_phenotype(self):
+        """See SolutionCollection.is_phenotype."""
         return False
 
-    def _prep_for_phenotype(self):        
+    def _prep_for_phenotype(self):
+        """See SolutionCollection._prep_for_phenotype."""
         self._prepped_phenotype = SolutionCollectionSquare()
         self._prepped_phenotype.h = cp.zeros_like(self.h)
         self._prepped_phenotype.use_fixed_h = self.use_fixed_h
-        self._prepped_phenotype.xyt = cp.zeros((self.N_solutions, self.N_trees, 3), dtype=dtype_cp)
+        self._prepped_phenotype.xyt = cp.zeros(
+            (self.N_solutions, self.N_trees, 3), dtype=dtype_cp
+        )
 
     def _unprep_for_phenotype(self):
+        """See SolutionCollection._unprep_for_phenotype."""
         self._prepped_phenotype = None
 
     def _convert_to_phenotype(self):
         """Convert genotype to phenotype by generating 2 rotational images.
         
-        For each tree at (x, y, θ), create 2 images:
+        For each tree at (x, y, θ), creates images at:
         - 0°:   (x, y, θ)
         - 180°: (-x, -y, θ + π)
+        
+        Returns:
+            SolutionCollectionSquare with 2x trees
         """
         N_trees_gen = self.xyt.shape[1]
-        
+
         # Extract genotype components
         x = self.xyt[:, :, 0]  # (N_solutions, N_trees_gen)
         y = self.xyt[:, :, 1]
         theta = self.xyt[:, :, 2]
-        
+
         # Image 0: identity (0° rotation)
-        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 0] = x
-        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 1] = y
-        self._prepped_phenotype.xyt[:, 0*N_trees_gen:1*N_trees_gen, 2] = theta
-        
+        self._prepped_phenotype.xyt[:, 0 * N_trees_gen:1 * N_trees_gen, 0] = x
+        self._prepped_phenotype.xyt[:, 0 * N_trees_gen:1 * N_trees_gen, 1] = y
+        self._prepped_phenotype.xyt[:, 0 * N_trees_gen:1 * N_trees_gen, 2] = theta
+
         # Image 1: 180° rotation
-        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 0] = -x
-        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 1] = -y
-        self._prepped_phenotype.xyt[:, 1*N_trees_gen:2*N_trees_gen, 2] = theta + cp.pi
-        
+        self._prepped_phenotype.xyt[:, 1 * N_trees_gen:2 * N_trees_gen, 0] = -x
+        self._prepped_phenotype.xyt[:, 1 * N_trees_gen:2 * N_trees_gen, 1] = -y
+        self._prepped_phenotype.xyt[:, 1 * N_trees_gen:2 * N_trees_gen, 2] = \
+            theta + cp.pi
+
         self._prepped_phenotype.h[:] = self.h
         return self._prepped_phenotype
-    
-    def backprop_phenotype(self, grad_xyt_phenotype, grad_h_phenotype, grad_xyt_genotype, grad_h_genotype):
+
+    def backprop_phenotype(
+        self, grad_xyt_phenotype, grad_h_phenotype,
+        grad_xyt_genotype, grad_h_genotype
+    ):
         """Backpropagate gradients from 2 phenotype images to genotype.
         
-        Each genotype tree affects 2 phenotype trees through the rotation transformations.
-        We sum the contributions using the chain rule.
+        Each genotype tree affects 2 phenotype trees. Sum contributions
+        using chain rule.
+        
+        Args:
+            grad_xyt_phenotype: (N_solutions, 2*N_trees_gen, 3) gradients
+            grad_h_phenotype: (N_solutions, N_h_DOF) gradients
+            grad_xyt_genotype: (N_solutions, N_trees_gen, 3) output array
+            grad_h_genotype: (N_solutions, N_h_DOF) output array
         """
         N_trees_gen = self.xyt.shape[1]
-        
+
         # Extract phenotype gradients for each image
-        gx0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 0]  # Image 0
-        gy0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 1]
-        gtheta0 = grad_xyt_phenotype[:, 0*N_trees_gen:1*N_trees_gen, 2]
-        
-        gx1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 0]  # Image 1 (180°)
-        gy1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 1]
-        gtheta1 = grad_xyt_phenotype[:, 1*N_trees_gen:2*N_trees_gen, 2]
-        
-        # Apply chain rule for each transformation:
-        # Image 0 (x, y, θ):        ∂x/∂x=1, ∂y/∂y=1, ∂θ/∂θ=1
-        # Image 1 (-x, -y, θ+π):    ∂x/∂x=-1, ∂y/∂y=-1, ∂θ/∂θ=1
-        
+        gx0 = grad_xyt_phenotype[:, 0 * N_trees_gen:1 * N_trees_gen, 0]
+        gy0 = grad_xyt_phenotype[:, 0 * N_trees_gen:1 * N_trees_gen, 1]
+        gtheta0 = grad_xyt_phenotype[:, 0 * N_trees_gen:1 * N_trees_gen, 2]
+
+        gx1 = grad_xyt_phenotype[:, 1 * N_trees_gen:2 * N_trees_gen, 0]
+        gy1 = grad_xyt_phenotype[:, 1 * N_trees_gen:2 * N_trees_gen, 1]
+        gtheta1 = grad_xyt_phenotype[:, 1 * N_trees_gen:2 * N_trees_gen, 2]
+
+        # Apply chain rule (Image 0: identity, Image 1: 180° rotation)
         grad_xyt_genotype[:, :, 0] = gx0 - gx1
         grad_xyt_genotype[:, :, 1] = gy0 - gy1
         grad_xyt_genotype[:, :, 2] = gtheta0 + gtheta1
-        
+
         # Boundary parameter gradients pass through unchanged
         grad_h_genotype[:] = grad_h_phenotype
-    
+
     def create_empty(self, N_solutions: int, N_trees: int):
-        assert(N_trees % 2 == 0)
+        """See SolutionCollection.create_empty."""
+        assert N_trees % 2 == 0
         res = copy.deepcopy(self)
-        res.xyt = cp.zeros((N_solutions, N_trees//2, 3), dtype=dtype_cp)
-        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)        
+        res.xyt = cp.zeros((N_solutions, N_trees // 2, 3), dtype=dtype_cp)
+        res.h = cp.zeros((N_solutions, self._N_h_DOF), dtype=dtype_cp)
         return res
 
     def snap(self):
+        """See SolutionCollection.snap."""
         phenotype = self.convert_to_phenotype()
         phenotype.snap()
         self.h[:] = phenotype.h[:]
 
-    def _generate_move_centers(self, edge_clearance: float, inds_to_do, generator: cp.random.Generator):   
+    def _generate_move_centers(
+        self, edge_clearance: float, inds_to_do, generator: cp.random.Generator
+    ):
+        """Generate move centers in canonical x<=0 half-plane.
         
-        original_size = self.h[inds_to_do,0].copy()  # (N,)
-        size = original_size.copy()
-        if edge_clearance is not None:
-            size -= edge_clearance*2
+        Uses analytical sampling when edge_clearance is set, otherwise uses
+        EdgeSpacerBasic-aware sampling or rejection sampling.
+        
+        Args:
+            edge_clearance: Minimum distance from boundary edge (or None)
+            inds_to_do: Indices of solutions to process
+            generator: CuPy random number generator
             
-            # Assert no infinite loop: need original_size >= 2*edge_clearance for acceptance to be possible
-            # For 180° symmetry, only need to avoid x > -edge_clearance (single constraint)
-            assert cp.all(original_size >= 4*edge_clearance), \
+        Returns:
+            Tuple of (move_centers_x, move_centers_y) arrays
+        """
+        original_size = self.h[inds_to_do, 0].copy()  # (N,)
+        size = original_size.copy()
+        
+        if edge_clearance is not None:
+            size -= edge_clearance * 2
+
+            # Assert no infinite loop risk
+            assert cp.all(original_size >= 4 * edge_clearance), \
                 f"Infinite loop risk: original_size must be >= 4*edge_clearance. " \
                 f"Min ratio: {float(cp.min(original_size / (edge_clearance + 1e-10)))}"
-        
-            # Direct sampling from the valid L-shaped region (no rejection sampling needed)
-            # Valid region: x ∈ [-size/2, 0], y ∈ [-size/2, size/2], excluding {x > -edge_clearance AND |y| <= edge_clearance}
-            #
-            # Decompose into 3 rectangles:
-            # Region A: x ∈ [-size/2, -edge_clearance], y ∈ [-size/2, size/2]  (left strip)
-            # Region B: x ∈ [-edge_clearance, 0], y ∈ (edge_clearance, size/2]  (top right)
-            # Region C: x ∈ [-edge_clearance, 0], y ∈ [-size/2, -edge_clearance) (bottom right)
-            
+
+            # Direct analytical sampling from L-shaped valid region
             N = len(inds_to_do)
             half_size = size / 2  # (N,)
-            
-            # Compute widths and heights for each region
-            width_A = half_size - edge_clearance  # x extent of region A
-            height_A = size                        # y extent of region A
-            width_BC = edge_clearance              # x extent of regions B and C
-            height_B = half_size - edge_clearance  # y extent of region B (top)
-            height_C = half_size - edge_clearance  # y extent of region C (bottom)
-            
-            # Compute areas of each region
-            area_A = width_A * height_A
-            area_B = width_BC * height_B
-            area_C = width_BC * height_C
+
+            # Compute region areas (3 rectangles forming L-shape)
+            width_A = half_size - edge_clearance
+            height_A = size
+            width_BC = edge_clearance
+            height_B = half_size - edge_clearance
+            height_C = half_size - edge_clearance
+
+            area_A = width_A * height_A  # Left strip
+            area_B = width_BC * height_B  # Top right
+            area_C = width_BC * height_C  # Bottom right
             total_area = area_A + area_B + area_C
-            
-            # Cumulative probabilities for region selection
+
+            # Cumulative probabilities
             prob_A = area_A / total_area
             prob_AB = (area_A + area_B) / total_area
-            # prob_ABC = 1.0 (implicit)
-            
-            # Generate uniform random values for region selection
+
+            # Select region for each sample
             region_selector = generator.uniform(0., 1., size=N)
-            
-            # Determine which region each sample falls into
             in_A = region_selector < prob_A
             in_B = (region_selector >= prob_A) & (region_selector < prob_AB)
             in_C = region_selector >= prob_AB
-            
-            # Generate x and y coordinates based on region
+
+            # Generate coordinates based on region
             move_centers_x = cp.zeros(N, dtype=dtype_cp)
             move_centers_y = cp.zeros(N, dtype=dtype_cp)
-            
+
             # Region A: x ∈ [-size/2, -edge_clearance], y ∈ [-size/2, size/2]
             if cp.any(in_A):
-                move_centers_x[in_A] = generator.uniform(-half_size[in_A], -edge_clearance[in_A])
-                move_centers_y[in_A] = generator.uniform(-half_size[in_A], half_size[in_A])
-            
+                move_centers_x[in_A] = generator.uniform(
+                    -half_size[in_A], -edge_clearance[in_A]
+                )
+                move_centers_y[in_A] = generator.uniform(
+                    -half_size[in_A], half_size[in_A]
+                )
+
             # Region B: x ∈ [-edge_clearance, 0], y ∈ (edge_clearance, size/2]
             if cp.any(in_B):
-                move_centers_x[in_B] = generator.uniform(-edge_clearance[in_B], cp.zeros_like(edge_clearance[in_B]))
-                move_centers_y[in_B] = generator.uniform(edge_clearance[in_B], half_size[in_B])
-            
+                move_centers_x[in_B] = generator.uniform(
+                    -edge_clearance[in_B], cp.zeros_like(edge_clearance[in_B])
+                )
+                move_centers_y[in_B] = generator.uniform(
+                    edge_clearance[in_B], half_size[in_B]
+                )
+
             # Region C: x ∈ [-edge_clearance, 0], y ∈ [-size/2, -edge_clearance)
             if cp.any(in_C):
-                move_centers_x[in_C] = generator.uniform(-edge_clearance[in_C], cp.zeros_like(edge_clearance[in_C]))
-                move_centers_y[in_C] = generator.uniform(-half_size[in_C], -edge_clearance[in_C])
-            
+                move_centers_x[in_C] = generator.uniform(
+                    -edge_clearance[in_C], cp.zeros_like(edge_clearance[in_C])
+                )
+                move_centers_y[in_C] = generator.uniform(
+                    -half_size[in_C], -edge_clearance[in_C]
+                )
+
             # Add offsets
             move_centers_x += self.h[inds_to_do, 1]
             move_centers_y += self.h[inds_to_do, 2]
         else:
-            # No edge clearance - use analytical sampling for EdgeSpacerBasic when possible
-            size = original_size  # no shrink when edge_clearance is None
-
+            # No edge clearance - use analytical sampling for EdgeSpacerBasic
+            size = original_size
             N = len(inds_to_do)
             move_centers_x = cp.zeros(N, dtype=dtype_cp)
             move_centers_y = cp.zeros(N, dtype=dtype_cp)
@@ -1280,101 +1503,114 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
             offset_x = h_subset[:, 1]
             offset_y = h_subset[:, 2]
 
-            # Check if we can use analytical sampling for EdgeSpacerBasic with dist_corner=0
-            can_use_analytical = (isinstance(self.edge_spacer, EdgeSpacerBasic) and 
-                                self.edge_spacer.dist_corner == 0.0 and 
-                                self.filter_move_locations_with_edge_spacer)
-            
+            # Check if analytical sampling is possible
+            can_use_analytical = (
+                isinstance(self.edge_spacer, EdgeSpacerBasic) and
+                self.edge_spacer.dist_corner == 0.0 and
+                self.filter_move_locations_with_edge_spacer
+            )
+
             if can_use_analytical:
-                # Analytical sampling for EdgeSpacerBasic with dist_corner=0
-                # Valid region: |x| > (h/2 - dist_x - margin) OR |y| > (h/2 - dist_y - margin)
-                # For canonical half-plane x ≤ 0: x < -(h/2 - dist_x - margin) OR |y| > (h/2 - dist_y - margin)
-                
-                half_size = size / 2  # (N,)
+                # Analytical sampling for canonical half-plane with edge spacer
+                half_size = size / 2
                 margin = self.filter_move_locations_margin
-                x_threshold = half_size - self.edge_spacer.dist_x - margin  # |x| > this
-                y_threshold = half_size - self.edge_spacer.dist_y - margin  # |y| > this
-                
-                # Decompose into 3 rectangles:
-                # Region A: x ∈ [-size/2, -x_threshold], y ∈ [-size/2, size/2]  (left strip)
-                # Region B: x ∈ [-x_threshold, 0], y ∈ (y_threshold, size/2]  (top right)
-                # Region C: x ∈ [-x_threshold, 0], y ∈ [-size/2, -y_threshold) (bottom right)
-                
-                # Compute widths and heights for each region
-                width_A = half_size - x_threshold  # x extent of region A
-                height_A = size                    # y extent of region A
-                width_BC = x_threshold             # x extent of regions B and C
-                height_B = half_size - y_threshold # y extent of region B (top)
-                height_C = half_size - y_threshold # y extent of region C (bottom)
-                
-                # Compute areas of each region
+                x_threshold = half_size - self.edge_spacer.dist_x - margin
+                y_threshold = half_size - self.edge_spacer.dist_y - margin
+
+                # Compute region areas (3 rectangles)
+                width_A = half_size - x_threshold
+                height_A = size
+                width_BC = x_threshold
+                height_B = half_size - y_threshold
+                height_C = half_size - y_threshold
+
                 area_A = width_A * height_A
                 area_B = width_BC * height_B
                 area_C = width_BC * height_C
                 total_area = area_A + area_B + area_C
-                
-                # Handle edge case where total_area is very small or zero
+
+                # Handle edge case
                 total_area_safe = cp.maximum(total_area, 1e-10)
-                
-                # Cumulative probabilities for region selection
+
+                # Cumulative probabilities
                 prob_A = area_A / total_area_safe
                 prob_AB = (area_A + area_B) / total_area_safe
-                # prob_ABC = 1.0 (implicit)
-                
-                # Generate uniform random values for region selection
+
+                # Select region
                 region_selector = generator.uniform(0., 1., size=N)
-                
-                # Determine which region each sample falls into
                 in_A = region_selector < prob_A
                 in_B = (region_selector >= prob_A) & (region_selector < prob_AB)
                 in_C = region_selector >= prob_AB
-                
-                # Region A: x ∈ [-size/2, -x_threshold], y ∈ [-size/2, size/2]
+
+                # Sample within selected regions
                 if cp.any(in_A):
-                    move_centers_x[in_A] = generator.uniform(-half_size[in_A], -x_threshold[in_A])
-                    move_centers_y[in_A] = generator.uniform(-half_size[in_A], half_size[in_A])
-                
-                # Region B: x ∈ [-x_threshold, 0], y ∈ (y_threshold, size/2]
+                    move_centers_x[in_A] = generator.uniform(
+                        -half_size[in_A], -x_threshold[in_A]
+                    )
+                    move_centers_y[in_A] = generator.uniform(
+                        -half_size[in_A], half_size[in_A]
+                    )
+
                 if cp.any(in_B):
-                    move_centers_x[in_B] = generator.uniform(-x_threshold[in_B], cp.zeros_like(x_threshold[in_B]))
-                    move_centers_y[in_B] = generator.uniform(y_threshold[in_B], half_size[in_B])
-                
-                # Region C: x ∈ [-x_threshold, 0], y ∈ [-size/2, -y_threshold)
+                    move_centers_x[in_B] = generator.uniform(
+                        -x_threshold[in_B], cp.zeros_like(x_threshold[in_B])
+                    )
+                    move_centers_y[in_B] = generator.uniform(
+                        y_threshold[in_B], half_size[in_B]
+                    )
+
                 if cp.any(in_C):
-                    move_centers_x[in_C] = generator.uniform(-x_threshold[in_C], cp.zeros_like(x_threshold[in_C]))
-                    move_centers_y[in_C] = generator.uniform(-half_size[in_C], -y_threshold[in_C])
-                
+                    move_centers_x[in_C] = generator.uniform(
+                        -x_threshold[in_C], cp.zeros_like(x_threshold[in_C])
+                    )
+                    move_centers_y[in_C] = generator.uniform(
+                        -half_size[in_C], -y_threshold[in_C]
+                    )
+
                 # Add offsets
                 move_centers_x += offset_x
                 move_centers_y += offset_y
 
-                # Validate that all sampled points are indeed valid
-                if debugging_mode>=2:
+                # Validation in debug mode
+                if debugging_mode >= 2:
                     candidate_xyt = cp.zeros((N, 1, 3), dtype=dtype_cp)
                     candidate_xyt[:, 0, 0] = move_centers_x
                     candidate_xyt[:, 0, 1] = move_centers_y
-                    valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset, margin=self.filter_move_locations_margin)[:, 0]
-                    assert cp.all(valid_mask), "Analytical sampling produced invalid points"
+                    valid_mask = self.edge_spacer.check_valid(
+                        candidate_xyt, h_subset,
+                        margin=self.filter_move_locations_margin
+                    )[:, 0]
+                    assert cp.all(valid_mask), \
+                        "Analytical sampling produced invalid points"
             else:
                 # Fall back to rejection sampling
                 remaining_mask = cp.ones(N, dtype=bool)
-                
+
                 while cp.any(remaining_mask):
                     n_remaining = int(cp.sum(remaining_mask))
 
-                    # Sample within canonical half-plane (x ≤ 0) and full height
-                    cand_x = generator.uniform(-size[remaining_mask] / 2, 0.0, size=n_remaining)
-                    cand_y = generator.uniform(-size[remaining_mask] / 2, size[remaining_mask] / 2, size=n_remaining)                
+                    # Sample within canonical half-plane and full height
+                    cand_x = generator.uniform(
+                        -size[remaining_mask] / 2, 0.0, size=n_remaining
+                    )
+                    cand_y = generator.uniform(
+                        -size[remaining_mask] / 2,
+                        size[remaining_mask] / 2,
+                        size=n_remaining
+                    )
 
                     cand_x += offset_x[remaining_mask]
                     cand_y += offset_y[remaining_mask]
 
-                    # Validate against the configured edge spacer
+                    # Validate against edge spacer
                     candidate_xyt = cp.zeros((n_remaining, 1, 3), dtype=dtype_cp)
                     candidate_xyt[:, 0, 0] = cand_x
                     candidate_xyt[:, 0, 1] = cand_y
-                    if self.filter_move_locations_with_edge_spacer:                    
-                        valid_mask = self.edge_spacer.check_valid(candidate_xyt, h_subset[remaining_mask], margin=self.filter_move_locations_margin)[:, 0]
+                    if self.filter_move_locations_with_edge_spacer:
+                        valid_mask = self.edge_spacer.check_valid(
+                            candidate_xyt, h_subset[remaining_mask],
+                            margin=self.filter_move_locations_margin
+                        )[:, 0]
                     else:
                         valid_mask = cp.ones(n_remaining, dtype=bool)
 
@@ -1384,32 +1620,34 @@ class SolutionCollectionSquareSymmetric180(SolutionCollection):
                     move_centers_y[indices_accepted] = cand_y[valid_mask]
                     remaining_mask[indices_accepted] = False
 
-        #print(move_centers_x, move_centers_y)
         return move_centers_x, move_centers_y
-
 
 
 @dataclass
 class SolutionCollectionLattice(SolutionCollection):
-    # h[0]: crystal axis 1 length (a_length)
-    # h[1]: crystal axis 2 length (b_length)
-    # h[2]: angle between axes (radians)
+    """Periodic lattice solution collection with general parallelogram boundaries.
+    
+    Boundary parameters h = [a_length, b_length, angle] define lattice vectors:
+    - a = (a_length, 0)
+    - b = (b_length * cos(angle), b_length * sin(angle))
 
-    do_snap: bool = field(init=True, default=True)
+    Not used in the main solution, but used to find crystal packings earlier.
+    """
+    do_snap: bool = field(init=True, default=True)  # Whether to snap h to minimal cell
 
     def __post_init__(self):
-        self._N_h_DOF = 3
+        self._N_h_DOF = 3  # h = [a_length, b_length, angle]
         self.periodic = True
         return super().__post_init__()
 
     def compute_cost_single_ref(self):
-        """Compute area cost and grad_bound for a single solution.
-
-        Area = a_length * b_length * sin(angle)
-
+        """Compute unit cell area cost and gradient for single solution.
+        
+        Area = |a × b| = a_length * b_length * |sin(angle)|
+        
         Returns:
-            cost: scalar area
-            grad_bound: (3,) array with derivatives [d/da, d/db, d/dangle]
+            cost: Scalar area
+            grad_bound: (3,) gradient array [d/da_length, d/db_length, d/dangle]
         """
         h = self.h[0]
         sin_angle = cp.sin(h[2])
@@ -1528,8 +1766,10 @@ class SolutionCollectionLattice(SolutionCollection):
 
 @dataclass
 class SolutionCollectionLatticeRectangle(SolutionCollectionLattice):
-    # h[0]: crystal axis 1 length (a_length)
-    # h[1]: crystal axis 2 length (b_length)
+    """Periodic lattice solution collection with rectangular unit cell.  
+     h[0]: crystal axis 1 length (a_length)
+     h[1]: crystal axis 2 length (b_length)
+     """
 
     def __post_init__(self):        
         super().__post_init__()
@@ -1597,7 +1837,8 @@ class SolutionCollectionLatticeRectangle(SolutionCollectionLattice):
 
 @dataclass
 class SolutionCollectionLatticeFixed(SolutionCollectionLattice):
-    # h[0]: crystal axis 1 length (a_length)
+    """Periodic lattice solution collection with fixed unit cell aspect ratio and angle; just size is free.  
+     h[0]: crystal axis 1 length (a_length)"""
     
     aspect_ratios: cp.ndarray = field(default=None)  # (N_solutions,) array of aspect ratios (b_length / a_length)
     angles: cp.ndarray = field(default=None)  # Optional (N_solutions,) array of lattice angles (radians)
@@ -1769,67 +2010,6 @@ def lexicographic_less_than(fitness1: np.ndarray, fitness2: np.ndarray) -> bool:
 # Genetic Diversity Calculation Utilities
 # =============================================================================
 
-def compute_genetic_diversity_matrix_shortcut(
-    population_xyt: cp.ndarray,
-    reference_xyt: cp.ndarray,
-    lap_config=None,
-) -> cp.ndarray:
-    """Memory-lean shortcut for diversity computation.
-
-    Optimized version that avoids stacking all 8 transformed cost tensors.
-
-    Args:
-        population_xyt: Shape (N_pop, N_trees, 3). First population.
-        reference_xyt: Shape (N_ref, N_trees, 3). Second population.
-        lap_config: Configuration with algorithm in ('min_cost_row', 'min_cost_col').
-
-    Returns:
-        CuPy array of shape (N_pop, N_ref) with minimum distances.
-    """
-    assert lap_config.algorithm in ("min_cost_row", "min_cost_col")
-
-    N_pop, N_trees, _ = population_xyt.shape
-    N_ref, N_trees_ref, _ = reference_xyt.shape
-
-    assert N_trees == N_trees_ref, (
-        f"Number of trees mismatch: population has {N_trees}, reference has {N_trees_ref}"
-    )
-
-    transformations = [
-        (0.0, False),
-        (np.pi / 2, False),
-        (np.pi, False),
-        (3 * np.pi / 2, False),
-        (0.0, True),
-        (np.pi / 2, True),
-        (np.pi, True),
-        (3 * np.pi / 2, True),
-    ]
-
-    # Running minimum over transformations
-    min_distances = cp.full((N_pop, N_ref), cp.inf, dtype=dtype_cp)
-
-    for rot_angle, do_mirror in transformations:
-        # ---------------------------------------------------------
-        # Compute transformation + pairwise cost + assignment reduction
-        # ---------------------------------------------------------
-        cos_a = np.cos(rot_angle)
-        sin_a = np.sin(rot_angle)
-        
-        if lap_config.use_diversity_kernel and lap_config.algorithm == "min_cost_row":
-            # Use fused CUDA kernel (transformation applied inside kernel)
-            # Note: kernel only supports min_cost_row; for min_cost_col, fall through to CuPy path
-            import lap_batch
-            costs_this_transform = lap_batch.compute_diversity_shortcut_kernel(
-                population_xyt, reference_xyt, cos_a, sin_a, do_mirror
-            )
-        else:
-            raise Exception('Only implemented on ''full'' branch of repository')
-                    
-        min_distances = cp.minimum(min_distances, costs_this_transform)
-
-    return min_distances
-
 
 def compute_genetic_diversity_matrix(
     population_xyt: cp.ndarray,
@@ -1945,6 +2125,67 @@ def compute_genetic_diversity_matrix(
     n_transforms = 8 if transform else 1
     all_costs_array = all_assignment_costs.reshape(n_transforms, N_pop, N_ref)
     min_distances = all_costs_array.min(axis=0)  # (N_pop, N_ref)
+
+    return min_distances
+
+def compute_genetic_diversity_matrix_shortcut(
+    population_xyt: cp.ndarray,
+    reference_xyt: cp.ndarray,
+    lap_config=None,
+) -> cp.ndarray:
+    """Memory-lean shortcut for diversity computation.
+
+    Optimized version that avoids stacking all 8 transformed cost tensors.
+
+    Args:
+        population_xyt: Shape (N_pop, N_trees, 3). First population.
+        reference_xyt: Shape (N_ref, N_trees, 3). Second population.
+        lap_config: Configuration with algorithm in ('min_cost_row', 'min_cost_col').
+
+    Returns:
+        CuPy array of shape (N_pop, N_ref) with minimum distances.
+    """
+    assert lap_config.algorithm in ("min_cost_row", "min_cost_col")
+
+    N_pop, N_trees, _ = population_xyt.shape
+    N_ref, N_trees_ref, _ = reference_xyt.shape
+
+    assert N_trees == N_trees_ref, (
+        f"Number of trees mismatch: population has {N_trees}, reference has {N_trees_ref}"
+    )
+
+    transformations = [
+        (0.0, False),
+        (np.pi / 2, False),
+        (np.pi, False),
+        (3 * np.pi / 2, False),
+        (0.0, True),
+        (np.pi / 2, True),
+        (np.pi, True),
+        (3 * np.pi / 2, True),
+    ]
+
+    # Running minimum over transformations
+    min_distances = cp.full((N_pop, N_ref), cp.inf, dtype=dtype_cp)
+
+    for rot_angle, do_mirror in transformations:
+        # ---------------------------------------------------------
+        # Compute transformation + pairwise cost + assignment reduction
+        # ---------------------------------------------------------
+        cos_a = np.cos(rot_angle)
+        sin_a = np.sin(rot_angle)
+        
+        if lap_config.use_diversity_kernel and lap_config.algorithm == "min_cost_row":
+            # Use fused CUDA kernel (transformation applied inside kernel)
+            # Note: kernel only supports min_cost_row; for min_cost_col, fall through to CuPy path
+            import lap_batch
+            costs_this_transform = lap_batch.compute_diversity_shortcut_kernel(
+                population_xyt, reference_xyt, cos_a, sin_a, do_mirror
+            )
+        else:
+            raise Exception('Only implemented on ''full'' branch of repository')
+                    
+        min_distances = cp.minimum(min_distances, costs_this_transform)
 
     return min_distances
 
