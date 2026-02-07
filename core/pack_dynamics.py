@@ -23,9 +23,14 @@ class OptimizerBFGS(kgs.BaseClass):
     # Configuration    
     track_cost = False  # Record cost history
     plot_cost = False  # Plot cost history at end
+    plot_interval = None  # Plot every N iterations (None = no plotting)
+    store_figures = False  # Store figures in a list instead of displaying them
 
     # Hyperparameters
     cost = None
+    
+    # Storage for figures (when store_figures=True)
+    _stored_figures:list = field(default_factory=list, init=False)
     n_iterations = 100
     history_size = 3
     max_step = 0.01
@@ -85,6 +90,18 @@ class OptimizerBFGS(kgs.BaseClass):
 
             if self.track_cost:
                 cost_history.append(tmp_cost[:N].get())
+            
+            # Plot during optimization if plot_interval is set
+            if self.plot_interval is not None and counter % self.plot_interval == 0:
+                fig, ax = plt.subplots(figsize=(8, 8))
+                pack_vis_sol.pack_vis_sol(sol_tmp, solution_idx=0, ax=ax, margin_factor = 0.03)
+                #ax.set_title(f'Iteration: {counter}, Cost: {tmp_cost[0].get():.6f}')
+                plt.axis([-3.1,3.1,-3.1,3.1])
+                plt.axis(False)
+                if self.store_figures:
+                    self._stored_figures.append(fig)
+                else:
+                    plt.show()
                 
             res = cp.zeros_like(tmp_x[:N,:], dtype=kgs.dtype_cp)
             res[:,:N_split] = tmp_grad[:N, :].reshape(sol_tmp.N_solutions,-1)
