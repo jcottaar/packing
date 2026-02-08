@@ -53,7 +53,7 @@ def _iter_geoms(geom):
         raise TypeError(f"Expected Polygon or MultiPolygon, got {type(geom)}")
 
 
-def _plot_polygons(polygons, ax, color_indices=None, thetas=None, alpha=1.0):
+def _plot_polygons(polygons, ax, color_indices=None, thetas=None, alpha=1.0, facecolors=None):
     """
     Plot a list of Shapely polygons.
     Overlapping regions are highlighted in black.
@@ -72,6 +72,9 @@ def _plot_polygons(polygons, ax, color_indices=None, thetas=None, alpha=1.0):
     alpha : float, optional
         Transparency level for polygons (0.0 = fully transparent, 1.0 = fully opaque)
         Default: 1.0
+    facecolors : list of color specs, optional
+        If provided, facecolors[i] is directly used as the facecolor for polygon i.
+        Takes precedence over all other coloring options.
     """
     # Flatten any MultiPolygons
     flat_polys = []
@@ -88,8 +91,11 @@ def _plot_polygons(polygons, ax, color_indices=None, thetas=None, alpha=1.0):
     # Draw base polygons (pastel, no edges)
     for i, poly in enumerate(flat_polys):
         x, y = poly.exterior.xy
-        # Prefer rotation-based coloring if available.
-        if thetas is not None:
+        # Prefer explicit facecolors if provided.
+        if facecolors is not None:
+            facecolor = facecolors[i]
+        # Then rotation-based coloring if available.
+        elif thetas is not None:
             facecolor = _rotation_color(thetas[i])
         # Otherwise use color index if provided, else use sequential coloring.
         elif color_indices is not None:
@@ -293,6 +299,7 @@ def pack_vis_sol(
     plot_alt_unit_cells=False,
     alt_cell_search_range=2,
     max_alt_unit_cells=32,
+    facecolors=None,
 ):
     """
     Visualize a solution from a SolutionCollection.
@@ -319,6 +326,9 @@ def pack_vis_sol(
         unimodular transformations when searching for alternative cells. Default: 2
     max_alt_unit_cells : int, optional
         Limit on how many alternative cells to draw to avoid clutter. Default: 32
+    facecolors : list of color specs, optional
+        If provided, facecolors[i] is directly used as the facecolor for tree i.
+        Takes precedence over rotation-based coloring. Default: None
 
     Returns
     -------
@@ -352,7 +362,7 @@ def pack_vis_sol(
         ax.add_patch(patch)
 
         # Plot the trees
-        _plot_polygons(trees, ax=ax, thetas=thetas, alpha=alpha)
+        _plot_polygons(trees, ax=ax, thetas=thetas, alpha=alpha, facecolors=facecolors)
 
         # Set plot limits based on both square AND trees to ensure all are visible
         square_bounds = square.bounds  # (minx, miny, maxx, maxy)
@@ -412,7 +422,7 @@ def pack_vis_sol(
                         bounds_trees.append(translated_tree)
 
         # Plot all tiled trees with rotation-based colors
-        _plot_polygons(all_trees, ax=ax, thetas=all_thetas, alpha=alpha)
+        _plot_polygons(all_trees, ax=ax, thetas=all_thetas, alpha=alpha, facecolors=facecolors)
 
         # Draw the unit cell outline (centered at origin)
         # Unit cell vertices: origin, a, a+b, b
@@ -490,7 +500,7 @@ def pack_vis_sol(
 
     else:
         # Generic SolutionCollection: just plot trees
-        _plot_polygons(trees, ax=ax, thetas=thetas, alpha=alpha)
+        _plot_polygons(trees, ax=ax, thetas=thetas, alpha=alpha, facecolors=facecolors)
 
         # Compute bounds from trees
         all_bounds = [tree.bounds for tree in trees]

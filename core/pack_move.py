@@ -295,6 +295,7 @@ class Twist(Move):
     # Twist trees around a center. Angle of twist decreases linearly with distance from center
     min_radius: float = field(init=True, default=0.5)
     max_radius: float = field(init=True, default=2.)
+    force_center: bool = field(init=True, default=False) # if True, force center to be solution center
     def _do_move_vec(self, population:'Population', inds_to_do:cp.ndarray, mate_sol:kgs.SolutionCollection,
                      inds_mate:cp.ndarray, generator:cp.random.Generator):
         """Vectorized version: twist trees around centers in multiple individuals."""
@@ -310,6 +311,9 @@ class Twist(Move):
         #center_x_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 1])[:, cp.newaxis]  # (N_moves, 1)
         #center_y_gpu = (generator.uniform(-h_sizes / 2, h_sizes / 2) + h_params[:, 2])[:, cp.newaxis]  # (N_moves, 1)
         center_x_gpu, center_y_gpu = population.genotype.generate_move_centers(None, inds_to_do, generator)
+        if self.force_center:
+            center_x_gpu*=0
+            center_y_gpu*=0
         center_x_gpu = center_x_gpu[:, cp.newaxis]  # (N_moves, 1)
         center_y_gpu = center_y_gpu[:, cp.newaxis]  # (N_moves, 1)
         max_twist_angle_gpu = generator.uniform(-cp.pi, cp.pi, size=N_moves)[:, cp.newaxis]  # (N_moves, 1)
@@ -351,7 +355,7 @@ class Crossover(Move):
     min_N_trees: int = field(init=True, default=2) 
     max_N_trees_ratio: float = field(init=True, default=0.5) # to be multiplied by N_trees
     simple_mate_location: bool = field(init=True, default=True)
-
+    enable_augmentation: bool = field(init=True, default=True)
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
         """Fully vectorized version: crossover trees from mates into multiple individuals."""
@@ -380,6 +384,9 @@ class Crossover(Move):
         n_trees_to_replace_all = generator.integers(min_trees, max_trees + 1, size=N_moves)
         rotation_choice_all = generator.integers(0, 4, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
+        if not self.enable_augmentation:
+            rotation_choice_all = cp.zeros(N_moves, dtype=cp.int32)
+            do_mirror_all = cp.zeros(N_moves, dtype=bool)
 
         # Generate mate offsets
         if self.simple_mate_location:
@@ -401,6 +408,9 @@ class Crossover(Move):
             # CuPy's generator doesn't have choice, use random binary values
             sign_x = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
             sign_y = generator.integers(0, 2, size=N_moves) * 2 - 1  # 0 or 1 -> -1 or 1
+            if not self.enable_augmentation:
+                sign_x = cp.ones(N_moves, dtype=cp.int32)
+                sign_y = cp.ones(N_moves, dtype=cp.int32)
             mate_h_sizes = mate_h_params[:, 0]            
             mate_offset_x_all = cp.abs(center_x_all - h_params[:, 1]) * (mate_h_sizes / h_sizes) * sign_x
             mate_offset_y_all = cp.abs(center_y_all - h_params[:, 2]) * (mate_h_sizes / h_sizes) * sign_y
@@ -592,6 +602,7 @@ class CrossoverStripe(Move):
     decouple_mate_location: bool = field(init=True, default=False)
     use_edge_clearance_when_decoupled: bool = field(init=True, default=True)
     do_90_rotation: bool = field(init=True, default=True)
+    enable_augmentation: bool = field(init=True, default=True)
 
     def _do_move_vec(self, population: 'Population', inds_to_do: cp.ndarray, mate_sol: kgs.SolutionCollection,
                      inds_mate: cp.ndarray, generator: cp.random.Generator):
@@ -610,6 +621,9 @@ class CrossoverStripe(Move):
         else:
             rotation_choice_all = 2*generator.integers(0, 2, size=N_moves)
         do_mirror_all = generator.integers(0, 2, size=N_moves) == 1
+        if not self.enable_augmentation:
+            rotation_choice_all[:] = 0
+            do_mirror_all[:] = False
 
         # Gather boundary parameters for both parents involved in the move
         h_params = new_h[inds_to_do]
